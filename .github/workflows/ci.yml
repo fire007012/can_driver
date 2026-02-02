@@ -1,4 +1,4 @@
-name: CI (ROS Noetic)
+name: CI (ROS Noetic, single package repo)
 
 on:
   push:
@@ -7,51 +7,39 @@ on:
 jobs:
   build-and-test:
     runs-on: ubuntu-latest
-    # Use ROS Noetic container to ensure compatible environment (Ubuntu 20.04)
     container:
       image: osrf/ros:noetic-desktop-full
     env:
       CATKIN_WS: /root/catkin_ws
+      PKG_NAME: can_driver   # 如果仓库不是 can_driver，请改为你的包名
     steps:
       - name: Checkout
         uses: actions/checkout@v4
 
-      - name: Install build dependencies
+      - name: Install dependencies
         shell: bash
         run: |
           set -eux
           apt-get update
-          # basic tools
           apt-get install -y --no-install-recommends \
-            build-essential cmake git curl gnupg lsb-release \
-            python3-pip python3-vcstool python3-rosdep \
-            ros-noetic-catkin ros-noetic-rosbash \
-            ros-noetic-rosconsole ros-noetic-rostest \
-            ros-noetic-socketcan-interface
+            build-essential cmake python3-rosdep \
+            ros-noetic-catkin ros-noetic-rostest ros-noetic-socketcan-interface
           rm -rf /var/lib/apt/lists/*
 
-      - name: Setup workspace
+      - name: Setup catkin workspace and place package
         shell: bash
         run: |
           set -eux
           mkdir -p "$CATKIN_WS/src"
-          # Move repository contents into workspace src
-          shopt -s dotglob
-          mv * "$CATKIN_WS/src/"
-          # Source ROS env for subsequent steps
-          echo "source /opt/ros/noetic/setup.bash" >> $GITHUB_ENV
-
-      - name: rosdep install
-        shell: bash
-        run: |
-          set -eux
+          # 将当前仓库（单包）放入工作区 src/$PKG_NAME
+          rsync -a --delete ./ "$CATKIN_WS/src/$PKG_NAME/"
+          # 初始化 rosdep
           source /opt/ros/noetic/setup.bash
-          cd "$CATKIN_WS"
           rosdep init || true
           rosdep update
-          rosdep install --from-paths src --ignore-src -r -y
+          rosdep install --from-paths "$CATKIN_WS/src" --ignore-src -r -y
 
-      - name: Build (catkin_make)
+      - name: Build
         shell: bash
         run: |
           set -eux
@@ -65,12 +53,13 @@ jobs:
           set -eux
           source /opt/ros/noetic/setup.bash
           cd "$CATKIN_WS"
-          catkin_make run_tests -j2
+          catkin_make run_tests_${PKG_NAME} -j2
 
-      - name: Collect test results
+      - name: Collect results
         shell: bash
         run: |
           set -eux
           source /opt/ros/noetic/setup.bash
           cd "$CATKIN_WS"
-          catkin_test_results build || (cat build/*/test_results/*/*.xml; false)
+          # 汇总所有测试结果，确保失败时输出日志
+          catkin_test_results build || (cat build/*/test_results/*/*.xml || true; false)
