@@ -12,6 +12,8 @@ jobs:
     env:
       CATKIN_WS: /root/catkin_ws
       PKG_NAME: can_driver   # 如果仓库不是 can_driver，请改为你的包名
+      ROS_MASTER_URI: http://localhost:11311
+      ROS_HOSTNAME: localhost
     steps:
       - name: Checkout
         uses: actions/checkout@v4
