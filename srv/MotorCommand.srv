@@ -1,6 +1,12 @@
 uint16 motor_id
 uint8 command
 float64 value
+
+# command 常量
+uint8 CMD_ENABLE=0
+uint8 CMD_DISABLE=1
+uint8 CMD_STOP=2
+uint8 CMD_SET_MODE=3   # value: 0=position  1=velocity
 ---
 bool success
 string message
