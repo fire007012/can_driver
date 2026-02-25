@@ -54,6 +54,12 @@ bool CanDriverHW::init(ros::NodeHandle &nh, ros::NodeHandle &pnh)
         jc.canDevice   = static_cast<std::string>(jv["can_device"]);
         jc.controlMode = static_cast<std::string>(jv["control_mode"]);
 
+        // --- 可选换算系数（默认 1.0，不换算）---
+        if (jv.hasMember("position_scale"))
+            jc.positionScale = static_cast<double>(jv["position_scale"]);
+        if (jv.hasMember("velocity_scale"))
+            jc.velocityScale = static_cast<double>(jv["velocity_scale"]);
+
         // motor_id: YAML 中用十六进制字符串（"0x141"）或整数均可
         int rawId = 0;
         if (jv["motor_id"].getType() == XmlRpc::XmlRpcValue::TypeInt) {
@@ -187,8 +193,8 @@ void CanDriverHW::read(const ros::Time & /*time*/, const ros::Duration & /*perio
         auto *proto = getProtocol(jc.canDevice, jc.protocol);
         if (!proto) continue;
 
-        jc.pos = static_cast<double>(proto->getPosition(jc.motorId));
-        jc.vel = static_cast<double>(proto->getVelocity(jc.motorId));
+        jc.pos = static_cast<double>(proto->getPosition(jc.motorId)) * jc.positionScale;
+        jc.vel = static_cast<double>(proto->getVelocity(jc.motorId)) * jc.velocityScale;
         jc.eff = static_cast<double>(proto->getCurrent(jc.motorId));
     }
 }
@@ -203,9 +209,11 @@ void CanDriverHW::write(const ros::Time & /*time*/, const ros::Duration & /*peri
         if (!proto) continue;
 
         if (jc.controlMode == "velocity") {
-            proto->setVelocity(jc.motorId, static_cast<int32_t>(jc.velCmd));
+            proto->setVelocity(jc.motorId,
+                static_cast<int32_t>(jc.velCmd / jc.velocityScale));
         } else {
-            proto->setPosition(jc.motorId, static_cast<int32_t>(jc.posCmd));
+            proto->setPosition(jc.motorId,
+                static_cast<int32_t>(jc.posCmd / jc.positionScale));
         }
     }
 }

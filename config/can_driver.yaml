@@ -1,0 +1,95 @@
+# =============================================================================
+# can_driver_node 硬件参数配置
+# =============================================================================
+# 本文件由 ROS 参数服务器加载（见 launch/can_driver.launch），
+# 所有参数挂载在 /can_driver_node/ 命名空间下，
+# 节点通过 pnh.getParam("joints", ...) 读取。
+# =============================================================================
+
+can_driver_node:
+
+  # 控制循环频率（Hz）
+  # CanDriverHW::read() → controller_manager::update() → CanDriverHW::write()
+  # 每秒执行的次数。100 Hz = 10 ms 一个周期，适合大多数工业电机。
+  # 若 CAN 总线负载过高可适当降低（如 50 Hz）。
+  control_frequency: 100.0
+
+  # --------------------------------------------------------------------------
+  # joints：关节列表
+  # --------------------------------------------------------------------------
+  # 每个条目描述一个"逻辑关节"到"物理电机"的映射关系。
+  # ros_control 通过 joint name 与 URDF、MoveIt moveit_config 三处��齐，
+  # 因此 name 字段必须与 URDF 中的 <joint name="..."> 完全一致。
+  # --------------------------------------------------------------------------
+  joints:
+
+    # --- 底盘差速驱动轮 ---
+    # 由 diff_drive_controller/DiffDriveController 控制（见 ros_controllers.yaml）
+    # 使用 MT 协议（迈信 EP 系列），CAN ID 范围 0x141~0x1FF
+
+    - name: left_wheel          # 关节名，须与 URDF 一致
+      motor_id: 0x141           # 电机 CAN Node ID（十六进制），MT 协议范围 0x01~0xFF
+      protocol: MT              # 协议类型：MT = 迈信协议；PP = EyouCan(PP) 协议
+      can_device: can0          # 所在 CAN 总线接口名（对应 /sys/class/net/can0）
+      control_mode: velocity    # 控制模式：velocity = 速度环；position = 位置环
+
+    - name: right_wheel
+      motor_id: 0x142
+      protocol: MT
+      can_device: can0
+      control_mode: velocity
+
+    # --- 机械臂关节 ---
+    # 由 position_controllers/JointTrajectoryController 控制（见 ros_controllers.yaml）
+    # 使用 PP 协议（EyouCan），CAN ID 范围 0x00~0xFF（即 motor_id 本身）
+    # 注意：MT 和 PP 的响应帧 ID 范围不重叠，can0/can1 可各自混用两种协议
+
+    - name: rotary_table        # 转台（第 1 轴）
+      motor_id: 0x06
+      protocol: PP
+      can_device: can1
+      control_mode: position
+
+    - name: larger_arm          # 大臂（第 2 轴）
+      motor_id: 0x05
+      protocol: PP
+      can_device: can1
+      control_mode: position
+
+    - name: smaller_arm         # 小臂（第 3 轴）
+      motor_id: 0x13
+      protocol: PP
+      can_device: can1
+      control_mode: position
+
+    - name: wrist_x             # 腕部 X 轴（第 4 轴）
+      motor_id: 0x14
+      protocol: PP
+      can_device: can1
+      control_mode: position
+
+    - name: wrist_y             # 腕部 Y 轴（第 5 轴）
+      motor_id: 0x15
+      protocol: PP
+      can_device: can1
+      control_mode: position
+
+    - name: wrist_z             # 腕部 Z 轴（第 6 轴）
+      motor_id: 0x16
+      protocol: PP
+      can_device: can1
+      control_mode: position
+
+    - name: actuator            # 末端执行器（夹爪/工具）
+      motor_id: 0x17
+      protocol: PP
+      can_device: can1
+      control_mode: position
+
+    # --------------------------------------------------------------------------
+    # 可选字段（未填写时默认 1.0）：
+    #   position_scale: 1.0   # 协议原始位置值 → rad 的换算系数（raw * scale = rad）
+    #   velocity_scale: 1.0   # 协议原始速度值 → rad/s 的换算系数
+    # 示例：若电机上报单位为 0.01°，换算到 rad：
+    #   position_scale: 0.0001745329   # = 0.01 * π/180
+    # --------------------------------------------------------------------------
