@@ -14,10 +14,12 @@ find_package(catkin REQUIRED COMPONENTS
   actionlib_msgs
   controller_manager
   hardware_interface
+  joint_limits_interface
   message_generation
   roscpp
   socketcan_interface
   std_msgs
+  urdf
 )
 
 ## System dependencies are found with CMake's conventions
@@ -114,7 +116,7 @@ generate_messages(
 catkin_package(
   INCLUDE_DIRS include
   LIBRARIES can_driver_transport
-  CATKIN_DEPENDS actionlib actionlib_msgs controller_manager hardware_interface message_runtime roscpp socketcan_interface std_msgs
+  CATKIN_DEPENDS actionlib actionlib_msgs controller_manager hardware_interface joint_limits_interface message_runtime roscpp socketcan_interface std_msgs urdf
 )
 
 # Enable testing

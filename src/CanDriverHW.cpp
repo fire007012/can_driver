@@ -127,6 +127,59 @@ bool CanDriverHW::init(ros::NodeHandle &nh, ros::NodeHandle &pnh)
     registerInterface(&velIface_);
     registerInterface(&posIface_);
 
+    // --- 加载关节限位（从 URDF 和 rosparam）---
+    urdf::Model urdf;
+    bool urdfLoaded = urdf.initParam("robot_description");
+    if (!urdfLoaded) {
+        ROS_WARN("[CanDriverHW] Failed to load URDF from 'robot_description'. "
+                 "Joint limits will not be enforced.");
+    }
+
+    for (auto &jc : joints_) {
+        joint_limits_interface::JointLimits limits;
+        joint_limits_interface::SoftJointLimits soft_limits;
+        bool hasLimits = false;
+
+        // 1. 从 URDF 读取硬限位
+        if (urdfLoaded) {
+            urdf::JointConstSharedPtr urdfJoint = urdf.getJoint(jc.name);
+            if (urdfJoint) {
+                hasLimits = joint_limits_interface::getJointLimits(urdfJoint, limits);
+                if (hasLimits) {
+                    ROS_INFO("[CanDriverHW] Joint '%s': URDF limits [%.3f, %.3f] rad, "
+                             "max_vel=%.3f rad/s, max_effort=%.3f",
+                             jc.name.c_str(), limits.min_position, limits.max_position,
+                             limits.max_velocity, limits.max_effort);
+                }
+            } else {
+                ROS_WARN("[CanDriverHW] Joint '%s' not found in URDF.", jc.name.c_str());
+            }
+        }
+
+        // 2. 从 rosparam 读取软限位（可选，会覆盖 URDF）
+        if (joint_limits_interface::getJointLimits(jc.name, pnh, limits)) {
+            hasLimits = true;
+            ROS_INFO("[CanDriverHW] Joint '%s': rosparam overrides limits.", jc.name.c_str());
+        }
+        joint_limits_interface::getSoftJointLimits(jc.name, pnh, soft_limits);
+
+        // 3. 注册限位接口
+        if (hasLimits) {
+            if (jc.controlMode == "velocity") {
+                joint_limits_interface::VelocityJointSaturationHandle handle(
+                    velIface_.getHandle(jc.name), limits);
+                velLimitsIface_.registerHandle(handle);
+            } else {
+                joint_limits_interface::PositionJointSaturationHandle handle(
+                    posIface_.getHandle(jc.name), limits);
+                posLimitsIface_.registerHandle(handle);
+            }
+        } else {
+            ROS_WARN("[CanDriverHW] Joint '%s': no limits found, commands will not be clamped.",
+                     jc.name.c_str());
+        }
+    }
+
     // --- 启动电机状态刷新线程 ---
     // 按 (device, protocol) 分组收集 motor ID
     std::map<std::string, std::vector<MotorID>> mtIds, ppIds;
@@ -202,8 +255,19 @@ void CanDriverHW::read(const ros::Time & /*time*/, const ros::Duration & /*perio
 // ---------------------------------------------------------------------------
 // write
 // ---------------------------------------------------------------------------
-void CanDriverHW::write(const ros::Time & /*time*/, const ros::Duration & /*period*/)
+void CanDriverHW::write(const ros::Time & /*time*/, const ros::Duration &period)
 {
+#if SOFTWARE_LOOPBACK_MODE
+    // ========== 软件回环模式 ==========
+    // 不发送 CAN 帧，命令值已经在 write() 被 ros_control 写入 posCmd/velCmd
+    // read() 会直接读取这些值作为反馈
+#else
+    // ========== 真实 CAN 模式 ==========
+
+    // 应用关节限位（钳制命令值到安全范围）
+    posLimitsIface_.enforceLimits(period);
+    velLimitsIface_.enforceLimits(period);
+
     for (auto &jc : joints_) {
         auto *proto = getProtocol(jc.canDevice, jc.protocol);
         if (!proto) continue;
@@ -216,6 +280,7 @@ void CanDriverHW::write(const ros::Time & /*time*/, const ros::Duration & /*peri
                 static_cast<int32_t>(jc.posCmd / jc.positionScale));
         }
     }
+#endif
 }
 
 // ---------------------------------------------------------------------------
