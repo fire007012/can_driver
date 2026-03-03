@@ -3,6 +3,9 @@
 #include <ros/ros.h>
 #include <xmlrpcpp/XmlRpcValue.h>
 
+#include <cmath>
+#include <cstdint>
+#include <limits>
 #include <stdexcept>
 #include <string>
 
@@ -89,6 +92,16 @@ bool CanDriverHW::init(ros::NodeHandle &nh, ros::NodeHandle &pnh)
             jc.positionScale = static_cast<double>(jv["position_scale"]);
         if (jv.hasMember("velocity_scale"))
             jc.velocityScale = static_cast<double>(jv["velocity_scale"]);
+        if (!std::isfinite(jc.positionScale) || jc.positionScale <= 0.0) {
+            ROS_ERROR("[CanDriverHW] Joint '%s': invalid position_scale=%.9g (must be > 0).",
+                      jc.name.c_str(), jc.positionScale);
+            return false;
+        }
+        if (!std::isfinite(jc.velocityScale) || jc.velocityScale <= 0.0) {
+            ROS_ERROR("[CanDriverHW] Joint '%s': invalid velocity_scale=%.9g (must be > 0).",
+                      jc.name.c_str(), jc.velocityScale);
+            return false;
+        }
 
         // motor_id: YAML 中用十六进制字符串（"0x141"）或整数均可
         int rawId = 0;
@@ -346,8 +359,8 @@ void CanDriverHW::write(const ros::Time & /*time*/, const ros::Duration &period)
         CanType protocol{CanType::MT};
         std::string canDevice;
         std::string controlMode;
-        double cmdValue{0.0};
-        double scale{1.0};
+        int32_t rawValue{0};
+        bool valid{false};
     };
     std::vector<JointCommand> commands;
     commands.reserve(joints_.size());
@@ -360,18 +373,42 @@ void CanDriverHW::write(const ros::Time & /*time*/, const ros::Duration &period)
             cmd.protocol = jc.protocol;
             cmd.canDevice = jc.canDevice;
             cmd.controlMode = jc.controlMode;
-            if (jc.controlMode == "velocity") {
-                cmd.cmdValue = jc.hasDirectVelCmd ? jc.directVelCmd : jc.velCmd;
-                cmd.scale = jc.velocityScale;
+            const double cmdValue =
+                (jc.controlMode == "velocity")
+                    ? (jc.hasDirectVelCmd ? jc.directVelCmd : jc.velCmd)
+                    : (jc.hasDirectPosCmd ? jc.directPosCmd : jc.posCmd);
+            const double scale =
+                (jc.controlMode == "velocity") ? jc.velocityScale : jc.positionScale;
+            if (!std::isfinite(cmdValue) || !std::isfinite(scale) || scale <= 0.0) {
+                ROS_ERROR_THROTTLE(1.0,
+                                   "[CanDriverHW] Invalid command/scale for joint '%s' "
+                                   "(cmd=%g, scale=%g).",
+                                   jc.name.c_str(), cmdValue, scale);
+                cmd.valid = false;
             } else {
-                cmd.cmdValue = jc.hasDirectPosCmd ? jc.directPosCmd : jc.posCmd;
-                cmd.scale = jc.positionScale;
+                const double raw = cmdValue / scale;
+                if (!std::isfinite(raw)) {
+                    ROS_ERROR_THROTTLE(1.0,
+                                       "[CanDriverHW] Non-finite raw command for joint '%s' "
+                                       "(cmd=%g, scale=%g).",
+                                       jc.name.c_str(), cmdValue, scale);
+                    cmd.valid = false;
+                } else {
+                    const double clampedRaw = std::max(
+                        static_cast<double>(std::numeric_limits<int32_t>::min()),
+                        std::min(static_cast<double>(std::numeric_limits<int32_t>::max()), raw));
+                    cmd.rawValue = static_cast<int32_t>(std::llround(clampedRaw));
+                    cmd.valid = true;
+                }
             }
             commands.push_back(cmd);
         }
     }
 
     for (const auto &cmd : commands) {
+        if (!cmd.valid) {
+            continue;
+        }
         auto proto = getProtocol(cmd.canDevice, cmd.protocol);
         if (!proto) {
             continue;
@@ -383,9 +420,9 @@ void CanDriverHW::write(const ros::Time & /*time*/, const ros::Duration &period)
 
         std::lock_guard<std::mutex> devLock(*devMutex);
         if (cmd.controlMode == "velocity") {
-            proto->setVelocity(cmd.motorId, static_cast<int32_t>(cmd.cmdValue / cmd.scale));
+            proto->setVelocity(cmd.motorId, cmd.rawValue);
         } else {
-            proto->setPosition(cmd.motorId, static_cast<int32_t>(cmd.cmdValue / cmd.scale));
+            proto->setPosition(cmd.motorId, cmd.rawValue);
         }
     }
 #endif
@@ -493,9 +530,29 @@ void CanDriverHW::publishMotorStates(const ros::TimerEvent & /*e*/)
             can_driver::MotorState msg;
             msg.motor_id = static_cast<uint16_t>(jc.motorId);
             msg.name     = jc.name;
-            msg.position = static_cast<int32_t>(jc.pos);
-            msg.velocity = static_cast<int16_t>(jc.vel);
-            msg.current  = static_cast<int16_t>(jc.eff);
+
+            const auto clampToInt32 = [](double v) -> int32_t {
+                if (!std::isfinite(v)) {
+                    return 0;
+                }
+                const double c = std::max(
+                    static_cast<double>(std::numeric_limits<int32_t>::min()),
+                    std::min(static_cast<double>(std::numeric_limits<int32_t>::max()), v));
+                return static_cast<int32_t>(std::llround(c));
+            };
+            const auto clampToInt16 = [](double v) -> int16_t {
+                if (!std::isfinite(v)) {
+                    return 0;
+                }
+                const double c = std::max(
+                    static_cast<double>(std::numeric_limits<int16_t>::min()),
+                    std::min(static_cast<double>(std::numeric_limits<int16_t>::max()), v));
+                return static_cast<int16_t>(std::lround(c));
+            };
+
+            msg.position = clampToInt32(jc.pos);
+            msg.velocity = clampToInt16(jc.vel);
+            msg.current  = clampToInt16(jc.eff);
 
             if (jc.controlMode == "velocity")
                 msg.mode = can_driver::MotorState::MODE_VELOCITY;
