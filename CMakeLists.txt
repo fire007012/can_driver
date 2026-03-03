@@ -231,6 +231,26 @@ if(CATKIN_ENABLE_TESTING)
       )
     endif()
   endif()
+
+  catkin_add_gtest(test_safe_command
+    tests/test_safe_command.cpp
+  )
+  if(TARGET test_safe_command)
+    target_include_directories(test_safe_command PRIVATE include ${GTEST_INCLUDE_DIRS})
+    if (TARGET GTest::GTest)
+      target_link_libraries(test_safe_command
+        can_driver_transport
+        ${catkin_LIBRARIES}
+        GTest::GTest GTest::Main
+      )
+    else()
+      target_link_libraries(test_safe_command
+        can_driver_transport
+        ${catkin_LIBRARIES}
+        ${GTEST_LIBRARIES} ${GTEST_MAIN_LIBRARIES}
+      )
+    endif()
+  endif()
 endif()
 
 ## Add folders to be run by python nosetests
