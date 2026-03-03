@@ -12,6 +12,19 @@
 CanDriverHW::~CanDriverHW()
 {
     active_.store(false, std::memory_order_release);
+    stateTimer_.stop();
+
+    for (auto &kv : cmdVelSubs_) {
+        kv.second.shutdown();
+    }
+    for (auto &kv : cmdPosSubs_) {
+        kv.second.shutdown();
+    }
+    initSrv_.shutdown();
+    shutdownSrv_.shutdown();
+    recoverSrv_.shutdown();
+    motorCmdSrv_.shutdown();
+
     std::unique_lock<std::shared_mutex> lock(protocolMutex_);
 
     // 协议实例析构时会停止刷新线程，transport 析构时调用 shutdown()
@@ -230,6 +243,9 @@ bool CanDriverHW::init(ros::NodeHandle &nh, ros::NodeHandle &pnh)
         cmdVelSubs_[jc.name] = pnh.subscribe<std_msgs::Float64>(
             velTopic, 1,
             [this, idx](const std_msgs::Float64::ConstPtr &msg) {
+                if (!active_.load(std::memory_order_acquire)) {
+                    return;
+                }
                 std::lock_guard<std::mutex> lock(jointStateMutex_);
                 joints_[idx].directVelCmd = msg->data;
                 joints_[idx].hasDirectVelCmd = true;
@@ -238,6 +254,9 @@ bool CanDriverHW::init(ros::NodeHandle &nh, ros::NodeHandle &pnh)
         cmdPosSubs_[jc.name] = pnh.subscribe<std_msgs::Float64>(
             posTopic, 1,
             [this, idx](const std_msgs::Float64::ConstPtr &msg) {
+                if (!active_.load(std::memory_order_acquire)) {
+                    return;
+                }
                 std::lock_guard<std::mutex> lock(jointStateMutex_);
                 joints_[idx].directPosCmd = msg->data;
                 joints_[idx].hasDirectPosCmd = true;
@@ -462,6 +481,10 @@ std::shared_ptr<std::mutex> CanDriverHW::getDeviceMutex(const std::string &devic
 
 void CanDriverHW::publishMotorStates(const ros::TimerEvent & /*e*/)
 {
+    if (!active_.load(std::memory_order_acquire)) {
+        return;
+    }
+
     std::vector<can_driver::MotorState> msgs;
     msgs.reserve(joints_.size());
     {
@@ -494,7 +517,10 @@ bool CanDriverHW::onInit(can_driver::Init::Request &req,
                          can_driver::Init::Response &res)
 {
     res.success = initDevice(req.device, req.loopback);
-    active_.store(res.success, std::memory_order_release);
+    if (res.success) {
+        active_.store(true, std::memory_order_release);
+        stateTimer_.start();
+    }
     res.message = res.success ? "OK" : "Failed to initialize " + req.device;
     return true;
 }
@@ -503,6 +529,7 @@ bool CanDriverHW::onShutdown(can_driver::Shutdown::Request & /*req*/,
                               can_driver::Shutdown::Response &res)
 {
     active_.store(false, std::memory_order_release);
+    stateTimer_.stop();
     std::unique_lock<std::shared_mutex> lock(protocolMutex_);
 
     mtProtocols_.clear();
