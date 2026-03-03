@@ -145,6 +145,13 @@ private:
     // -----------------------------------------------------------------------
     // 内部辅助
     // -----------------------------------------------------------------------
+    void resetInternalState();
+    bool loadDirectCommandConfig(const ros::NodeHandle &pnh);
+    bool parseAndSetupJoints(const ros::NodeHandle &pnh);
+    void registerJointInterfaces();
+    void loadJointLimits(const ros::NodeHandle &pnh);
+    void startMotorRefreshThreads();
+    void setupRosComm(ros::NodeHandle &pnh);
 
     /**
      * @brief 初始化（或重新初始化）指定 CAN 通道。

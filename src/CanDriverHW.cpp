@@ -45,19 +45,62 @@ CanDriverHW::~CanDriverHW()
 bool CanDriverHW::init(ros::NodeHandle &nh, ros::NodeHandle &pnh)
 {
     (void)nh;
-    active_.store(false, std::memory_order_release);
-
-    {
-        std::unique_lock<std::shared_mutex> lock(protocolMutex_);
-        joints_.clear();
-        jointIndexByName_.clear();
-        mtProtocols_.clear();
-        eyouProtocols_.clear();
-        transports_.clear();
-        deviceCmdMutexes_.clear();
+    resetInternalState();
+    if (!loadDirectCommandConfig(pnh)) {
+        return false;
     }
+    if (!parseAndSetupJoints(pnh)) {
+        return false;
+    }
+    registerJointInterfaces();
+    loadJointLimits(pnh);
+    startMotorRefreshThreads();
+    setupRosComm(pnh);
 
-    // 读取 joints 列表
+    ROS_INFO("[CanDriverHW] Initialized with %zu joints on %zu CAN device(s).",
+             joints_.size(), transports_.size());
+    active_.store(true, std::memory_order_release);
+    return true;
+}
+
+void CanDriverHW::resetInternalState()
+{
+    active_.store(false, std::memory_order_release);
+    stateTimer_.stop();
+
+    for (auto &kv : cmdVelSubs_) {
+        kv.second.shutdown();
+    }
+    for (auto &kv : cmdPosSubs_) {
+        kv.second.shutdown();
+    }
+    cmdVelSubs_.clear();
+    cmdPosSubs_.clear();
+
+    std::unique_lock<std::shared_mutex> lock(protocolMutex_);
+    joints_.clear();
+    jointIndexByName_.clear();
+    mtProtocols_.clear();
+    eyouProtocols_.clear();
+    transports_.clear();
+    deviceCmdMutexes_.clear();
+}
+
+bool CanDriverHW::loadDirectCommandConfig(const ros::NodeHandle &pnh)
+{
+    if (!pnh.getParam("direct_cmd_timeout_sec", directCmdTimeoutSec_)) {
+        directCmdTimeoutSec_ = 0.5;
+    }
+    if (!std::isfinite(directCmdTimeoutSec_) || directCmdTimeoutSec_ < 0.0) {
+        ROS_WARN("[CanDriverHW] Invalid direct_cmd_timeout_sec=%.9g, fallback to 0.5s.",
+                 directCmdTimeoutSec_);
+        directCmdTimeoutSec_ = 0.5;
+    }
+    return true;
+}
+
+bool CanDriverHW::parseAndSetupJoints(const ros::NodeHandle &pnh)
+{
     XmlRpc::XmlRpcValue jointList;
     if (!pnh.getParam("joints", jointList)) {
         ROS_ERROR("[CanDriverHW] Parameter 'joints' not found under %s",
@@ -69,22 +112,10 @@ bool CanDriverHW::init(ros::NodeHandle &nh, ros::NodeHandle &pnh)
         return false;
     }
 
-    if (!pnh.getParam("direct_cmd_timeout_sec", directCmdTimeoutSec_)) {
-        directCmdTimeoutSec_ = 0.5;
-    }
-    if (!std::isfinite(directCmdTimeoutSec_) || directCmdTimeoutSec_ < 0.0) {
-        ROS_WARN("[CanDriverHW] Invalid direct_cmd_timeout_sec=%.9g, fallback to 0.5s.",
-                 directCmdTimeoutSec_);
-        directCmdTimeoutSec_ = 0.5;
-    }
-
-    // 遍历 joint 配置
     for (int i = 0; i < jointList.size(); ++i) {
         XmlRpc::XmlRpcValue &jv = jointList[i];
 
         JointConfig jc;
-
-        // --- 必填字段 ---
         if (!jv.hasMember("name") || !jv.hasMember("motor_id") ||
             !jv.hasMember("protocol") || !jv.hasMember("can_device") ||
             !jv.hasMember("control_mode")) {
@@ -97,11 +128,12 @@ bool CanDriverHW::init(ros::NodeHandle &nh, ros::NodeHandle &pnh)
         jc.canDevice   = static_cast<std::string>(jv["can_device"]);
         jc.controlMode = static_cast<std::string>(jv["control_mode"]);
 
-        // --- 可选换算系数（默认 1.0，不换算）---
-        if (jv.hasMember("position_scale"))
+        if (jv.hasMember("position_scale")) {
             jc.positionScale = static_cast<double>(jv["position_scale"]);
-        if (jv.hasMember("velocity_scale"))
+        }
+        if (jv.hasMember("velocity_scale")) {
             jc.velocityScale = static_cast<double>(jv["velocity_scale"]);
+        }
         if (!std::isfinite(jc.positionScale) || jc.positionScale <= 0.0) {
             ROS_ERROR("[CanDriverHW] Joint '%s': invalid position_scale=%.9g (must be > 0).",
                       jc.name.c_str(), jc.positionScale);
@@ -113,13 +145,11 @@ bool CanDriverHW::init(ros::NodeHandle &nh, ros::NodeHandle &pnh)
             return false;
         }
 
-        // motor_id: YAML 中用十六进制字符串（"0x141"）或整数均可
         int rawId = 0;
         const auto motorIdType = jv["motor_id"].getType();
         if (motorIdType == XmlRpc::XmlRpcValue::TypeInt) {
             rawId = static_cast<int>(jv["motor_id"]);
         } else if (motorIdType == XmlRpc::XmlRpcValue::TypeString) {
-            // 字符串形式 "0x141"
             try {
                 rawId = static_cast<int>(
                     std::stoul(static_cast<std::string>(jv["motor_id"]), nullptr, 0));
@@ -142,8 +172,7 @@ bool CanDriverHW::init(ros::NodeHandle &nh, ros::NodeHandle &pnh)
         }
         jc.motorId = static_cast<MotorID>(static_cast<uint16_t>(rawId));
 
-        // protocol: "MT" or "PP"
-        std::string protoStr = static_cast<std::string>(jv["protocol"]);
+        const std::string protoStr = static_cast<std::string>(jv["protocol"]);
         if (protoStr == "MT") {
             jc.protocol = CanType::MT;
         } else if (protoStr == "PP") {
@@ -157,7 +186,6 @@ bool CanDriverHW::init(ros::NodeHandle &nh, ros::NodeHandle &pnh)
         joints_.push_back(jc);
         jointIndexByName_[jc.name] = joints_.size() - 1;
 
-        // --- 按 can_device 按需创建传输和协议实例 ---
         if (transports_.find(jc.canDevice) == transports_.end()) {
             auto transport = std::make_shared<SocketCanController>();
             if (!transport->initialize(jc.canDevice)) {
@@ -181,7 +209,11 @@ bool CanDriverHW::init(ros::NodeHandle &nh, ros::NodeHandle &pnh)
         }
     }
 
-    // --- 注册 ros_control 接口 ---
+    return true;
+}
+
+void CanDriverHW::registerJointInterfaces()
+{
     for (auto &jc : joints_) {
         hardware_interface::JointStateHandle stateHandle(
             jc.name, &jc.pos, &jc.vel, &jc.eff);
@@ -199,10 +231,12 @@ bool CanDriverHW::init(ros::NodeHandle &nh, ros::NodeHandle &pnh)
     registerInterface(&jntStateIface_);
     registerInterface(&velIface_);
     registerInterface(&posIface_);
+}
 
-    // --- 加载关节限位（从 URDF 和 rosparam）---
+void CanDriverHW::loadJointLimits(const ros::NodeHandle &pnh)
+{
     urdf::Model urdf;
-    bool urdfLoaded = urdf.initParam("robot_description");
+    const bool urdfLoaded = urdf.initParam("robot_description");
     if (!urdfLoaded) {
         ROS_WARN("[CanDriverHW] Failed to load URDF from 'robot_description'. "
                  "Joint limits will not be enforced.");
@@ -213,7 +247,6 @@ bool CanDriverHW::init(ros::NodeHandle &nh, ros::NodeHandle &pnh)
         joint_limits_interface::SoftJointLimits soft_limits;
         bool hasLimits = false;
 
-        // 1. 从 URDF 读取硬限位
         if (urdfLoaded) {
             urdf::JointConstSharedPtr urdfJoint = urdf.getJoint(jc.name);
             if (urdfJoint) {
@@ -229,14 +262,12 @@ bool CanDriverHW::init(ros::NodeHandle &nh, ros::NodeHandle &pnh)
             }
         }
 
-        // 2. 从 rosparam 读取软限位（可选，会覆盖 URDF）
         if (joint_limits_interface::getJointLimits(jc.name, pnh, limits)) {
             hasLimits = true;
             ROS_INFO("[CanDriverHW] Joint '%s': rosparam overrides limits.", jc.name.c_str());
         }
         joint_limits_interface::getSoftJointLimits(jc.name, pnh, soft_limits);
 
-        // 3. 注册限位接口
         if (hasLimits) {
             jc.limits = limits;
             jc.hasLimits = true;
@@ -254,15 +285,18 @@ bool CanDriverHW::init(ros::NodeHandle &nh, ros::NodeHandle &pnh)
                      jc.name.c_str());
         }
     }
+}
 
-    // --- 启动电机状态刷新线程 ---
-    // 按 (device, protocol) 分组收集 motor ID
-    std::map<std::string, std::vector<MotorID>> mtIds, ppIds;
+void CanDriverHW::startMotorRefreshThreads()
+{
+    std::map<std::string, std::vector<MotorID>> mtIds;
+    std::map<std::string, std::vector<MotorID>> ppIds;
     for (const auto &jc : joints_) {
-        if (jc.protocol == CanType::MT)
+        if (jc.protocol == CanType::MT) {
             mtIds[jc.canDevice].push_back(jc.motorId);
-        else
+        } else {
             ppIds[jc.canDevice].push_back(jc.motorId);
+        }
     }
     for (auto &kv : mtIds) {
         mtProtocols_[kv.first]->initializeMotorRefresh(kv.second);
@@ -270,18 +304,18 @@ bool CanDriverHW::init(ros::NodeHandle &nh, ros::NodeHandle &pnh)
     for (auto &kv : ppIds) {
         eyouProtocols_[kv.first]->initializeMotorRefresh(kv.second);
     }
+}
 
-    // --- ROS Services（私有命名空间：~/...） ---
+void CanDriverHW::setupRosComm(ros::NodeHandle &pnh)
+{
     initSrv_     = pnh.advertiseService("init",          &CanDriverHW::onInit,         this);
     shutdownSrv_ = pnh.advertiseService("shutdown",      &CanDriverHW::onShutdown,     this);
     recoverSrv_  = pnh.advertiseService("recover",       &CanDriverHW::onRecover,      this);
     motorCmdSrv_ = pnh.advertiseService("motor_command", &CanDriverHW::onMotorCommand, this);
 
-    // --- 直接命令 subscribers（per joint） ---
     for (auto &jc : joints_) {
         const std::string velTopic = "motor/" + jc.name + "/cmd_velocity";
         const std::string posTopic = "motor/" + jc.name + "/cmd_position";
-
         const std::size_t idx = jointIndexByName_[jc.name];
         cmdVelSubs_[jc.name] = pnh.subscribe<std_msgs::Float64>(
             velTopic, 1,
@@ -308,15 +342,9 @@ bool CanDriverHW::init(ros::NodeHandle &nh, ros::NodeHandle &pnh)
             });
     }
 
-    // --- 电机状态发布定时器（10 Hz） ---
     motorStatesPub_ = pnh.advertise<can_driver::MotorState>("motor_states", 10);
     stateTimer_ = pnh.createTimer(ros::Duration(0.1),
-                                 &CanDriverHW::publishMotorStates, this);
-
-    ROS_INFO("[CanDriverHW] Initialized with %zu joints on %zu CAN device(s).",
-             joints_.size(), transports_.size());
-    active_.store(true, std::memory_order_release);
-    return true;
+                                  &CanDriverHW::publishMotorStates, this);
 }
 
 // ---------------------------------------------------------------------------
