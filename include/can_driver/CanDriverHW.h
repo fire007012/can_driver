@@ -27,8 +27,11 @@
 
 #include <map>
 #include <memory>
+#include <mutex>
+#include <shared_mutex>
 #include <string>
 #include <vector>
+#include <atomic>
 
 /**
  * @brief hardware_interface::RobotHW 实现，将 MtCan/EyouCan 协议层桥接到 ros_control。
@@ -81,9 +84,16 @@ private:
         double eff{0.0};
         double posCmd{0.0};
         double velCmd{0.0};
+
+        // direct topic 缓冲（由 write() 统一下发，避免回调线程直接打总线）
+        double directPosCmd{0.0};
+        double directVelCmd{0.0};
+        bool   hasDirectPosCmd{false};
+        bool   hasDirectVelCmd{false};
     };
 
     std::vector<JointConfig> joints_;
+    std::map<std::string, std::size_t> jointIndexByName_;
 
     // -----------------------------------------------------------------------
     // 传输 / 协议实例（按 can_device 分组）
@@ -91,6 +101,7 @@ private:
     std::map<std::string, std::shared_ptr<SocketCanController>> transports_;
     std::map<std::string, std::shared_ptr<MtCan>>               mtProtocols_;
     std::map<std::string, std::shared_ptr<EyouCan>>             eyouProtocols_;
+    std::map<std::string, std::shared_ptr<std::mutex>>          deviceCmdMutexes_;
 
     // -----------------------------------------------------------------------
     // ros_control 接口对象
@@ -118,6 +129,11 @@ private:
     ros::Publisher motorStatesPub_;
     ros::Timer     stateTimer_;
 
+    // 生命周期与并发控制
+    std::atomic<bool> active_{false};
+    mutable std::shared_mutex protocolMutex_;
+    mutable std::mutex        jointStateMutex_;
+
     // -----------------------------------------------------------------------
     // 内部辅助
     // -----------------------------------------------------------------------
@@ -131,7 +147,8 @@ private:
     /**
      * @brief 返回指定通道和协议类型对应的 CanProtocol 指针，不存在时返回 nullptr。
      */
-    CanProtocol *getProtocol(const std::string &device, CanType type);
+    std::shared_ptr<CanProtocol> getProtocol(const std::string &device, CanType type);
+    std::shared_ptr<std::mutex> getDeviceMutex(const std::string &device);
 
     /**
      * @brief 定时发布 ~/motor_states（10 Hz）。

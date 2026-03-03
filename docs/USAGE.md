@@ -211,3 +211,4 @@ rosservice call /controller_manager/list_controllers
 
 - `can_driver/docs/can_driver_single_motor_usage.md`：偏 UI/单轴实操
 - `can_driver/docs/can_driver_plan_reliability.md`：可靠性路线图
+- `can_driver/docs/concurrency_safety_report.md`：并发安全修复报告

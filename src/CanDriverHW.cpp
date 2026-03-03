@@ -11,11 +11,15 @@
 // ---------------------------------------------------------------------------
 CanDriverHW::~CanDriverHW()
 {
+    active_.store(false, std::memory_order_release);
+    std::unique_lock<std::shared_mutex> lock(protocolMutex_);
+
     // 协议实例析构时会停止刷新线程，transport 析构时调用 shutdown()
     // 清空顺序：先协议层，再传输层
     mtProtocols_.clear();
     eyouProtocols_.clear();
     transports_.clear();
+    deviceCmdMutexes_.clear();
 }
 
 // ---------------------------------------------------------------------------
@@ -24,6 +28,17 @@ CanDriverHW::~CanDriverHW()
 bool CanDriverHW::init(ros::NodeHandle &nh, ros::NodeHandle &pnh)
 {
     (void)nh;
+    active_.store(false, std::memory_order_release);
+
+    {
+        std::unique_lock<std::shared_mutex> lock(protocolMutex_);
+        joints_.clear();
+        jointIndexByName_.clear();
+        mtProtocols_.clear();
+        eyouProtocols_.clear();
+        transports_.clear();
+        deviceCmdMutexes_.clear();
+    }
 
     // 读取 joints 列表
     XmlRpc::XmlRpcValue jointList;
@@ -86,6 +101,7 @@ bool CanDriverHW::init(ros::NodeHandle &nh, ros::NodeHandle &pnh)
         }
 
         joints_.push_back(jc);
+        jointIndexByName_[jc.name] = joints_.size() - 1;
 
         // --- 按 can_device 按需创建传输和协议实例 ---
         if (transports_.find(jc.canDevice) == transports_.end()) {
@@ -96,6 +112,7 @@ bool CanDriverHW::init(ros::NodeHandle &nh, ros::NodeHandle &pnh)
                 return false;
             }
             transports_[jc.canDevice] = transport;
+            deviceCmdMutexes_[jc.canDevice] = std::make_shared<std::mutex>();
             ROS_INFO("[CanDriverHW] Opened CAN device '%s'.", jc.canDevice.c_str());
         }
 
@@ -209,23 +226,21 @@ bool CanDriverHW::init(ros::NodeHandle &nh, ros::NodeHandle &pnh)
         const std::string velTopic = "motor/" + jc.name + "/cmd_velocity";
         const std::string posTopic = "motor/" + jc.name + "/cmd_position";
 
-        // 捕获 motorId/device/protocol 供 lambda 使用
-        MotorID    mid   = jc.motorId;
-        CanType    proto = jc.protocol;
-        std::string dev  = jc.canDevice;
-
+        const std::size_t idx = jointIndexByName_[jc.name];
         cmdVelSubs_[jc.name] = pnh.subscribe<std_msgs::Float64>(
             velTopic, 1,
-            [this, mid, proto, dev](const std_msgs::Float64::ConstPtr &msg) {
-                auto *p = getProtocol(dev, proto);
-                if (p) p->setVelocity(mid, static_cast<int32_t>(msg->data));
+            [this, idx](const std_msgs::Float64::ConstPtr &msg) {
+                std::lock_guard<std::mutex> lock(jointStateMutex_);
+                joints_[idx].directVelCmd = msg->data;
+                joints_[idx].hasDirectVelCmd = true;
             });
 
         cmdPosSubs_[jc.name] = pnh.subscribe<std_msgs::Float64>(
             posTopic, 1,
-            [this, mid, proto, dev](const std_msgs::Float64::ConstPtr &msg) {
-                auto *p = getProtocol(dev, proto);
-                if (p) p->setPosition(mid, static_cast<int32_t>(msg->data));
+            [this, idx](const std_msgs::Float64::ConstPtr &msg) {
+                std::lock_guard<std::mutex> lock(jointStateMutex_);
+                joints_[idx].directPosCmd = msg->data;
+                joints_[idx].hasDirectPosCmd = true;
             });
     }
 
@@ -236,6 +251,7 @@ bool CanDriverHW::init(ros::NodeHandle &nh, ros::NodeHandle &pnh)
 
     ROS_INFO("[CanDriverHW] Initialized with %zu joints on %zu CAN device(s).",
              joints_.size(), transports_.size());
+    active_.store(true, std::memory_order_release);
     return true;
 }
 
@@ -244,13 +260,45 @@ bool CanDriverHW::init(ros::NodeHandle &nh, ros::NodeHandle &pnh)
 // ---------------------------------------------------------------------------
 void CanDriverHW::read(const ros::Time & /*time*/, const ros::Duration & /*period*/)
 {
-    for (auto &jc : joints_) {
-        auto *proto = getProtocol(jc.canDevice, jc.protocol);
-        if (!proto) continue;
+    if (!active_.load(std::memory_order_acquire)) {
+        return;
+    }
 
-        jc.pos = static_cast<double>(proto->getPosition(jc.motorId)) * jc.positionScale;
-        jc.vel = static_cast<double>(proto->getVelocity(jc.motorId)) * jc.velocityScale;
-        jc.eff = static_cast<double>(proto->getCurrent(jc.motorId));
+    struct JointSnapshot {
+        double pos{0.0};
+        double vel{0.0};
+        double eff{0.0};
+        bool   valid{false};
+    };
+    std::vector<JointSnapshot> snapshots(joints_.size());
+
+    for (std::size_t i = 0; i < joints_.size(); ++i) {
+        const auto &jc = joints_[i];
+        auto proto = getProtocol(jc.canDevice, jc.protocol);
+        if (!proto) {
+            continue;
+        }
+
+        auto devMutex = getDeviceMutex(jc.canDevice);
+        if (!devMutex) {
+            continue;
+        }
+
+        std::lock_guard<std::mutex> devLock(*devMutex);
+        snapshots[i].pos = static_cast<double>(proto->getPosition(jc.motorId)) * jc.positionScale;
+        snapshots[i].vel = static_cast<double>(proto->getVelocity(jc.motorId)) * jc.velocityScale;
+        snapshots[i].eff = static_cast<double>(proto->getCurrent(jc.motorId));
+        snapshots[i].valid = true;
+    }
+
+    std::lock_guard<std::mutex> lock(jointStateMutex_);
+    for (std::size_t i = 0; i < joints_.size(); ++i) {
+        if (!snapshots[i].valid) {
+            continue;
+        }
+        joints_[i].pos = snapshots[i].pos;
+        joints_[i].vel = snapshots[i].vel;
+        joints_[i].eff = snapshots[i].eff;
     }
 }
 
@@ -259,6 +307,10 @@ void CanDriverHW::read(const ros::Time & /*time*/, const ros::Duration & /*perio
 // ---------------------------------------------------------------------------
 void CanDriverHW::write(const ros::Time & /*time*/, const ros::Duration &period)
 {
+    if (!active_.load(std::memory_order_acquire)) {
+        return;
+    }
+
 #if SOFTWARE_LOOPBACK_MODE
     // ========== 软件回环模式 ==========
     // 不发送 CAN 帧，命令值已经在 write() 被 ros_control 写入 posCmd/velCmd
@@ -270,16 +322,51 @@ void CanDriverHW::write(const ros::Time & /*time*/, const ros::Duration &period)
     posLimitsIface_.enforceLimits(period);
     velLimitsIface_.enforceLimits(period);
 
-    for (auto &jc : joints_) {
-        auto *proto = getProtocol(jc.canDevice, jc.protocol);
-        if (!proto) continue;
+    struct JointCommand {
+        MotorID motorId{MotorID::LeftWheel};
+        CanType protocol{CanType::MT};
+        std::string canDevice;
+        std::string controlMode;
+        double cmdValue{0.0};
+        double scale{1.0};
+    };
+    std::vector<JointCommand> commands;
+    commands.reserve(joints_.size());
 
-        if (jc.controlMode == "velocity") {
-            proto->setVelocity(jc.motorId,
-                static_cast<int32_t>(jc.velCmd / jc.velocityScale));
+    {
+        std::lock_guard<std::mutex> lock(jointStateMutex_);
+        for (const auto &jc : joints_) {
+            JointCommand cmd;
+            cmd.motorId = jc.motorId;
+            cmd.protocol = jc.protocol;
+            cmd.canDevice = jc.canDevice;
+            cmd.controlMode = jc.controlMode;
+            if (jc.controlMode == "velocity") {
+                cmd.cmdValue = jc.hasDirectVelCmd ? jc.directVelCmd : jc.velCmd;
+                cmd.scale = jc.velocityScale;
+            } else {
+                cmd.cmdValue = jc.hasDirectPosCmd ? jc.directPosCmd : jc.posCmd;
+                cmd.scale = jc.positionScale;
+            }
+            commands.push_back(cmd);
+        }
+    }
+
+    for (const auto &cmd : commands) {
+        auto proto = getProtocol(cmd.canDevice, cmd.protocol);
+        if (!proto) {
+            continue;
+        }
+        auto devMutex = getDeviceMutex(cmd.canDevice);
+        if (!devMutex) {
+            continue;
+        }
+
+        std::lock_guard<std::mutex> devLock(*devMutex);
+        if (cmd.controlMode == "velocity") {
+            proto->setVelocity(cmd.motorId, static_cast<int32_t>(cmd.cmdValue / cmd.scale));
         } else {
-            proto->setPosition(jc.motorId,
-                static_cast<int32_t>(jc.posCmd / jc.positionScale));
+            proto->setPosition(cmd.motorId, static_cast<int32_t>(cmd.cmdValue / cmd.scale));
         }
     }
 #endif
@@ -290,55 +377,112 @@ void CanDriverHW::write(const ros::Time & /*time*/, const ros::Duration &period)
 // ---------------------------------------------------------------------------
 bool CanDriverHW::initDevice(const std::string &device, bool loopback)
 {
+    std::unique_lock<std::shared_mutex> lock(protocolMutex_);
+
+    std::shared_ptr<SocketCanController> transport;
     auto it = transports_.find(device);
     if (it != transports_.end()) {
+        transport = it->second;
         // 已存在：重新初始化
-        it->second->shutdown();
-        if (!it->second->initialize(device, loopback)) {
+        transport->shutdown();
+        if (!transport->initialize(device, loopback)) {
             ROS_ERROR("[CanDriverHW] Re-init of '%s' failed.", device.c_str());
             return false;
         }
-        ROS_INFO("[CanDriverHW] Re-initialized '%s'.", device.c_str());
-        return true;
+    } else {
+        // 不存在：新建（通常不走这路，init() 时已全部创建）
+        transport = std::make_shared<SocketCanController>();
+        if (!transport->initialize(device, loopback)) {
+            ROS_ERROR("[CanDriverHW] Failed to init '%s'.", device.c_str());
+            return false;
+        }
+        transports_[device] = transport;
     }
 
-    // 不存在：新建（通常不走这路，init() 时已全部创建）
-    auto transport = std::make_shared<SocketCanController>();
-    if (!transport->initialize(device, loopback)) {
-        ROS_ERROR("[CanDriverHW] Failed to init '%s'.", device.c_str());
-        return false;
+    if (deviceCmdMutexes_.find(device) == deviceCmdMutexes_.end()) {
+        deviceCmdMutexes_[device] = std::make_shared<std::mutex>();
     }
-    transports_[device] = transport;
-    ROS_INFO("[CanDriverHW] Opened '%s' (on-demand).", device.c_str());
+
+    bool hasMt = false;
+    bool hasPp = false;
+    std::vector<MotorID> mtIds;
+    std::vector<MotorID> ppIds;
+    for (const auto &jc : joints_) {
+        if (jc.canDevice != device) {
+            continue;
+        }
+        if (jc.protocol == CanType::MT) {
+            hasMt = true;
+            mtIds.push_back(jc.motorId);
+        } else {
+            hasPp = true;
+            ppIds.push_back(jc.motorId);
+        }
+    }
+    if (hasMt && mtProtocols_.find(device) == mtProtocols_.end()) {
+        mtProtocols_[device] = std::make_shared<MtCan>(transport);
+    }
+    if (hasPp && eyouProtocols_.find(device) == eyouProtocols_.end()) {
+        eyouProtocols_[device] = std::make_shared<EyouCan>(transport);
+    }
+    if (hasMt) {
+        mtProtocols_[device]->initializeMotorRefresh(mtIds);
+    }
+    if (hasPp) {
+        eyouProtocols_[device]->initializeMotorRefresh(ppIds);
+    }
+
+    ROS_INFO("[CanDriverHW] Initialized '%s'.", device.c_str());
     return true;
 }
 
-CanProtocol *CanDriverHW::getProtocol(const std::string &device, CanType type)
+std::shared_ptr<CanProtocol> CanDriverHW::getProtocol(const std::string &device, CanType type)
 {
+    std::shared_lock<std::shared_mutex> lock(protocolMutex_);
     if (type == CanType::MT) {
         auto it = mtProtocols_.find(device);
-        return (it != mtProtocols_.end()) ? it->second.get() : nullptr;
+        if (it != mtProtocols_.end()) {
+            return std::static_pointer_cast<CanProtocol>(it->second);
+        }
     } else {
         auto it = eyouProtocols_.find(device);
-        return (it != eyouProtocols_.end()) ? it->second.get() : nullptr;
+        if (it != eyouProtocols_.end()) {
+            return std::static_pointer_cast<CanProtocol>(it->second);
+        }
     }
+    return nullptr;
+}
+
+std::shared_ptr<std::mutex> CanDriverHW::getDeviceMutex(const std::string &device)
+{
+    std::shared_lock<std::shared_mutex> lock(protocolMutex_);
+    auto it = deviceCmdMutexes_.find(device);
+    return (it != deviceCmdMutexes_.end()) ? it->second : nullptr;
 }
 
 void CanDriverHW::publishMotorStates(const ros::TimerEvent & /*e*/)
 {
-    for (const auto &jc : joints_) {
-        can_driver::MotorState msg;
-        msg.motor_id = static_cast<uint16_t>(jc.motorId);
-        msg.name     = jc.name;
-        msg.position = static_cast<int32_t>(jc.pos);
-        msg.velocity = static_cast<int16_t>(jc.vel);
-        msg.current  = static_cast<int16_t>(jc.eff);
+    std::vector<can_driver::MotorState> msgs;
+    msgs.reserve(joints_.size());
+    {
+        std::lock_guard<std::mutex> lock(jointStateMutex_);
+        for (const auto &jc : joints_) {
+            can_driver::MotorState msg;
+            msg.motor_id = static_cast<uint16_t>(jc.motorId);
+            msg.name     = jc.name;
+            msg.position = static_cast<int32_t>(jc.pos);
+            msg.velocity = static_cast<int16_t>(jc.vel);
+            msg.current  = static_cast<int16_t>(jc.eff);
 
-        if (jc.controlMode == "velocity")
-            msg.mode = can_driver::MotorState::MODE_VELOCITY;
-        else
-            msg.mode = can_driver::MotorState::MODE_POSITION;
+            if (jc.controlMode == "velocity")
+                msg.mode = can_driver::MotorState::MODE_VELOCITY;
+            else
+                msg.mode = can_driver::MotorState::MODE_POSITION;
 
+            msgs.push_back(msg);
+        }
+    }
+    for (const auto &msg : msgs) {
         motorStatesPub_.publish(msg);
     }
 }
@@ -350,6 +494,7 @@ bool CanDriverHW::onInit(can_driver::Init::Request &req,
                          can_driver::Init::Response &res)
 {
     res.success = initDevice(req.device, req.loopback);
+    active_.store(res.success, std::memory_order_release);
     res.message = res.success ? "OK" : "Failed to initialize " + req.device;
     return true;
 }
@@ -357,12 +502,25 @@ bool CanDriverHW::onInit(can_driver::Init::Request &req,
 bool CanDriverHW::onShutdown(can_driver::Shutdown::Request & /*req*/,
                               can_driver::Shutdown::Response &res)
 {
+    active_.store(false, std::memory_order_release);
+    std::unique_lock<std::shared_mutex> lock(protocolMutex_);
+
     mtProtocols_.clear();
     eyouProtocols_.clear();
     for (auto &kv : transports_) {
         kv.second->shutdown();
     }
     transports_.clear();
+    deviceCmdMutexes_.clear();
+
+    {
+        std::lock_guard<std::mutex> stateLock(jointStateMutex_);
+        for (auto &jc : joints_) {
+            jc.hasDirectPosCmd = false;
+            jc.hasDirectVelCmd = false;
+        }
+    }
+
     res.success = true;
     res.message = "All CAN devices shut down.";
     ROS_INFO("[CanDriverHW] All devices shut down.");
@@ -372,13 +530,21 @@ bool CanDriverHW::onShutdown(can_driver::Shutdown::Request & /*req*/,
 bool CanDriverHW::onRecover(can_driver::Recover::Request &req,
                              can_driver::Recover::Response &res)
 {
+    if (!active_.load(std::memory_order_acquire)) {
+        res.success = false;
+        res.message = "Driver inactive.";
+        return true;
+    }
+
     // 简单实现：对匹配的电机重新使能
     bool found = false;
     for (const auto &jc : joints_) {
         if (req.motor_id == 0 ||
             static_cast<uint16_t>(jc.motorId) == req.motor_id) {
-            auto *proto = getProtocol(jc.canDevice, jc.protocol);
-            if (proto) {
+            auto proto = getProtocol(jc.canDevice, jc.protocol);
+            auto devMutex = getDeviceMutex(jc.canDevice);
+            if (proto && devMutex) {
+                std::lock_guard<std::mutex> devLock(*devMutex);
                 proto->Enable(jc.motorId);
                 found = true;
             }
@@ -392,27 +558,56 @@ bool CanDriverHW::onRecover(can_driver::Recover::Request &req,
 bool CanDriverHW::onMotorCommand(can_driver::MotorCommand::Request &req,
                                   can_driver::MotorCommand::Response &res)
 {
+    if (!active_.load(std::memory_order_acquire)) {
+        res.success = false;
+        res.message = "Driver inactive.";
+        return true;
+    }
+
     for (const auto &jc : joints_) {
         if (static_cast<uint16_t>(jc.motorId) != req.motor_id) continue;
 
-        auto *proto = getProtocol(jc.canDevice, jc.protocol);
-        if (!proto) {
+        auto proto = getProtocol(jc.canDevice, jc.protocol);
+        auto devMutex = getDeviceMutex(jc.canDevice);
+        if (!proto || !devMutex) {
             res.success = false;
             res.message = "Protocol not available.";
             return true;
         }
 
+        std::lock_guard<std::mutex> devLock(*devMutex);
         switch (req.command) {
         case can_driver::MotorCommand::Request::CMD_ENABLE:
             proto->Enable(jc.motorId);
             break;
         case can_driver::MotorCommand::Request::CMD_DISABLE:
             proto->Disable(jc.motorId);
+            {
+                std::lock_guard<std::mutex> stateLock(jointStateMutex_);
+                auto it = jointIndexByName_.find(jc.name);
+                if (it != jointIndexByName_.end()) {
+                    joints_[it->second].hasDirectPosCmd = false;
+                    joints_[it->second].hasDirectVelCmd = false;
+                }
+            }
             break;
         case can_driver::MotorCommand::Request::CMD_STOP:
             proto->Stop(jc.motorId);
+            {
+                std::lock_guard<std::mutex> stateLock(jointStateMutex_);
+                auto it = jointIndexByName_.find(jc.name);
+                if (it != jointIndexByName_.end()) {
+                    joints_[it->second].hasDirectPosCmd = false;
+                    joints_[it->second].hasDirectVelCmd = false;
+                }
+            }
             break;
         case can_driver::MotorCommand::Request::CMD_SET_MODE: {
+            if (req.value != 0.0 && req.value != 1.0) {
+                res.success = false;
+                res.message = "CMD_SET_MODE value must be 0 or 1.";
+                return true;
+            }
             auto mode = (req.value == 0.0)
                             ? CanProtocol::MotorMode::Position
                             : CanProtocol::MotorMode::Velocity;
