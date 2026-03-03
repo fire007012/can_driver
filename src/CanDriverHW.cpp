@@ -47,10 +47,11 @@ bool CanDriverHW::init(ros::NodeHandle &nh, ros::NodeHandle &pnh)
 {
     (void)nh;
     resetInternalState();
-    if (!loadDirectCommandConfig(pnh)) {
+    if (!loadRuntimeParams(pnh)) {
         return false;
     }
     if (!parseAndSetupJoints(pnh)) {
+        resetInternalState();
         return false;
     }
     registerJointInterfaces();
@@ -81,13 +82,16 @@ void CanDriverHW::resetInternalState()
     std::unique_lock<std::shared_mutex> lock(protocolMutex_);
     joints_.clear();
     jointIndexByName_.clear();
+    jointGroups_.clear();
+    rawCommandBuffer_.clear();
+    commandValidBuffer_.clear();
     mtProtocols_.clear();
     eyouProtocols_.clear();
     transports_.clear();
     deviceCmdMutexes_.clear();
 }
 
-bool CanDriverHW::loadDirectCommandConfig(const ros::NodeHandle &pnh)
+bool CanDriverHW::loadRuntimeParams(const ros::NodeHandle &pnh)
 {
     if (!pnh.getParam("direct_cmd_timeout_sec", directCmdTimeoutSec_)) {
         directCmdTimeoutSec_ = 0.5;
@@ -228,7 +232,28 @@ bool CanDriverHW::parseAndSetupJoints(const ros::NodeHandle &pnh)
         }
     }
 
+    rebuildJointGroups();
+    rawCommandBuffer_.assign(joints_.size(), 0);
+    commandValidBuffer_.assign(joints_.size(), 0);
     return true;
+}
+
+void CanDriverHW::rebuildJointGroups()
+{
+    std::map<std::pair<std::string, CanType>, std::vector<std::size_t>> groupedIndices;
+    for (std::size_t i = 0; i < joints_.size(); ++i) {
+        groupedIndices[{joints_[i].canDevice, joints_[i].protocol}].push_back(i);
+    }
+
+    jointGroups_.clear();
+    jointGroups_.reserve(groupedIndices.size());
+    for (const auto &entry : groupedIndices) {
+        DeviceProtocolGroup group;
+        group.canDevice = entry.first.first;
+        group.protocol = entry.first.second;
+        group.jointIndices = entry.second;
+        jointGroups_.push_back(std::move(group));
+    }
 }
 
 void CanDriverHW::registerJointInterfaces()
@@ -418,14 +443,9 @@ void CanDriverHW::read(const ros::Time & /*time*/, const ros::Duration & /*perio
     };
     std::vector<JointSnapshot> snapshots(joints_.size());
 
-    std::map<std::pair<std::string, CanType>, std::vector<std::size_t>> groups;
-    for (std::size_t i = 0; i < joints_.size(); ++i) {
-        groups[{joints_[i].canDevice, joints_[i].protocol}].push_back(i);
-    }
-
-    for (const auto &group : groups) {
-        const std::string &device = group.first.first;
-        const CanType protocol = group.first.second;
+    for (const auto &group : jointGroups_) {
+        const std::string &device = group.canDevice;
+        const CanType protocol = group.protocol;
         auto proto = getProtocol(device, protocol);
         auto devMutex = getDeviceMutex(device);
         if (!proto || !devMutex) {
@@ -433,7 +453,7 @@ void CanDriverHW::read(const ros::Time & /*time*/, const ros::Duration & /*perio
         }
 
         std::lock_guard<std::mutex> devLock(*devMutex);
-        for (const std::size_t i : group.second) {
+        for (const std::size_t i : group.jointIndices) {
             const auto &jc = joints_[i];
             snapshots[i].pos = static_cast<double>(proto->getPosition(jc.motorId)) * jc.positionScale;
             snapshots[i].vel = static_cast<double>(proto->getVelocity(jc.motorId)) * jc.velocityScale;
@@ -473,17 +493,6 @@ void CanDriverHW::write(const ros::Time & /*time*/, const ros::Duration &period)
     posLimitsIface_.enforceLimits(period);
     velLimitsIface_.enforceLimits(period);
 
-    struct JointCommand {
-        MotorID motorId{MotorID::LeftWheel};
-        CanType protocol{CanType::MT};
-        std::string canDevice;
-        std::string controlMode;
-        int32_t rawValue{0};
-        bool valid{false};
-    };
-    std::vector<JointCommand> commands;
-    commands.reserve(joints_.size());
-
     {
         std::lock_guard<std::mutex> lock(jointStateMutex_);
         const ros::Time now = ros::Time::now();
@@ -501,12 +510,8 @@ void CanDriverHW::write(const ros::Time & /*time*/, const ros::Duration &period)
             return cmdValue;
         };
 
-        for (auto &jc : joints_) {
-            JointCommand cmd;
-            cmd.motorId = jc.motorId;
-            cmd.protocol = jc.protocol;
-            cmd.canDevice = jc.canDevice;
-            cmd.controlMode = jc.controlMode;
+        for (std::size_t i = 0; i < joints_.size(); ++i) {
+            auto &jc = joints_[i];
 
             bool useDirect = false;
             double cmdValue = 0.0;
@@ -541,22 +546,15 @@ void CanDriverHW::write(const ros::Time & /*time*/, const ros::Duration &period)
             cmdValue = clampWithJointLimits(jc, cmdValue);
             const double scale =
                 (jc.controlMode == "velocity") ? jc.velocityScale : jc.positionScale;
-            cmd.valid = can_driver::safe_command::scaleAndClampToInt32(
-                cmdValue, scale, jc.name, cmd.rawValue);
-            commands.push_back(cmd);
+            commandValidBuffer_[i] = static_cast<uint8_t>(
+                can_driver::safe_command::scaleAndClampToInt32(
+                    cmdValue, scale, jc.name, rawCommandBuffer_[i]));
         }
     }
 
-    std::map<std::pair<std::string, CanType>, std::vector<JointCommand>> commandGroups;
-    for (const auto &cmd : commands) {
-        if (cmd.valid) {
-            commandGroups[{cmd.canDevice, cmd.protocol}].push_back(cmd);
-        }
-    }
-
-    for (const auto &group : commandGroups) {
-        const std::string &device = group.first.first;
-        const CanType protocol = group.first.second;
+    for (const auto &group : jointGroups_) {
+        const std::string &device = group.canDevice;
+        const CanType protocol = group.protocol;
         auto transport = getTransport(device);
         if (!transport || !transport->isReady()) {
             ROS_WARN_THROTTLE(1.0, "[CanDriverHW] Device '%s' not ready, skip command write.",
@@ -570,16 +568,20 @@ void CanDriverHW::write(const ros::Time & /*time*/, const ros::Duration &period)
         }
 
         std::lock_guard<std::mutex> devLock(*devMutex);
-        for (const auto &cmd : group.second) {
+        for (const std::size_t idx : group.jointIndices) {
+            if (!commandValidBuffer_[idx]) {
+                continue;
+            }
+            const auto &jc = joints_[idx];
             try {
-                if (cmd.controlMode == "velocity") {
-                    if (!proto->setVelocity(cmd.motorId, cmd.rawValue)) {
+                if (jc.controlMode == "velocity") {
+                    if (!proto->setVelocity(jc.motorId, rawCommandBuffer_[idx])) {
                         ROS_WARN_THROTTLE(1.0,
                                           "[CanDriverHW] setVelocity rejected on '%s'.",
                                           device.c_str());
                     }
                 } else {
-                    if (!proto->setPosition(cmd.motorId, cmd.rawValue)) {
+                    if (!proto->setPosition(jc.motorId, rawCommandBuffer_[idx])) {
                         ROS_WARN_THROTTLE(1.0,
                                           "[CanDriverHW] setPosition rejected on '%s'.",
                                           device.c_str());

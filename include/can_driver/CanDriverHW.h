@@ -99,9 +99,17 @@ private:
         joint_limits_interface::JointLimits limits;
         bool hasLimits{false};
     };
+    struct DeviceProtocolGroup {
+        std::string canDevice;
+        CanType protocol{CanType::MT};
+        std::vector<std::size_t> jointIndices;
+    };
 
     std::deque<JointConfig> joints_;
     std::map<std::string, std::size_t> jointIndexByName_;
+    std::vector<DeviceProtocolGroup> jointGroups_;
+    std::vector<int32_t>             rawCommandBuffer_;
+    std::vector<uint8_t>             commandValidBuffer_;
 
     // -----------------------------------------------------------------------
     // 传输 / 协议实例（按 can_device 分组）
@@ -149,8 +157,9 @@ private:
     // 内部辅助
     // -----------------------------------------------------------------------
     void resetInternalState();
-    bool loadDirectCommandConfig(const ros::NodeHandle &pnh);
+    bool loadRuntimeParams(const ros::NodeHandle &pnh);
     bool parseAndSetupJoints(const ros::NodeHandle &pnh);
+    void rebuildJointGroups();
     void registerJointInterfaces();
     void loadJointLimits(const ros::NodeHandle &pnh);
     void startMotorRefreshThreads();

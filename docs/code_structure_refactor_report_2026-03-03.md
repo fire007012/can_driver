@@ -28,13 +28,14 @@
 
 ### 3.1 `init()` 流程重构（函数级拆分）
 
-提交：`8bbc2f8`
+提交：`8bbc2f8`（本次补充见最新提交）
 
 将原始 `init()` 的巨型流程拆为可读步骤函数：
 
 - `resetInternalState()`
-- `loadDirectCommandConfig(...)`
+- `loadRuntimeParams(...)`
 - `parseAndSetupJoints(...)`
+- `rebuildJointGroups(...)`
 - `registerJointInterfaces()`
 - `loadJointLimits(...)`
 - `startMotorRefreshThreads()`
@@ -45,6 +46,7 @@
 - `init()` 变为流程编排入口，启动步骤清晰
 - 降低定位初始化故障时的认知负担
 - 为后续独立模块文件拆分做铺垫
+- `parseAndSetupJoints(...)` 失败路径增加统一 `resetInternalState()` 回滚
 
 ### 3.2 统一电机操作执行模板
 
@@ -54,6 +56,14 @@
 
 - `executeOnMotor(...)`
 - `MotorOpStatus` 状态枚举
+
+当前 `MotorOpStatus` 取值：
+
+- `Ok`
+- `DeviceNotReady`
+- `ProtocolUnavailable`
+- `Rejected`
+- `Exception`
 
 并替换 `onRecover` 与 `onMotorCommand` 中重复逻辑。
 
@@ -101,6 +111,23 @@
 - 部署时无需改代码即可调节发布周期与直接命令队列长度
 - 参数校验与默认回退提升运行鲁棒性
 
+### 3.5 实时路径堆分配优化（热路径）
+
+提交：`a4a678a`
+
+改动：
+
+- `read()/write()` 不再每周期构建 `std::map` 分组，改为初始化阶段构建 `jointGroups_` 并复用
+- `write()` 不再每周期构造 `std::vector<JointCommand>` 与字符串拷贝
+- 命令缓冲改为成员复用：
+  - `rawCommandBuffer_`
+  - `commandValidBuffer_`
+
+效果：
+
+- 消除 `write()` 热路径中的字符串拷贝与容器临时分配
+- 降低 500Hz/1kHz 控制循环中的堆分配抖动风险
+
 ## 4. 文件影响清单
 
 - `include/can_driver/CanDriverHW.h`
@@ -127,6 +154,7 @@ catkin_make --pkg can_driver
 - service 重复模板抽取
 - 命令安全处理抽取为独立工具模块
 - 魔法数字参数化（部分）
+- 热路径动态分配优化（`read/write` 分组与命令缓冲复用）
 
 尚未完成（下一阶段）：
 
@@ -140,10 +168,33 @@ catkin_make --pkg can_driver
 - 本轮以“结构调整优先、行为保持”为原则，没有改变对外 service/topic 名称。
 - 新增参数均有默认值与非法值回退，不配置时可保持旧行为。
 - 由于仍在同一主类内进行部分组织，最终模块化边界尚未完全收敛；建议按下一阶段计划继续推进。
+- `init()` 当前仅在 `parseAndSetupJoints(...)` 失败时做显式回滚；后续若让更多步骤返回错误码，应统一接入同一回滚策略。
 
-## 8. 后续建议
+## 8. 与安全修复项关系
+
+| 安全项 | 状态 | 说明 | 提交 |
+|--------|------|------|------|
+| 直接命令绕过限位 | ✅ 已修复 | direct 命令在 `write()` 中同样执行限位钳制 | `19a23cf` |
+| 直接命令标志不自动清除 | ✅ 已修复 | 引入 `direct_cmd_timeout_sec`，超时后回退到 ros_control 命令 | `19a23cf` |
+
+## 9. SafeCommand 测试计划（细化）
+
+| 函数 | 用例 | 预期 |
+|------|------|------|
+| `scaleAndClampToInt32` | `cmd=100, scale=1.0` | 返回 `true`，输出 `100` |
+| `scaleAndClampToInt32` | `cmd=1e18, scale=1.0` | 返回 `true`，输出 `INT32_MAX` |
+| `scaleAndClampToInt32` | `cmd=-1e18, scale=1.0` | 返回 `true`，输出 `INT32_MIN` |
+| `scaleAndClampToInt32` | `cmd=NaN, scale=1.0` | 返回 `false` |
+| `scaleAndClampToInt32` | `cmd=Inf, scale=1.0` | 返回 `false` |
+| `scaleAndClampToInt32` | `cmd=1.0, scale=0.0` | 返回 `false` |
+| `scaleAndClampToInt32` | `cmd=1.0, scale=-1.0` | 返回 `false` |
+| `scaleAndClampToInt32` | `cmd=0.0, scale=1e-300` | 返回 `true`，输出 `0` |
+| `clampToInt16` | `40000.0` | `32767` |
+| `clampToInt16` | `-40000.0` | `-32768` |
+
+## 10. 后续建议
 
 1. 在下一轮将 `executeOnMotor` 与 protocol/transport 生命周期迁移到 `DeviceManager`。
 2. 提取 `JointConfig` 解析模块，降低 `CanDriverHW` 与 `XmlRpc` 的耦合。
-3. 为 `SafeCommand` 添加 GTest（NaN/Inf/极值/scale=0 场景）。
+3. 按“测试计划（第 9 节）”补齐 `SafeCommand` GTest 用例并接入 CI。
 4. 完成文件级拆分后，再评估实时循环中的日志与字符串构造成本。
