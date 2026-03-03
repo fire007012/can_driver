@@ -347,6 +347,41 @@ void CanDriverHW::setupRosComm(ros::NodeHandle &pnh)
                                   &CanDriverHW::publishMotorStates, this);
 }
 
+CanDriverHW::MotorOpStatus CanDriverHW::executeOnMotor(
+    const JointConfig &jc,
+    const std::function<bool(const std::shared_ptr<CanProtocol> &, MotorID)> &op,
+    const char *operationName)
+{
+    auto transport = getTransport(jc.canDevice);
+    if (!transport || !transport->isReady()) {
+        return MotorOpStatus::DeviceNotReady;
+    }
+
+    auto proto = getProtocol(jc.canDevice, jc.protocol);
+    auto devMutex = getDeviceMutex(jc.canDevice);
+    if (!proto || !devMutex) {
+        return MotorOpStatus::ProtocolUnavailable;
+    }
+
+    std::lock_guard<std::mutex> devLock(*devMutex);
+    try {
+        return op(proto, jc.motorId) ? MotorOpStatus::Ok : MotorOpStatus::Rejected;
+    } catch (const std::exception &e) {
+        ROS_ERROR("[CanDriverHW] %s failed on '%s' motor %u: %s",
+                  operationName,
+                  jc.canDevice.c_str(),
+                  static_cast<unsigned>(static_cast<uint16_t>(jc.motorId)),
+                  e.what());
+        return MotorOpStatus::Exception;
+    } catch (...) {
+        ROS_ERROR("[CanDriverHW] %s failed on '%s' motor %u (unknown exception).",
+                  operationName,
+                  jc.canDevice.c_str(),
+                  static_cast<unsigned>(static_cast<uint16_t>(jc.motorId)));
+        return MotorOpStatus::Exception;
+    }
+}
+
 // ---------------------------------------------------------------------------
 // read
 // ---------------------------------------------------------------------------
@@ -784,30 +819,13 @@ bool CanDriverHW::onRecover(can_driver::Recover::Request &req,
     bool found = false;
     for (const auto &jc : joints_) {
         if (recoverAll || static_cast<uint16_t>(jc.motorId) == req.motor_id) {
-            auto transport = getTransport(jc.canDevice);
-            if (!transport || !transport->isReady()) {
-                continue;
-            }
-            auto proto = getProtocol(jc.canDevice, jc.protocol);
-            auto devMutex = getDeviceMutex(jc.canDevice);
-            if (proto && devMutex) {
-                std::lock_guard<std::mutex> devLock(*devMutex);
-                try {
-                    if (!proto->Enable(jc.motorId)) {
-                        continue;
-                    }
-                } catch (const std::exception &e) {
-                    ROS_ERROR("[CanDriverHW] Recover failed on '%s' motor %u: %s",
-                              jc.canDevice.c_str(),
-                              static_cast<unsigned>(static_cast<uint16_t>(jc.motorId)),
-                              e.what());
-                    continue;
-                } catch (...) {
-                    ROS_ERROR("[CanDriverHW] Recover failed on '%s' motor %u (unknown exception).",
-                              jc.canDevice.c_str(),
-                              static_cast<unsigned>(static_cast<uint16_t>(jc.motorId)));
-                    continue;
-                }
+            const auto status = executeOnMotor(
+                jc,
+                [](const std::shared_ptr<CanProtocol> &proto, MotorID id) {
+                    return proto->Enable(id);
+                },
+                "Recover");
+            if (status == MotorOpStatus::Ok) {
                 found = true;
             }
         }
@@ -828,90 +846,98 @@ bool CanDriverHW::onMotorCommand(can_driver::MotorCommand::Request &req,
 
     for (const auto &jc : joints_) {
         if (static_cast<uint16_t>(jc.motorId) != req.motor_id) continue;
-
-        auto transport = getTransport(jc.canDevice);
-        if (!transport || !transport->isReady()) {
-            res.success = false;
-            res.message = "CAN device not ready.";
-            return true;
-        }
-
-        auto proto = getProtocol(jc.canDevice, jc.protocol);
-        auto devMutex = getDeviceMutex(jc.canDevice);
-        if (!proto || !devMutex) {
-            res.success = false;
-            res.message = "Protocol not available.";
-            return true;
-        }
-
-        std::lock_guard<std::mutex> devLock(*devMutex);
-        try {
-            switch (req.command) {
-            case can_driver::MotorCommand::Request::CMD_ENABLE:
-                if (!proto->Enable(jc.motorId)) {
-                    res.success = false;
-                    res.message = "Enable command rejected.";
-                    return true;
-                }
-                break;
-            case can_driver::MotorCommand::Request::CMD_DISABLE:
-                if (!proto->Disable(jc.motorId)) {
-                    res.success = false;
-                    res.message = "Disable command rejected.";
-                    return true;
-                }
-                {
-                    std::lock_guard<std::mutex> stateLock(jointStateMutex_);
-                    auto it = jointIndexByName_.find(jc.name);
-                    if (it != jointIndexByName_.end()) {
-                        joints_[it->second].hasDirectPosCmd = false;
-                        joints_[it->second].hasDirectVelCmd = false;
-                    }
-                }
-                break;
-            case can_driver::MotorCommand::Request::CMD_STOP:
-                if (!proto->Stop(jc.motorId)) {
-                    res.success = false;
-                    res.message = "Stop command rejected.";
-                    return true;
-                }
-                {
-                    std::lock_guard<std::mutex> stateLock(jointStateMutex_);
-                    auto it = jointIndexByName_.find(jc.name);
-                    if (it != jointIndexByName_.end()) {
-                        joints_[it->second].hasDirectPosCmd = false;
-                        joints_[it->second].hasDirectVelCmd = false;
-                    }
-                }
-                break;
-            case can_driver::MotorCommand::Request::CMD_SET_MODE: {
-                if (req.value != 0.0 && req.value != 1.0) {
-                    res.success = false;
-                    res.message = "CMD_SET_MODE value must be 0 or 1.";
-                    return true;
-                }
-                auto mode = (req.value == 0.0)
-                                ? CanProtocol::MotorMode::Position
-                                : CanProtocol::MotorMode::Velocity;
-                if (!proto->setMode(jc.motorId, mode)) {
-                    res.success = false;
-                    res.message = "Set mode command rejected.";
-                    return true;
-                }
-                break;
-            }
-            default:
+        auto handleFailure = [&res](MotorOpStatus status, const char *rejectedMsg) {
+            if (status == MotorOpStatus::DeviceNotReady) {
                 res.success = false;
-                res.message = "Unknown command.";
+                res.message = "CAN device not ready.";
+            } else if (status == MotorOpStatus::ProtocolUnavailable) {
+                res.success = false;
+                res.message = "Protocol not available.";
+            } else if (status == MotorOpStatus::Rejected) {
+                res.success = false;
+                res.message = rejectedMsg;
+            } else {
+                res.success = false;
+                res.message = "Command execution failed.";
+            }
+        };
+
+        switch (req.command) {
+        case can_driver::MotorCommand::Request::CMD_ENABLE: {
+            const auto status = executeOnMotor(
+                jc,
+                [](const std::shared_ptr<CanProtocol> &proto, MotorID id) {
+                    return proto->Enable(id);
+                },
+                "Enable");
+            if (status != MotorOpStatus::Ok) {
+                handleFailure(status, "Enable command rejected.");
                 return true;
             }
-        } catch (const std::exception &e) {
+            break;
+        }
+        case can_driver::MotorCommand::Request::CMD_DISABLE: {
+            const auto status = executeOnMotor(
+                jc,
+                [](const std::shared_ptr<CanProtocol> &proto, MotorID id) {
+                    return proto->Disable(id);
+                },
+                "Disable");
+            if (status != MotorOpStatus::Ok) {
+                handleFailure(status, "Disable command rejected.");
+                return true;
+            }
+            std::lock_guard<std::mutex> stateLock(jointStateMutex_);
+            auto it = jointIndexByName_.find(jc.name);
+            if (it != jointIndexByName_.end()) {
+                joints_[it->second].hasDirectPosCmd = false;
+                joints_[it->second].hasDirectVelCmd = false;
+            }
+            break;
+        }
+        case can_driver::MotorCommand::Request::CMD_STOP: {
+            const auto status = executeOnMotor(
+                jc,
+                [](const std::shared_ptr<CanProtocol> &proto, MotorID id) {
+                    return proto->Stop(id);
+                },
+                "Stop");
+            if (status != MotorOpStatus::Ok) {
+                handleFailure(status, "Stop command rejected.");
+                return true;
+            }
+            std::lock_guard<std::mutex> stateLock(jointStateMutex_);
+            auto it = jointIndexByName_.find(jc.name);
+            if (it != jointIndexByName_.end()) {
+                joints_[it->second].hasDirectPosCmd = false;
+                joints_[it->second].hasDirectVelCmd = false;
+            }
+            break;
+        }
+        case can_driver::MotorCommand::Request::CMD_SET_MODE: {
+            if (req.value != 0.0 && req.value != 1.0) {
+                res.success = false;
+                res.message = "CMD_SET_MODE value must be 0 or 1.";
+                return true;
+            }
+            const auto mode = (req.value == 0.0)
+                                  ? CanProtocol::MotorMode::Position
+                                  : CanProtocol::MotorMode::Velocity;
+            const auto status = executeOnMotor(
+                jc,
+                [&mode](const std::shared_ptr<CanProtocol> &proto, MotorID id) {
+                    return proto->setMode(id, mode);
+                },
+                "Set mode");
+            if (status != MotorOpStatus::Ok) {
+                handleFailure(status, "Set mode command rejected.");
+                return true;
+            }
+            break;
+        }
+        default:
             res.success = false;
-            res.message = std::string("Command execution failed: ") + e.what();
-            return true;
-        } catch (...) {
-            res.success = false;
-            res.message = "Command execution failed.";
+            res.message = "Unknown command.";
             return true;
         }
 

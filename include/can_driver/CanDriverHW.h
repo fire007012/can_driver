@@ -33,6 +33,7 @@
 #include <vector>
 #include <atomic>
 #include <deque>
+#include <functional>
 
 /**
  * @brief hardware_interface::RobotHW 实现，将 MtCan/EyouCan 协议层桥接到 ros_control。
@@ -152,6 +153,18 @@ private:
     void loadJointLimits(const ros::NodeHandle &pnh);
     void startMotorRefreshThreads();
     void setupRosComm(ros::NodeHandle &pnh);
+
+    enum class MotorOpStatus {
+        Ok,
+        DeviceNotReady,
+        ProtocolUnavailable,
+        Rejected,
+        Exception
+    };
+    MotorOpStatus executeOnMotor(
+        const JointConfig &jc,
+        const std::function<bool(const std::shared_ptr<CanProtocol> &, MotorID)> &op,
+        const char *operationName);
 
     /**
      * @brief 初始化（或重新初始化）指定 CAN 通道。
