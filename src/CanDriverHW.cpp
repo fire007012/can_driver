@@ -336,23 +336,28 @@ void CanDriverHW::read(const ros::Time & /*time*/, const ros::Duration & /*perio
     };
     std::vector<JointSnapshot> snapshots(joints_.size());
 
+    std::map<std::pair<std::string, CanType>, std::vector<std::size_t>> groups;
     for (std::size_t i = 0; i < joints_.size(); ++i) {
-        const auto &jc = joints_[i];
-        auto proto = getProtocol(jc.canDevice, jc.protocol);
-        if (!proto) {
-            continue;
-        }
+        groups[{joints_[i].canDevice, joints_[i].protocol}].push_back(i);
+    }
 
-        auto devMutex = getDeviceMutex(jc.canDevice);
-        if (!devMutex) {
+    for (const auto &group : groups) {
+        const std::string &device = group.first.first;
+        const CanType protocol = group.first.second;
+        auto proto = getProtocol(device, protocol);
+        auto devMutex = getDeviceMutex(device);
+        if (!proto || !devMutex) {
             continue;
         }
 
         std::lock_guard<std::mutex> devLock(*devMutex);
-        snapshots[i].pos = static_cast<double>(proto->getPosition(jc.motorId)) * jc.positionScale;
-        snapshots[i].vel = static_cast<double>(proto->getVelocity(jc.motorId)) * jc.velocityScale;
-        snapshots[i].eff = static_cast<double>(proto->getCurrent(jc.motorId));
-        snapshots[i].valid = true;
+        for (const std::size_t i : group.second) {
+            const auto &jc = joints_[i];
+            snapshots[i].pos = static_cast<double>(proto->getPosition(jc.motorId)) * jc.positionScale;
+            snapshots[i].vel = static_cast<double>(proto->getVelocity(jc.motorId)) * jc.velocityScale;
+            snapshots[i].eff = static_cast<double>(proto->getCurrent(jc.motorId));
+            snapshots[i].valid = true;
+        }
     }
 
     std::lock_guard<std::mutex> lock(jointStateMutex_);
@@ -480,47 +485,53 @@ void CanDriverHW::write(const ros::Time & /*time*/, const ros::Duration &period)
         }
     }
 
+    std::map<std::pair<std::string, CanType>, std::vector<JointCommand>> commandGroups;
     for (const auto &cmd : commands) {
-        if (!cmd.valid) {
-            continue;
+        if (cmd.valid) {
+            commandGroups[{cmd.canDevice, cmd.protocol}].push_back(cmd);
         }
-        auto transport = getTransport(cmd.canDevice);
+    }
+
+    for (const auto &group : commandGroups) {
+        const std::string &device = group.first.first;
+        const CanType protocol = group.first.second;
+        auto transport = getTransport(device);
         if (!transport || !transport->isReady()) {
             ROS_WARN_THROTTLE(1.0, "[CanDriverHW] Device '%s' not ready, skip command write.",
-                              cmd.canDevice.c_str());
+                              device.c_str());
             continue;
         }
-        auto proto = getProtocol(cmd.canDevice, cmd.protocol);
-        if (!proto) {
-            continue;
-        }
-        auto devMutex = getDeviceMutex(cmd.canDevice);
-        if (!devMutex) {
+        auto proto = getProtocol(device, protocol);
+        auto devMutex = getDeviceMutex(device);
+        if (!proto || !devMutex) {
             continue;
         }
 
         std::lock_guard<std::mutex> devLock(*devMutex);
-        try {
-            if (cmd.controlMode == "velocity") {
-                if (!proto->setVelocity(cmd.motorId, cmd.rawValue)) {
-                    ROS_WARN_THROTTLE(1.0,
-                                      "[CanDriverHW] setVelocity rejected on '%s'.",
-                                      cmd.canDevice.c_str());
+        for (const auto &cmd : group.second) {
+            try {
+                if (cmd.controlMode == "velocity") {
+                    if (!proto->setVelocity(cmd.motorId, cmd.rawValue)) {
+                        ROS_WARN_THROTTLE(1.0,
+                                          "[CanDriverHW] setVelocity rejected on '%s'.",
+                                          device.c_str());
+                    }
+                } else {
+                    if (!proto->setPosition(cmd.motorId, cmd.rawValue)) {
+                        ROS_WARN_THROTTLE(1.0,
+                                          "[CanDriverHW] setPosition rejected on '%s'.",
+                                          device.c_str());
+                    }
                 }
-            } else {
-                if (!proto->setPosition(cmd.motorId, cmd.rawValue)) {
-                    ROS_WARN_THROTTLE(1.0,
-                                      "[CanDriverHW] setPosition rejected on '%s'.",
-                                      cmd.canDevice.c_str());
-                }
+            } catch (const std::exception &e) {
+                ROS_ERROR_THROTTLE(1.0, "[CanDriverHW] write() command failed on '%s': %s",
+                                   device.c_str(), e.what());
+            } catch (...) {
+                ROS_ERROR_THROTTLE(
+                    1.0,
+                    "[CanDriverHW] write() command failed on '%s' (unknown exception).",
+                    device.c_str());
             }
-        } catch (const std::exception &e) {
-            ROS_ERROR_THROTTLE(1.0, "[CanDriverHW] write() command failed on '%s': %s",
-                               cmd.canDevice.c_str(), e.what());
-        } catch (...) {
-            ROS_ERROR_THROTTLE(1.0,
-                               "[CanDriverHW] write() command failed on '%s' (unknown exception).",
-                               cmd.canDevice.c_str());
         }
     }
 #endif
@@ -655,8 +666,10 @@ void CanDriverHW::publishMotorStates(const ros::TimerEvent & /*e*/)
                 return static_cast<int16_t>(std::lround(c));
             };
 
-            msg.position = clampToInt32(jc.pos);
-            msg.velocity = clampToInt16(jc.vel);
+            const double rawPos = jc.pos / jc.positionScale;
+            const double rawVel = jc.vel / jc.velocityScale;
+            msg.position = clampToInt32(rawPos);
+            msg.velocity = clampToInt16(rawVel);
             msg.current  = clampToInt16(jc.eff);
 
             if (jc.controlMode == "velocity")
@@ -666,6 +679,9 @@ void CanDriverHW::publishMotorStates(const ros::TimerEvent & /*e*/)
 
             msgs.push_back(msg);
         }
+    }
+    if (!active_.load(std::memory_order_acquire)) {
+        return;
     }
     for (const auto &msg : msgs) {
         motorStatesPub_.publish(msg);
