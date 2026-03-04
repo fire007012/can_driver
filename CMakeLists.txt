@@ -313,6 +313,46 @@ if(CATKIN_ENABLE_TESTING)
       )
     endif()
   endif()
+
+  catkin_add_gtest(test_mt_can_protocol
+    tests/test_mt_can_protocol.cpp
+  )
+  if(TARGET test_mt_can_protocol)
+    target_include_directories(test_mt_can_protocol PRIVATE include ${GTEST_INCLUDE_DIRS})
+    if (TARGET GTest::GTest)
+      target_link_libraries(test_mt_can_protocol
+        can_driver_transport
+        ${catkin_LIBRARIES}
+        GTest::GTest GTest::Main
+      )
+    else()
+      target_link_libraries(test_mt_can_protocol
+        can_driver_transport
+        ${catkin_LIBRARIES}
+        ${GTEST_LIBRARIES} ${GTEST_MAIN_LIBRARIES}
+      )
+    endif()
+  endif()
+
+  catkin_add_gtest(test_eyou_can_protocol
+    tests/test_eyou_can_protocol.cpp
+  )
+  if(TARGET test_eyou_can_protocol)
+    target_include_directories(test_eyou_can_protocol PRIVATE include ${GTEST_INCLUDE_DIRS})
+    if (TARGET GTest::GTest)
+      target_link_libraries(test_eyou_can_protocol
+        can_driver_transport
+        ${catkin_LIBRARIES}
+        GTest::GTest GTest::Main
+      )
+    else()
+      target_link_libraries(test_eyou_can_protocol
+        can_driver_transport
+        ${catkin_LIBRARIES}
+        ${GTEST_LIBRARIES} ${GTEST_MAIN_LIBRARIES}
+      )
+    endif()
+  endif()
 endif()
 
 ## Add folders to be run by python nosetests
