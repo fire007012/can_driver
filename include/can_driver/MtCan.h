@@ -75,6 +75,8 @@ public:
      * @brief 返回电机速度（0x9C 返回的值，内部除以 6）
      */
     int16_t getVelocity(MotorID motorId) const override;
+    bool isEnabled(MotorID motorId) const override;
+    bool hasFault(MotorID motorId) const override;
 
     /**
      * @brief 配置需轮询的电机并启动 1ms 刷新任务

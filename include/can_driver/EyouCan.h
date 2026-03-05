@@ -79,6 +79,8 @@ public:
      * @brief 返回缓存的实际速度（无缓存时触发 0x06 读取）
      */
     int16_t getVelocity(MotorID motorId) const override;
+    bool isEnabled(MotorID motorId) const override;
+    bool hasFault(MotorID motorId) const override;
     void initializeMotorRefresh(const std::vector<MotorID> &motorIds) override;
 
 private:
@@ -94,6 +96,7 @@ private:
         int32_t acceleration = 0;
         int32_t deceleration = 0;
         bool enabled = false;
+        bool fault = false;
         bool positionReceived = false;
         bool velocityReceived = false;
         bool currentReceived = false;

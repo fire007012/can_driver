@@ -189,6 +189,73 @@ TEST_F(EyouCanTest, HandleResponseIgnoresUnmanagedMotorId)
     EXPECT_EQ(eyou.getPosition(static_cast<MotorID>(0x06)), 0);
 }
 
+TEST_F(EyouCanTest, GetCurrentAndVelocityClampInt16Range)
+{
+    // 电流 40000 -> 超过 int16 上限，应钳制为 32767。
+    CanTransport::Frame currentFrame {};
+    currentFrame.id = 0x0005;
+    currentFrame.isExtended = false;
+    currentFrame.isRemoteRequest = false;
+    currentFrame.dlc = 6;
+    currentFrame.data[0] = 0x04;
+    currentFrame.data[1] = 0x05;
+    currentFrame.data[2] = 0x00;
+    currentFrame.data[3] = 0x00;
+    currentFrame.data[4] = 0x9C;
+    currentFrame.data[5] = 0x40;
+    transport->simulateReceive(currentFrame);
+
+    // 速度 -40000 -> 低于 int16 下限，应钳制为 -32768。
+    CanTransport::Frame velocityFrame {};
+    velocityFrame.id = 0x0005;
+    velocityFrame.isExtended = false;
+    velocityFrame.isRemoteRequest = false;
+    velocityFrame.dlc = 6;
+    velocityFrame.data[0] = 0x04;
+    velocityFrame.data[1] = 0x06;
+    velocityFrame.data[2] = 0xFF;
+    velocityFrame.data[3] = 0xFF;
+    velocityFrame.data[4] = 0x63;
+    velocityFrame.data[5] = 0xC0;
+    transport->simulateReceive(velocityFrame);
+
+    EXPECT_EQ(eyou.getCurrent(static_cast<MotorID>(0x05)), 32767);
+    EXPECT_EQ(eyou.getVelocity(static_cast<MotorID>(0x05)), -32768);
+}
+
+TEST_F(EyouCanTest, ReadResponsesUpdateEnabledAndFaultState)
+{
+    // enabled = 1
+    CanTransport::Frame enableFrame {};
+    enableFrame.id = 0x0005;
+    enableFrame.isExtended = false;
+    enableFrame.isRemoteRequest = false;
+    enableFrame.dlc = 6;
+    enableFrame.data[0] = 0x04;
+    enableFrame.data[1] = 0x10;
+    enableFrame.data[2] = 0x00;
+    enableFrame.data[3] = 0x00;
+    enableFrame.data[4] = 0x00;
+    enableFrame.data[5] = 0x01;
+    transport->simulateReceive(enableFrame);
+
+    CanTransport::Frame faultFrame {};
+    faultFrame.id = 0x0005;
+    faultFrame.isExtended = false;
+    faultFrame.isRemoteRequest = false;
+    faultFrame.dlc = 6;
+    faultFrame.data[0] = 0x04;
+    faultFrame.data[1] = 0x15;
+    faultFrame.data[2] = 0x00;
+    faultFrame.data[3] = 0x00;
+    faultFrame.data[4] = 0x00;
+    faultFrame.data[5] = 0x01;
+    transport->simulateReceive(faultFrame);
+
+    EXPECT_TRUE(eyou.isEnabled(static_cast<MotorID>(0x05)));
+    EXPECT_TRUE(eyou.hasFault(static_cast<MotorID>(0x05)));
+}
+
 TEST_F(EyouCanTest, DISABLED_TODO_HandleWriteAckModeAndEnable)
 {
     GTEST_SKIP() << "TODO: cover write ack (0x02) branches for mode/enable.";

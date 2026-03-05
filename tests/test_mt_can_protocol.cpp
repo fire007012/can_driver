@@ -190,6 +190,29 @@ TEST_F(MtCanTest, GetPositionPreservesLargeMultiTurnAngle)
     EXPECT_EQ(mt.getPosition(kResponseNodeId), 2147483648LL);
 }
 
+TEST_F(MtCanTest, EnableDisableAndFaultStateAreObservable)
+{
+    constexpr MotorID kMotorId = static_cast<MotorID>(0x01);
+    EXPECT_TRUE(mt.Enable(kMotorId));
+    EXPECT_TRUE(mt.isEnabled(kMotorId));
+
+    EXPECT_TRUE(mt.Disable(kMotorId));
+    EXPECT_FALSE(mt.isEnabled(kMotorId));
+    ASSERT_FALSE(transport->sentFrames.empty());
+    EXPECT_EQ(transport->sentFrames.back().data[0], 0x80);
+
+    CanTransport::Frame frame {};
+    frame.id = 0x241;
+    frame.dlc = 8;
+    frame.isExtended = false;
+    frame.isRemoteRequest = false;
+    frame.data[0] = 0x9A;
+    frame.data[6] = 0x01;
+    frame.data[7] = 0x00;
+    transport->simulateReceive(frame);
+    EXPECT_TRUE(mt.hasFault(kMotorId));
+}
+
 TEST_F(MtCanTest, DISABLED_TODO_HandleResponseErrorCodeBranch)
 {
     GTEST_SKIP() << "TODO: cover command 0x9A error decode and state transition.";

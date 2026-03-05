@@ -116,6 +116,19 @@ TEST(JointConfigParser, ParseRejectsInvalidProtocol)
     EXPECT_NE(err.find("unknown protocol"), std::string::npos);
 }
 
+TEST(JointConfigParser, ParseRejectsInvalidControlMode)
+{
+    XmlRpc::XmlRpcValue motorId(1);
+    auto joint = makeJointBase("j0", motorId);
+    joint["control_mode"] = std::string("velcity");
+    auto list = makeJointList(joint);
+
+    std::vector<joint_config_parser::ParsedJointConfig> out;
+    std::string err;
+    EXPECT_FALSE(parse(list, out, err));
+    EXPECT_NE(err.find("unknown control_mode"), std::string::npos);
+}
+
 TEST(JointConfigParser, ParseRejectsInvalidPositionScale)
 {
     XmlRpc::XmlRpcValue motorId(1);

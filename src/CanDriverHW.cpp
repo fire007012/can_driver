@@ -581,11 +581,34 @@ void CanDriverHW::publishMotorStates(const ros::TimerEvent & /*e*/)
         return;
     }
 
+    struct StatusSnapshot {
+        bool enabled{false};
+        bool fault{false};
+        bool valid{false};
+    };
+    std::vector<StatusSnapshot> statusSnapshots(joints_.size());
+    for (const auto &group : jointGroups_) {
+        auto proto = getProtocol(group.canDevice, group.protocol);
+        auto devMutex = getDeviceMutex(group.canDevice);
+        if (!proto || !devMutex) {
+            continue;
+        }
+
+        std::lock_guard<std::mutex> devLock(*devMutex);
+        for (const std::size_t idx : group.jointIndices) {
+            const auto &jc = joints_[idx];
+            statusSnapshots[idx].enabled = proto->isEnabled(jc.motorId);
+            statusSnapshots[idx].fault = proto->hasFault(jc.motorId);
+            statusSnapshots[idx].valid = true;
+        }
+    }
+
     std::vector<can_driver::MotorState> msgs;
     msgs.reserve(joints_.size());
     {
         std::lock_guard<std::mutex> lock(jointStateMutex_);
-        for (const auto &jc : joints_) {
+        for (std::size_t i = 0; i < joints_.size(); ++i) {
+            const auto &jc = joints_[i];
             can_driver::MotorState msg;
             msg.motor_id = static_cast<uint16_t>(jc.motorId);
             msg.name     = jc.name;
@@ -600,6 +623,10 @@ void CanDriverHW::publishMotorStates(const ros::TimerEvent & /*e*/)
                 msg.mode = can_driver::MotorState::MODE_VELOCITY;
             else
                 msg.mode = can_driver::MotorState::MODE_POSITION;
+            if (statusSnapshots[i].valid) {
+                msg.enabled = statusSnapshots[i].enabled;
+                msg.fault = statusSnapshots[i].fault;
+            }
 
             msgs.push_back(msg);
         }

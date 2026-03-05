@@ -114,6 +114,24 @@ public:
     [[nodiscard]] virtual int16_t getVelocity(MotorID motorId) const = 0;
 
     /**
+     * @brief 返回缓存的使能状态（未实现协议默认 false）。
+     */
+    [[nodiscard]] virtual bool isEnabled(MotorID motorId) const
+    {
+        (void)motorId;
+        return false;
+    }
+
+    /**
+     * @brief 返回缓存的故障状态（未实现协议默认 false）。
+     */
+    [[nodiscard]] virtual bool hasFault(MotorID motorId) const
+    {
+        (void)motorId;
+        return false;
+    }
+
+    /**
      * @brief 初始化电机信息刷新机制
      * @param motorIds 需要周期刷新状态的电机 ID 列表
      *

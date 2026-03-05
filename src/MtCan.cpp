@@ -286,6 +286,22 @@ int16_t MtCan::getVelocity(MotorID Id) const
     return 0;
 }
 
+bool MtCan::isEnabled(MotorID Id) const
+{
+    const uint8_t motorId = static_cast<uint8_t>(Id);
+    std::lock_guard<std::mutex> stateLock(stateMutex);
+    auto it = motorStates.find(motorId);
+    return (it != motorStates.end()) ? it->second.enabled : false;
+}
+
+bool MtCan::hasFault(MotorID Id) const
+{
+    const uint8_t motorId = static_cast<uint8_t>(Id);
+    std::lock_guard<std::mutex> stateLock(stateMutex);
+    auto it = motorStates.find(motorId);
+    return (it != motorStates.end()) ? it->second.error : false;
+}
+
 uint16_t MtCan::encodeSendCanId(uint8_t motorId) const
 {
     return static_cast<uint16_t>(kSendBaseId + motorId);

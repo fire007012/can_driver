@@ -64,6 +64,11 @@ bool parse(const XmlRpc::XmlRpcValue &jointList,
         jc.name = static_cast<std::string>(jv["name"]);
         jc.canDevice = static_cast<std::string>(jv["can_device"]);
         jc.controlMode = static_cast<std::string>(jv["control_mode"]);
+        if (jc.controlMode != "velocity" && jc.controlMode != "position") {
+            errorMsg = "Joint '" + jc.name + "': unknown control_mode '" + jc.controlMode +
+                       "' (use velocity or position).";
+            return false;
+        }
 
         // scale 为可选参数，未配置时使用 1.0（即不缩放）。
         if (jv.hasMember("position_scale")) {

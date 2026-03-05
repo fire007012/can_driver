@@ -6,6 +6,9 @@
 #include <cstdint>
 #include <iomanip>
 #include <iostream>
+#include <limits>
+
+#include <ros/ros.h>
 
 // EyouCan.cpp
 
@@ -46,6 +49,24 @@ uint8_t dataByteOrZero(const CanTransport::Frame &frame, std::size_t index)
         return 0;
     }
     return frame.data[index];
+}
+
+int16_t clampInt32ToInt16WithWarn(int32_t value, uint8_t motorId, const char *field)
+{
+    constexpr int32_t kMin = static_cast<int32_t>(std::numeric_limits<int16_t>::min());
+    constexpr int32_t kMax = static_cast<int32_t>(std::numeric_limits<int16_t>::max());
+    if (value < kMin || value > kMax) {
+        ROS_WARN_THROTTLE(
+            1.0,
+            "[EyouCan] Motor %u %s=%d exceeds int16 range, clamping to [%d, %d].",
+            static_cast<unsigned>(motorId),
+            field,
+            value,
+            static_cast<int>(kMin),
+            static_cast<int>(kMax));
+    }
+    const int32_t clamped = std::max(kMin, std::min(kMax, value));
+    return static_cast<int16_t>(clamped);
 }
 } // namespace
 
@@ -224,7 +245,7 @@ int16_t EyouCan::getCurrent(MotorID Id) const
         std::lock_guard<std::mutex> stateLock(stateMutex);
         auto it = motorStates.find(motorId);
         if (it != motorStates.end() && it->second.currentReceived) {
-            return static_cast<int16_t>(it->second.current);
+            return clampInt32ToInt16WithWarn(it->second.current, motorId, "current");
         }
     }
     requestCurrent(motorId);
@@ -240,11 +261,29 @@ int16_t EyouCan::getVelocity(MotorID Id) const
         std::lock_guard<std::mutex> stateLock(stateMutex);
         auto it = motorStates.find(motorId);
         if (it != motorStates.end() && it->second.velocityReceived) {
-            return static_cast<int16_t>(it->second.actualVelocity);
+            return clampInt32ToInt16WithWarn(it->second.actualVelocity, motorId, "velocity");
         }
     }
     requestVelocity(motorId);
     return 0;
+}
+
+bool EyouCan::isEnabled(MotorID Id) const
+{
+    const uint8_t motorId = static_cast<uint8_t>(Id);
+    registerManagedMotorId(motorId);
+    std::lock_guard<std::mutex> stateLock(stateMutex);
+    auto it = motorStates.find(motorId);
+    return (it != motorStates.end()) ? it->second.enabled : false;
+}
+
+bool EyouCan::hasFault(MotorID Id) const
+{
+    const uint8_t motorId = static_cast<uint8_t>(Id);
+    registerManagedMotorId(motorId);
+    std::lock_guard<std::mutex> stateLock(stateMutex);
+    auto it = motorStates.find(motorId);
+    return (it != motorStates.end()) ? it->second.fault : false;
 }
 
 void EyouCan::sendWriteCommand(uint8_t motorId, uint8_t subCommand, uint32_t value, std::size_t payloadBytes)
@@ -394,6 +433,7 @@ void EyouCan::handleResponse(const CanTransport::Frame &frame)
                 // [FIX #4] 告警指示，数据从 data[2] 开始
                 {
                     uint32_t errorCode = readUInt32BE(frame, 2);
+                    state.fault = (errorCode != 0);
                     if (errorCode != 0) {
                         std::cerr << "[EyouCan] Motor " << static_cast<int>(motorId)
                                   << " reported error code 0x" << std::hex
