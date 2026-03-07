@@ -15,12 +15,6 @@ constexpr uint16_t kResponseBaseId = 0x240;
 constexpr int32_t kDefaultPositionSpeedDps = 100;
 constexpr std::size_t kQueriesPerMotorPerCycle = 3;
 
-std::chrono::milliseconds computeRefreshSleep(std::size_t motorCount)
-{
-    const std::size_t intervalMs = std::max<std::size_t>(5, motorCount * kQueriesPerMotorPerCycle);
-    return std::chrono::milliseconds(intervalMs);
-}
-
 int16_t readInt16LE(const CanTransport::Frame &frame, std::size_t index)
 {
     if (index + 1 >= frame.dlc) {
@@ -57,6 +51,17 @@ int64_t readInt48LE(const CanTransport::Frame &frame, std::size_t index)
     return v;
 }
 } // namespace
+
+std::chrono::milliseconds MtCan::computeRefreshSleep(std::size_t motorCount) const
+{
+    const double hz = refreshRateHz_.load(std::memory_order_relaxed);
+    if (std::isfinite(hz) && hz > 0.0) {
+        const auto intervalMs = static_cast<int64_t>(std::llround(1000.0 / hz));
+        return std::chrono::milliseconds(std::max<int64_t>(1, intervalMs));
+    }
+    const std::size_t intervalMs = std::max<std::size_t>(5, motorCount * kQueriesPerMotorPerCycle);
+    return std::chrono::milliseconds(intervalMs);
+}
 
 MtCan::MtCan(std::shared_ptr<CanTransport> controller)
     : canController(std::move(controller))
@@ -110,13 +115,22 @@ void MtCan::initializeMotorRefresh(const std::vector<MotorID> &motorIds)
                 std::lock_guard<std::mutex> lock(refreshMutex);
                 motorCount = refreshMotorIds.size();
             }
-            std::this_thread::sleep_for(computeRefreshSleep(motorCount));
+            std::this_thread::sleep_for(this->computeRefreshSleep(motorCount));
         }
     });
 
     // 电机注册后自动下发通讯中断保护，避免控制链路异常时失控
     std::this_thread::sleep_for(std::chrono::milliseconds(50));
     broadcastCommunicationTimeout(300);
+}
+
+void MtCan::setRefreshRateHz(double hz)
+{
+    if (!std::isfinite(hz) || hz <= 0.0) {
+        refreshRateHz_.store(0.0, std::memory_order_relaxed);
+        return;
+    }
+    refreshRateHz_.store(hz, std::memory_order_relaxed);
 }
 
 bool MtCan::setMode(MotorID Id, MotorMode mode)

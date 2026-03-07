@@ -127,6 +127,21 @@ void DeviceManager::startRefresh(const std::string &device,
     }
 }
 
+void DeviceManager::setRefreshRateHz(double hz)
+{
+    std::shared_lock<std::shared_mutex> lock(mutex_);
+    for (auto &kv : mtProtocols_) {
+        if (kv.second) {
+            kv.second->setRefreshRateHz(hz);
+        }
+    }
+    for (auto &kv : eyouProtocols_) {
+        if (kv.second) {
+            kv.second->setRefreshRateHz(hz);
+        }
+    }
+}
+
 void DeviceManager::shutdownAll()
 {
     std::unique_lock<std::shared_mutex> lock(mutex_);

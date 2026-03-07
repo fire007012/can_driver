@@ -2,6 +2,7 @@
 
 #include <algorithm>
 #include <chrono>
+#include <cmath>
 #include <cstddef>
 #include <cstdint>
 #include <iomanip>
@@ -19,13 +20,6 @@ constexpr uint8_t kWriteAck = 0x02;
 constexpr uint8_t kReadResponse = 0x04;
 constexpr uint16_t kEyouIdFrameBase = 0x0000;
 constexpr std::size_t kQueriesPerMotorPerCycle = 5;
-
-std::chrono::milliseconds computeRefreshSleep(std::size_t motorCount)
-{
-    // 控制轮询发送频率，避免多电机场景下总线过载。
-    const std::size_t intervalMs = std::max<std::size_t>(5, motorCount * kQueriesPerMotorPerCycle);
-    return std::chrono::milliseconds(intervalMs);
-}
 
 uint32_t readUInt32BE(const CanTransport::Frame &frame, std::size_t index)
 {
@@ -69,6 +63,18 @@ int16_t clampInt32ToInt16WithWarn(int32_t value, uint8_t motorId, const char *fi
     return static_cast<int16_t>(clamped);
 }
 } // namespace
+
+std::chrono::milliseconds EyouCan::computeRefreshSleep(std::size_t motorCount) const
+{
+    const double hz = refreshRateHz_.load(std::memory_order_relaxed);
+    if (std::isfinite(hz) && hz > 0.0) {
+        const auto intervalMs = static_cast<int64_t>(std::llround(1000.0 / hz));
+        return std::chrono::milliseconds(std::max<int64_t>(1, intervalMs));
+    }
+    // 控制轮询发送频率，避免多电机场景下总线过载。
+    const std::size_t intervalMs = std::max<std::size_t>(5, motorCount * kQueriesPerMotorPerCycle);
+    return std::chrono::milliseconds(intervalMs);
+}
 
 EyouCan::EyouCan(std::shared_ptr<CanTransport> controller)
     : canController(std::move(controller))
@@ -123,9 +129,18 @@ void EyouCan::initializeMotorRefresh(const std::vector<MotorID> &motorIds)
                 std::lock_guard<std::mutex> lock(refreshMutex);
                 motorCount = refreshMotorIds.size();
             }
-            std::this_thread::sleep_for(computeRefreshSleep(motorCount));
+            std::this_thread::sleep_for(this->computeRefreshSleep(motorCount));
         }
     });
+}
+
+void EyouCan::setRefreshRateHz(double hz)
+{
+    if (!std::isfinite(hz) || hz <= 0.0) {
+        refreshRateHz_.store(0.0, std::memory_order_relaxed);
+        return;
+    }
+    refreshRateHz_.store(hz, std::memory_order_relaxed);
 }
 
 bool EyouCan::setMode(MotorID Id, MotorMode mode)

@@ -35,6 +35,8 @@ public:
     void startRefresh(const std::string &device,
                       CanType type,
                       const std::vector<MotorID> &ids);
+    /// 设置所有协议实例的状态轮询频率（Hz）；<=0 恢复协议默认策略。
+    void setRefreshRateHz(double hz);
     /// 停止并释放所有设备资源。
     void shutdownAll();
 

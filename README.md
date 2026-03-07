@@ -24,7 +24,9 @@ roslaunch can_driver can_driver.launch
 
 - `direct_cmd_timeout_sec` (default: `0.5`)
 - `motor_state_period_sec` (default: `0.1`)
+- `motor_query_hz` (default: `0.0`, protocol auto strategy)
 - `direct_cmd_queue_size` (default: `1`)
+- `debug_bypass_ros_control` (default: `false`, debugging only)
 
 ## Interfaces
 

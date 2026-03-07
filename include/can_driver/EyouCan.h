@@ -3,6 +3,7 @@
 #include "CanProtocol.h"
 #include "can_driver/CanTransport.h"
 #include <atomic>
+#include <chrono>
 #include <memory>
 #include <mutex>
 #include <thread>
@@ -82,6 +83,8 @@ public:
     bool isEnabled(MotorID motorId) const override;
     bool hasFault(MotorID motorId) const override;
     void initializeMotorRefresh(const std::vector<MotorID> &motorIds) override;
+    /// 设置状态轮询频率（Hz）；<=0 表示使用默认自适应周期。
+    void setRefreshRateHz(double hz);
 
 private:
     /**
@@ -112,6 +115,7 @@ private:
     mutable std::mutex refreshMutex;
     std::atomic<bool> refreshLoopActive {false};
     std::thread refreshThread;
+    std::atomic<double> refreshRateHz_{0.0};
 
     /**
      * @brief 发送写指令帧（0x01）
@@ -133,6 +137,7 @@ private:
     bool isManagedMotorId(uint8_t motorId) const;
     void registerManagedMotorId(uint8_t motorId) const;
     void refreshMotorStates();
+    std::chrono::milliseconds computeRefreshSleep(std::size_t motorCount) const;
     void stopRefreshLoop();
 };
 

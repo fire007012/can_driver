@@ -4,6 +4,7 @@
 #include "can_driver/CanTransport.h"
 #include <array>
 #include <atomic>
+#include <chrono>
 #include <memory>
 #include <mutex>
 #include <thread>
@@ -108,6 +109,9 @@ public:
      */
     void initializeMotorRefresh(const std::vector<MotorID> &motorIds) override;
 
+    /// 设置状态轮询频率（Hz）；<=0 表示使用默认自适应周期。
+    void setRefreshRateHz(double hz);
+
 private:
     struct MotorState {
         int32_t position = 0;
@@ -132,6 +136,7 @@ private:
     mutable std::mutex refreshMutex;
     std::atomic<bool> refreshLoopActive {false};
     std::thread refreshThread;
+    std::atomic<double> refreshRateHz_{0.0};
 
     /**
      * @brief 将节点 ID 组合成 CAN ID（高位取 canBaseId，高 8 位 + motorId）
@@ -171,6 +176,7 @@ private:
      * @brief 广播通讯超时保护给所有已注册电机
      */
     void broadcastCommunicationTimeout(uint32_t timeoutMs);
+    std::chrono::milliseconds computeRefreshSleep(std::size_t motorCount) const;
     /**
      * @brief 解析 CAN 返回帧，更新缓存
      */

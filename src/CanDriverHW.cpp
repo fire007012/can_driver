@@ -88,6 +88,15 @@ bool CanDriverHW::loadRuntimeParams(const ros::NodeHandle &pnh)
         statePublishPeriodSec_ = 0.1;
     }
 
+    if (!pnh.getParam("motor_query_hz", motorQueryHz_)) {
+        motorQueryHz_ = 0.0;
+    }
+    if (!std::isfinite(motorQueryHz_)) {
+        ROS_WARN("[CanDriverHW] Invalid motor_query_hz=%.9g, fallback to auto strategy.",
+                 motorQueryHz_);
+        motorQueryHz_ = 0.0;
+    }
+
     if (!pnh.getParam("direct_cmd_queue_size", directCmdQueueSize_)) {
         directCmdQueueSize_ = 1;
     }
@@ -96,6 +105,16 @@ bool CanDriverHW::loadRuntimeParams(const ros::NodeHandle &pnh)
                  directCmdQueueSize_);
         directCmdQueueSize_ = 1;
     }
+
+    if (!pnh.getParam("debug_bypass_ros_control", debugBypassRosControl_)) {
+        debugBypassRosControl_ = false;
+    }
+    if (motorQueryHz_ > 0.0) {
+        ROS_INFO("[CanDriverHW] motor_query_hz=%.3f Hz.", motorQueryHz_);
+    }
+    ROS_WARN_STREAM_COND(debugBypassRosControl_,
+                         "[CanDriverHW] debug_bypass_ros_control=true: "
+                         "direct topic commands will bypass ros_control fallback.");
     return true;
 }
 
@@ -253,6 +272,8 @@ void CanDriverHW::loadJointLimits(const ros::NodeHandle &pnh)
 
 void CanDriverHW::startMotorRefreshThreads()
 {
+    deviceManager_.setRefreshRateHz(motorQueryHz_);
+
     std::map<std::string, std::vector<MotorID>> mtIds;
     std::map<std::string, std::vector<MotorID>> ppIds;
     for (const auto &jc : joints_) {
@@ -459,32 +480,56 @@ void CanDriverHW::write(const ros::Time & /*time*/, const ros::Duration &period)
 
             bool useDirect = false;
             double cmdValue = 0.0;
+            bool hasCommand = true;
             if (jc.controlMode == "velocity") {
                 if (jc.hasDirectVelCmd) {
-                    const double age = (now - jc.lastDirectVelTime).toSec();
-                    if (age <= directCmdTimeoutSec_) {
+                    if (debugBypassRosControl_) {
                         useDirect = true;
                         cmdValue = jc.directVelCmd;
                     } else {
-                        jc.hasDirectVelCmd = false;
+                        const double age = (now - jc.lastDirectVelTime).toSec();
+                        if (age <= directCmdTimeoutSec_) {
+                            useDirect = true;
+                            cmdValue = jc.directVelCmd;
+                        } else {
+                            jc.hasDirectVelCmd = false;
+                        }
                     }
                 }
                 if (!useDirect) {
-                    cmdValue = jc.velCmd;
+                    if (debugBypassRosControl_) {
+                        hasCommand = false;
+                    } else {
+                        cmdValue = jc.velCmd;
+                    }
                 }
             } else {
                 if (jc.hasDirectPosCmd) {
-                    const double age = (now - jc.lastDirectPosTime).toSec();
-                    if (age <= directCmdTimeoutSec_) {
+                    if (debugBypassRosControl_) {
                         useDirect = true;
                         cmdValue = jc.directPosCmd;
                     } else {
-                        jc.hasDirectPosCmd = false;
+                        const double age = (now - jc.lastDirectPosTime).toSec();
+                        if (age <= directCmdTimeoutSec_) {
+                            useDirect = true;
+                            cmdValue = jc.directPosCmd;
+                        } else {
+                            jc.hasDirectPosCmd = false;
+                        }
                     }
                 }
                 if (!useDirect) {
-                    cmdValue = jc.posCmd;
+                    if (debugBypassRosControl_) {
+                        hasCommand = false;
+                    } else {
+                        cmdValue = jc.posCmd;
+                    }
                 }
+            }
+
+            if (!hasCommand) {
+                commandValidBuffer_[i] = 0;
+                continue;
             }
 
             cmdValue = clampWithJointLimits(jc, cmdValue);

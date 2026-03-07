@@ -142,7 +142,9 @@ private:
     mutable std::mutex        jointStateMutex_;
     double directCmdTimeoutSec_{0.5};
     double statePublishPeriodSec_{0.1};
+    double motorQueryHz_{0.0};
     int directCmdQueueSize_{1};
+    bool debugBypassRosControl_{false};
 
     // -----------------------------------------------------------------------
     // 内部辅助
