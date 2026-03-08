@@ -186,6 +186,16 @@ std::shared_ptr<SocketCanController> DeviceManager::getTransport(const std::stri
     return (it != transports_.end()) ? it->second : nullptr;
 }
 
+bool DeviceManager::isDeviceReady(const std::string &device) const
+{
+    std::shared_lock<std::shared_mutex> lock(mutex_);
+    auto it = transports_.find(device);
+    if (it == transports_.end() || !it->second) {
+        return false;
+    }
+    return it->second->isReady();
+}
+
 std::size_t DeviceManager::deviceCount() const
 {
     std::shared_lock<std::shared_mutex> lock(mutex_);

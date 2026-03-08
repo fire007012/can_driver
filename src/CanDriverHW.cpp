@@ -8,6 +8,19 @@
 #include <string>
 #include <xmlrpcpp/XmlRpcValue.h>
 
+CanDriverHW::CanDriverHW()
+    : deviceManager_(std::make_shared<DeviceManager>())
+{
+}
+
+CanDriverHW::CanDriverHW(std::shared_ptr<IDeviceManager> deviceManager)
+    : deviceManager_(std::move(deviceManager))
+{
+    if (!deviceManager_) {
+        deviceManager_ = std::make_shared<DeviceManager>();
+    }
+}
+
 // ---------------------------------------------------------------------------
 // 析构
 // ---------------------------------------------------------------------------
@@ -41,7 +54,7 @@ bool CanDriverHW::init(ros::NodeHandle &nh, ros::NodeHandle &pnh)
     setupRosComm(pnh);
 
     ROS_INFO("[CanDriverHW] Initialized with %zu joints on %zu CAN device(s).",
-             joints_.size(), deviceManager_.deviceCount());
+             joints_.size(), deviceManager_->deviceCount());
     active_.store(true, std::memory_order_release);
     return true;
 }
@@ -65,7 +78,7 @@ void CanDriverHW::resetInternalState()
     jointGroups_.clear();
     rawCommandBuffer_.clear();
     commandValidBuffer_.clear();
-    deviceManager_.shutdownAll();
+    deviceManager_->shutdownAll();
 }
 
 bool CanDriverHW::loadRuntimeParams(const ros::NodeHandle &pnh)
@@ -162,10 +175,10 @@ bool CanDriverHW::parseAndSetupJoints(const ros::NodeHandle &pnh)
         joints_.push_back(jc);
         jointIndexByName_[jc.name] = joints_.size() - 1;
 
-        if (!deviceManager_.ensureTransport(jc.canDevice)) {
+        if (!deviceManager_->ensureTransport(jc.canDevice)) {
             return false;
         }
-        if (!deviceManager_.ensureProtocol(jc.canDevice, jc.protocol)) {
+        if (!deviceManager_->ensureProtocol(jc.canDevice, jc.protocol)) {
             ROS_ERROR("[CanDriverHW] Failed to ensure protocol on '%s'.", jc.canDevice.c_str());
             return false;
         }
@@ -272,7 +285,7 @@ void CanDriverHW::loadJointLimits(const ros::NodeHandle &pnh)
 
 void CanDriverHW::startMotorRefreshThreads()
 {
-    deviceManager_.setRefreshRateHz(motorQueryHz_);
+    deviceManager_->setRefreshRateHz(motorQueryHz_);
 
     std::map<std::string, std::vector<MotorID>> mtIds;
     std::map<std::string, std::vector<MotorID>> ppIds;
@@ -284,10 +297,10 @@ void CanDriverHW::startMotorRefreshThreads()
         }
     }
     for (auto &kv : mtIds) {
-        deviceManager_.startRefresh(kv.first, CanType::MT, kv.second);
+        deviceManager_->startRefresh(kv.first, CanType::MT, kv.second);
     }
     for (auto &kv : ppIds) {
-        deviceManager_.startRefresh(kv.first, CanType::PP, kv.second);
+        deviceManager_->startRefresh(kv.first, CanType::PP, kv.second);
     }
 }
 
@@ -361,8 +374,7 @@ CanDriverHW::MotorOpStatus CanDriverHW::executeOnMotor(
     const std::function<bool(const std::shared_ptr<CanProtocol> &, MotorID)> &op,
     const char *operationName)
 {
-    auto transport = getTransport(jc.canDevice);
-    if (!transport || !transport->isReady()) {
+    if (!isDeviceReady(jc.canDevice)) {
         return MotorOpStatus::DeviceNotReady;
     }
 
@@ -544,8 +556,7 @@ void CanDriverHW::write(const ros::Time & /*time*/, const ros::Duration &period)
     for (const auto &group : jointGroups_) {
         const std::string &device = group.canDevice;
         const CanType protocol = group.protocol;
-        auto transport = getTransport(device);
-        if (!transport || !transport->isReady()) {
+        if (!isDeviceReady(device)) {
             ROS_WARN_THROTTLE(1.0, "[CanDriverHW] Device '%s' not ready, skip command write.",
                               device.c_str());
             continue;
@@ -602,22 +613,22 @@ bool CanDriverHW::initDevice(const std::string &device, bool loopback)
         }
         motors.emplace_back(jc.protocol, jc.motorId);
     }
-    return deviceManager_.initDevice(device, motors, loopback);
+    return deviceManager_->initDevice(device, motors, loopback);
 }
 
 std::shared_ptr<CanProtocol> CanDriverHW::getProtocol(const std::string &device, CanType type) const
 {
-    return deviceManager_.getProtocol(device, type);
+    return deviceManager_->getProtocol(device, type);
 }
 
 std::shared_ptr<std::mutex> CanDriverHW::getDeviceMutex(const std::string &device) const
 {
-    return deviceManager_.getDeviceMutex(device);
+    return deviceManager_->getDeviceMutex(device);
 }
 
-std::shared_ptr<SocketCanController> CanDriverHW::getTransport(const std::string &device) const
+bool CanDriverHW::isDeviceReady(const std::string &device) const
 {
-    return deviceManager_.getTransport(device);
+    return deviceManager_->isDeviceReady(device);
 }
 
 void CanDriverHW::publishMotorStates(const ros::TimerEvent & /*e*/)
@@ -704,7 +715,7 @@ bool CanDriverHW::onShutdown(can_driver::Shutdown::Request & /*req*/,
 {
     active_.store(false, std::memory_order_release);
     stateTimer_.stop();
-    deviceManager_.shutdownAll();
+    deviceManager_->shutdownAll();
 
     {
         std::lock_guard<std::mutex> stateLock(jointStateMutex_);

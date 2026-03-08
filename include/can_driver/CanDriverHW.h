@@ -4,6 +4,7 @@
 #include "can_driver/CanProtocol.h"
 #include "can_driver/CanType.h"
 #include "can_driver/DeviceManager.h"
+#include "can_driver/IDeviceManager.h"
 #include "can_driver/JointConfigParser.h"
 #include "can_driver/MotorID.h"
 
@@ -42,7 +43,8 @@
  */
 class CanDriverHW : public hardware_interface::RobotHW {
 public:
-    CanDriverHW() = default;
+    CanDriverHW();
+    explicit CanDriverHW(std::shared_ptr<IDeviceManager> deviceManager);
     ~CanDriverHW() override;
 
     /**
@@ -109,7 +111,7 @@ private:
     std::vector<int32_t>             rawCommandBuffer_;
     std::vector<uint8_t>             commandValidBuffer_;
 
-    DeviceManager deviceManager_;
+    std::shared_ptr<IDeviceManager> deviceManager_;
 
     // -----------------------------------------------------------------------
     // ros_control 接口对象
@@ -183,7 +185,7 @@ private:
      */
     std::shared_ptr<CanProtocol> getProtocol(const std::string &device, CanType type) const;
     std::shared_ptr<std::mutex> getDeviceMutex(const std::string &device) const;
-    std::shared_ptr<SocketCanController> getTransport(const std::string &device) const;
+    bool isDeviceReady(const std::string &device) const;
 
     /**
      * @brief 定时发布 ~/motor_states（10 Hz）。
