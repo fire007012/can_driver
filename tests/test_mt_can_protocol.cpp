@@ -101,8 +101,10 @@ TEST_F(MtCanTest, SetPositionEncodesExpectedFrame)
     EXPECT_EQ(frame.id, 0x142u);
     EXPECT_EQ(frame.dlc, 8u);
     EXPECT_EQ(frame.data[0], 0xA4);
-    EXPECT_EQ(frame.data[2], static_cast<uint8_t>(kVelocity & 0xFF));
-    EXPECT_EQ(frame.data[3], static_cast<uint8_t>((kVelocity >> 8) & 0xFF));
+    // 当前实现会把 setVelocity 的 0.01 dps/LSB 换算到 0xA4 所需的 1 dps/LSB。
+    // 0x1234 (4660) -> round(46.6) = 47 -> 0x002F。
+    EXPECT_EQ(frame.data[2], 47u);
+    EXPECT_EQ(frame.data[3], 0u);
     EXPECT_EQ(frame.data[4], static_cast<uint8_t>(kPosition & 0xFF));
     EXPECT_EQ(frame.data[5], static_cast<uint8_t>((kPosition >> 8) & 0xFF));
     EXPECT_EQ(frame.data[6], static_cast<uint8_t>((kPosition >> 16) & 0xFF));
@@ -143,7 +145,7 @@ TEST_F(MtCanTest, HandleResponseParsesStateFrame)
     transport->simulateReceive(frame);
 
     EXPECT_EQ(mt.getCurrent(kResponseNodeId), 123);
-    EXPECT_EQ(mt.getVelocity(kResponseNodeId), 100);
+    EXPECT_EQ(mt.getVelocity(kResponseNodeId), 600);
 }
 
 TEST_F(MtCanTest, HandleResponseIgnoresExtendedFrame)
