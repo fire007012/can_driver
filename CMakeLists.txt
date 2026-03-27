@@ -399,6 +399,26 @@ if(CATKIN_ENABLE_TESTING)
       )
     endif()
   endif()
+
+  catkin_add_gtest(test_can_driver_lifecycle_driver_ops
+    tests/test_lifecycle_driver_ops.cpp
+  )
+  if(TARGET test_can_driver_lifecycle_driver_ops)
+    target_include_directories(test_can_driver_lifecycle_driver_ops PRIVATE include ${GTEST_INCLUDE_DIRS})
+    if (TARGET GTest::GTest)
+      target_link_libraries(test_can_driver_lifecycle_driver_ops
+        can_driver_transport
+        ${catkin_LIBRARIES}
+        GTest::GTest GTest::Main
+      )
+    else()
+      target_link_libraries(test_can_driver_lifecycle_driver_ops
+        can_driver_transport
+        ${catkin_LIBRARIES}
+        ${GTEST_LIBRARIES} ${GTEST_MAIN_LIBRARIES}
+      )
+    endif()
+  endif()
 endif()
 
 ## Add folders to be run by python nosetests
