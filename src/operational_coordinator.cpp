@@ -6,6 +6,11 @@
 
 namespace can_driver {
 
+OperationalCoordinator::OperationalCoordinator(DriverOps driverOps)
+    : driverOps_(std::move(driverOps))
+{
+}
+
 const char *SystemOpModeName(SystemOpMode mode)
 {
     switch (mode) {
@@ -60,8 +65,16 @@ void OperationalCoordinator::SetFaulted()
     ForceMode(SystemOpMode::Faulted, "faulted");
 }
 
+void OperationalCoordinator::SetDriverOps(DriverOps driverOps)
+{
+    std::lock_guard<std::mutex> lock(transitionMutex_);
+    driverOps_ = std::move(driverOps);
+}
+
 OperationalCoordinator::Result OperationalCoordinator::DoTransition(
-    std::initializer_list<SystemOpMode> allowedFrom, SystemOpMode to)
+    std::initializer_list<SystemOpMode> allowedFrom,
+    SystemOpMode to,
+    const std::function<bool(std::string *)> &action)
 {
     std::lock_guard<std::mutex> lock(transitionMutex_);
 
@@ -85,50 +98,226 @@ OperationalCoordinator::Result OperationalCoordinator::DoTransition(
         return {false, oss.str()};
     }
 
+    std::string detail;
+    if (action && !action(&detail)) {
+        if (detail.empty()) {
+            detail = "action failed";
+        }
+        return {false, detail};
+    }
+
     mode_.store(to, std::memory_order_release);
     ROS_INFO("[can_driver::OperationalCoordinator] %s -> %s",
              SystemOpModeName(current), SystemOpModeName(to));
-    return {true, std::string("-> ") + SystemOpModeName(to)};
+    if (detail.empty()) {
+        detail = std::string("-> ") + SystemOpModeName(to);
+    }
+    return {true, detail};
 }
 
-OperationalCoordinator::Result OperationalCoordinator::RequestInit()
+OperationalCoordinator::Result OperationalCoordinator::RequestInit(const std::string &device,
+                                                                  bool loopback)
 {
-    return DoTransition({SystemOpMode::Configured}, SystemOpMode::Armed);
+    return DoTransition(
+        {SystemOpMode::Configured},
+        SystemOpMode::Armed,
+        [this, &device, loopback](std::string *detail) {
+            if (!driverOps_.init_device) {
+                if (detail) {
+                    *detail = "init path not available";
+                }
+                return false;
+            }
+            const auto result = driverOps_.init_device(device, loopback);
+            if (!result.ok) {
+                if (detail) {
+                    *detail = result.message;
+                }
+                return false;
+            }
+            if (driverOps_.arm_fresh_command_latch) {
+                driverOps_.arm_fresh_command_latch();
+            }
+            if (detail && !result.message.empty()) {
+                *detail = result.message;
+            }
+            return true;
+        });
 }
 
 OperationalCoordinator::Result OperationalCoordinator::RequestEnable()
 {
-    return DoTransition({SystemOpMode::Standby}, SystemOpMode::Armed);
+    return DoTransition(
+        {SystemOpMode::Standby},
+        SystemOpMode::Armed,
+        [this](std::string *detail) {
+            if (!driverOps_.enable_all) {
+                if (detail) {
+                    *detail = "enable path not available";
+                }
+                return false;
+            }
+            const auto result = driverOps_.enable_all();
+            if (!result.ok) {
+                if (detail) {
+                    *detail = result.message;
+                }
+                return false;
+            }
+            if (driverOps_.hold_commands) {
+                driverOps_.hold_commands();
+            }
+            if (driverOps_.arm_fresh_command_latch) {
+                driverOps_.arm_fresh_command_latch();
+            }
+            if (detail && !result.message.empty()) {
+                *detail = result.message;
+            }
+            return true;
+        });
 }
 
 OperationalCoordinator::Result OperationalCoordinator::RequestDisable()
 {
     return DoTransition({SystemOpMode::Standby, SystemOpMode::Armed, SystemOpMode::Running},
-                        SystemOpMode::Standby);
+                        SystemOpMode::Standby,
+                        [this](std::string *detail) {
+                            if (driverOps_.hold_commands) {
+                                driverOps_.hold_commands();
+                            }
+                            if (!driverOps_.disable_all) {
+                                if (detail) {
+                                    *detail = "disable path not available";
+                                }
+                                return false;
+                            }
+                            const auto result = driverOps_.disable_all();
+                            if (!result.ok) {
+                                if (detail) {
+                                    *detail = result.message;
+                                }
+                                return false;
+                            }
+                            if (detail && !result.message.empty()) {
+                                *detail = result.message;
+                            }
+                            return true;
+                        });
 }
 
 OperationalCoordinator::Result OperationalCoordinator::RequestRelease()
 {
-    return DoTransition({SystemOpMode::Armed}, SystemOpMode::Running);
+    return DoTransition(
+        {SystemOpMode::Armed},
+        SystemOpMode::Running,
+        [this](std::string *detail) {
+            if (driverOps_.motion_healthy && !driverOps_.motion_healthy(detail)) {
+                return false;
+            }
+            if (driverOps_.arm_fresh_command_latch) {
+                driverOps_.arm_fresh_command_latch();
+            }
+            return true;
+        });
 }
 
 OperationalCoordinator::Result OperationalCoordinator::RequestHalt()
 {
-    return DoTransition({SystemOpMode::Running}, SystemOpMode::Armed);
+    return DoTransition(
+        {SystemOpMode::Running},
+        SystemOpMode::Armed,
+        [this](std::string *detail) {
+            if (driverOps_.hold_commands) {
+                driverOps_.hold_commands();
+            }
+            if (!driverOps_.halt_all) {
+                if (detail) {
+                    *detail = "halt path not available";
+                }
+                return false;
+            }
+            const auto result = driverOps_.halt_all();
+            if (!result.ok) {
+                if (detail) {
+                    *detail = result.message;
+                }
+                return false;
+            }
+            if (detail && !result.message.empty()) {
+                *detail = result.message;
+            }
+            return true;
+        });
 }
 
 OperationalCoordinator::Result OperationalCoordinator::RequestRecover()
 {
-    return DoTransition({SystemOpMode::Faulted}, SystemOpMode::Standby);
+    if (mode() != SystemOpMode::Faulted &&
+        driverOps_.any_fault_active && driverOps_.any_fault_active()) {
+        SetFaulted();
+    }
+    return DoTransition(
+        {SystemOpMode::Faulted},
+        SystemOpMode::Standby,
+        [this](std::string *detail) {
+            mode_.store(SystemOpMode::Recovering, std::memory_order_release);
+            if (!driverOps_.recover_all) {
+                mode_.store(SystemOpMode::Faulted, std::memory_order_release);
+                if (detail) {
+                    *detail = "recover path not available";
+                }
+                return false;
+            }
+            const auto result = driverOps_.recover_all();
+            if (!result.ok) {
+                mode_.store(SystemOpMode::Faulted, std::memory_order_release);
+                if (detail) {
+                    *detail = result.message;
+                }
+                return false;
+            }
+            if (driverOps_.hold_commands) {
+                driverOps_.hold_commands();
+            }
+            if (driverOps_.arm_fresh_command_latch) {
+                driverOps_.arm_fresh_command_latch();
+            }
+            if (detail && !result.message.empty()) {
+                *detail = result.message;
+            }
+            return true;
+        });
 }
 
-OperationalCoordinator::Result OperationalCoordinator::RequestShutdown()
+OperationalCoordinator::Result OperationalCoordinator::RequestShutdown(bool force)
 {
     return DoTransition(
         {SystemOpMode::Inactive, SystemOpMode::Configured, SystemOpMode::Standby,
          SystemOpMode::Armed, SystemOpMode::Running, SystemOpMode::Faulted,
          SystemOpMode::Recovering, SystemOpMode::ShuttingDown},
-        SystemOpMode::Configured);
+        SystemOpMode::Configured,
+        [this, force](std::string *detail) {
+            mode_.store(SystemOpMode::ShuttingDown, std::memory_order_release);
+            if (!driverOps_.shutdown_all) {
+                mode_.store(SystemOpMode::Configured, std::memory_order_release);
+                if (detail) {
+                    *detail = "shutdown path not available";
+                }
+                return false;
+            }
+            const auto result = driverOps_.shutdown_all(force);
+            mode_.store(SystemOpMode::Configured, std::memory_order_release);
+            if (!result.ok) {
+                if (detail) {
+                    *detail = result.message;
+                }
+                return false;
+            }
+            if (detail && !result.message.empty()) {
+                *detail = result.message;
+            }
+            return true;
+        });
 }
 
 } // namespace can_driver

@@ -17,7 +17,7 @@ int main(int argc, char **argv)
         return 1;
     }
 
-    LifecycleServiceGateway lifecycleGateway(pnh, &hw);
+    LifecycleServiceGateway lifecycleGateway(pnh, &hw.operationalCoordinator());
 
     controller_manager::ControllerManager cm(&hw, nh);
 

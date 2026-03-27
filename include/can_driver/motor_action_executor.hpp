@@ -28,11 +28,18 @@ public:
     };
 
     struct BatchResult {
+        struct Failure {
+            Target target;
+            Status status{Status::Ok};
+        };
+
         bool anySuccess{false};
         bool anyFailure{false};
         Status firstFailure{Status::Ok};
         std::size_t successCount{0};
         std::size_t failureCount{0};
+        std::vector<Target> succeededTargets;
+        std::vector<Failure> failures;
     };
 
     using Action = std::function<bool(const std::shared_ptr<CanProtocol> &, MotorID)>;

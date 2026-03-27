@@ -8,14 +8,16 @@
 #include <ros/ros.h>
 #include <std_srvs/Trigger.h>
 
-class CanDriverHW;
+namespace can_driver {
+class OperationalCoordinator;
+}
 
 class LifecycleServiceGateway {
 public:
     LifecycleServiceGateway() = default;
-    LifecycleServiceGateway(ros::NodeHandle &pnh, CanDriverHW *hw);
+    LifecycleServiceGateway(ros::NodeHandle &pnh, can_driver::OperationalCoordinator *coordinator);
 
-    void initialize(ros::NodeHandle &pnh, CanDriverHW *hw);
+    void initialize(ros::NodeHandle &pnh, can_driver::OperationalCoordinator *coordinator);
 
 private:
     bool onInit(can_driver::Init::Request &req, can_driver::Init::Response &res);
@@ -26,7 +28,7 @@ private:
     bool onHalt(std_srvs::Trigger::Request &req, std_srvs::Trigger::Response &res);
     bool onResume(std_srvs::Trigger::Request &req, std_srvs::Trigger::Response &res);
 
-    CanDriverHW *hw_{nullptr};
+    can_driver::OperationalCoordinator *coordinator_{nullptr};
 
     ros::ServiceServer initSrv_;
     ros::ServiceServer shutdownSrv_;

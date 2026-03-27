@@ -60,6 +60,7 @@ MotorActionExecutor::BatchResult MotorActionExecutor::executeBatch(const std::ve
         if (status == Status::Ok) {
             result.anySuccess = true;
             ++result.successCount;
+            result.succeededTargets.push_back(target);
             continue;
         }
 
@@ -68,6 +69,7 @@ MotorActionExecutor::BatchResult MotorActionExecutor::executeBatch(const std::ve
         if (result.firstFailure == Status::Ok) {
             result.firstFailure = status;
         }
+        result.failures.push_back(BatchResult::Failure{target, status});
     }
     return result;
 }

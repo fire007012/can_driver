@@ -10,12 +10,9 @@
 #include "can_driver/motor_action_executor.hpp"
 #include "can_driver/operational_coordinator.hpp"
 
-#include <can_driver/Init.h>
 #include <can_driver/MotorCommand.h>
 #include <can_driver/MotorState.h>
-#include <can_driver/Recover.h>
 #include <can_driver/SetZeroLimit.h>
-#include <can_driver/Shutdown.h>
 
 #include <hardware_interface/joint_command_interface.h>
 #include <hardware_interface/joint_state_interface.h>
@@ -73,13 +70,10 @@ public:
         return lifecycleCoordinator_.mode();
     }
 
-    bool handleInit(can_driver::Init::Request &req, can_driver::Init::Response &res);
-    bool handleShutdown(can_driver::Shutdown::Request &req, can_driver::Shutdown::Response &res);
-    bool handleRecover(can_driver::Recover::Request &req, can_driver::Recover::Response &res);
-    bool handleEnable(std_srvs::Trigger::Request &req, std_srvs::Trigger::Response &res);
-    bool handleDisable(std_srvs::Trigger::Request &req, std_srvs::Trigger::Response &res);
-    bool handleHalt(std_srvs::Trigger::Request &req, std_srvs::Trigger::Response &res);
-    bool handleResume(std_srvs::Trigger::Request &req, std_srvs::Trigger::Response &res);
+    can_driver::OperationalCoordinator &operationalCoordinator()
+    {
+        return lifecycleCoordinator_;
+    }
 
 private:
     // -----------------------------------------------------------------------
@@ -198,12 +192,35 @@ private:
     void startMotorRefreshThreads();
     bool syncStartupPositionAndCommands();
     void setupMaintenanceRosComm(ros::NodeHandle &pnh);
+    void configureLifecycleCoordinator();
     void clearDirectCmd(const std::string &jointName);
     void holdCommandsForLifecycleTransition();
     void armFreshCommandLatch();
     bool consumeFreshCommandLatchIfSatisfied();
     const JointConfig *findJointByMotorId(uint16_t motorId) const;
     MotorActionExecutor::Target makeMotorTarget(const JointConfig &jc) const;
+    std::vector<MotorActionExecutor::Target> allMotorTargets() const;
+    can_driver::OperationalCoordinator::Result makeMotorActionFailureResult(
+        MotorActionExecutor::Status status,
+        const char *rejectedMessage,
+        const char *protocolUnavailableMessage) const;
+    can_driver::OperationalCoordinator::Result runMotorBatchAction(
+        const std::vector<MotorActionExecutor::Target> &targets,
+        const MotorActionExecutor::Action &action,
+        const char *operationName,
+        const char *rejectedMessage,
+        const char *protocolUnavailableMessage,
+        bool requireAnyTarget) const;
+    bool queryMotorFault(const MotorActionExecutor::Target &target, bool *hasFault) const;
+    bool anyMotorFaultActive() const;
+    bool allMotorsHealthyForMotion(std::string *detail) const;
+    can_driver::OperationalCoordinator::Result initializeLifecycleDevice(const std::string &device,
+                                                                         bool loopback);
+    can_driver::OperationalCoordinator::Result enableAllMotors();
+    can_driver::OperationalCoordinator::Result disableAllMotors();
+    can_driver::OperationalCoordinator::Result haltAllMotors();
+    can_driver::OperationalCoordinator::Result recoverAllMotors();
+    can_driver::OperationalCoordinator::Result shutdownLifecycleDriver(bool force);
 
     /**
      * @brief 初始化（或重新初始化）指定 CAN 通道。
@@ -223,16 +240,6 @@ private:
      */
     void publishMotorStates(const ros::TimerEvent &);
 
-    // -----------------------------------------------------------------------
-    // Service 回调
-    // -----------------------------------------------------------------------
-    bool onInit(can_driver::Init::Request &req, can_driver::Init::Response &res);
-    bool onShutdown(can_driver::Shutdown::Request &req, can_driver::Shutdown::Response &res);
-    bool onRecover(can_driver::Recover::Request &req, can_driver::Recover::Response &res);
-    bool onEnable(std_srvs::Trigger::Request &req, std_srvs::Trigger::Response &res);
-    bool onDisable(std_srvs::Trigger::Request &req, std_srvs::Trigger::Response &res);
-    bool onHalt(std_srvs::Trigger::Request &req, std_srvs::Trigger::Response &res);
-    bool onResume(std_srvs::Trigger::Request &req, std_srvs::Trigger::Response &res);
     bool onMotorCommand(can_driver::MotorCommand::Request &req,
                         can_driver::MotorCommand::Response &res);
     bool onSetZeroLimit(can_driver::SetZeroLimit::Request &req,
