@@ -143,6 +143,7 @@ add_library(can_driver_transport
   src/JointConfigParser.cpp
   src/MtCan.cpp
   src/EyouCan.cpp
+  src/command_gate.cpp
   src/lifecycle_service_gateway.cpp
   src/motor_action_executor.cpp
   src/operational_coordinator.cpp

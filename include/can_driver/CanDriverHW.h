@@ -3,6 +3,7 @@
 
 #include "can_driver/CanProtocol.h"
 #include "can_driver/CanType.h"
+#include "can_driver/command_gate.hpp"
 #include "can_driver/DeviceManager.h"
 #include "can_driver/IDeviceManager.h"
 #include "can_driver/JointConfigParser.h"
@@ -118,25 +119,16 @@ private:
         CanType protocol{CanType::MT};
         std::vector<std::size_t> jointIndices;
     };
-    struct CommandLatchBaseline {
-        double posCmd{0.0};
-        double velCmd{0.0};
-        double directPosCmd{0.0};
-        double directVelCmd{0.0};
-        bool hasDirectPosCmd{false};
-        bool hasDirectVelCmd{false};
-    };
-
     std::deque<JointConfig> joints_;
     std::map<std::string, std::size_t> jointIndexByName_;
     std::vector<DeviceProtocolGroup> jointGroups_;
-    std::vector<CommandLatchBaseline> commandLatchBaselines_;
     std::vector<int32_t>             rawCommandBuffer_;
     std::vector<uint8_t>             commandValidBuffer_;
     std::map<uint16_t, double>       jointZeroOffsetRadByMotorId_;
 
     std::shared_ptr<IDeviceManager> deviceManager_;
     MotorActionExecutor motorActionExecutor_;
+    CommandGate commandGate_;
 
     // -----------------------------------------------------------------------
     // ros_control 接口对象
@@ -164,7 +156,6 @@ private:
 
     // 生命周期与并发控制
     std::atomic<bool> active_{false};
-    std::atomic<bool> freshCommandRequired_{false};
     can_driver::OperationalCoordinator lifecycleCoordinator_;
     mutable std::mutex        jointStateMutex_;
     double directCmdTimeoutSec_{0.5};
@@ -178,7 +169,6 @@ private:
     bool safetyRequireEnabledForMotion_{true};
     double maxPositionStepRad_{0.0};
     bool safetyHoldAfterDeviceRecover_{true};
-    std::map<std::string, bool> lastDeviceReadyState_;
 
     // -----------------------------------------------------------------------
     // 内部辅助
@@ -192,11 +182,11 @@ private:
     void startMotorRefreshThreads();
     bool syncStartupPositionAndCommands();
     void setupMaintenanceRosComm(ros::NodeHandle &pnh);
+    void configureCommandGate();
     void configureLifecycleCoordinator();
     void clearDirectCmd(const std::string &jointName);
     void holdCommandsForLifecycleTransition();
-    void armFreshCommandLatch();
-    bool consumeFreshCommandLatchIfSatisfied();
+    std::vector<CommandGate::Snapshot> captureCommandSnapshots() const;
     const JointConfig *findJointByMotorId(uint16_t motorId) const;
     MotorActionExecutor::Target makeMotorTarget(const JointConfig &jc) const;
     std::vector<MotorActionExecutor::Target> allMotorTargets() const;

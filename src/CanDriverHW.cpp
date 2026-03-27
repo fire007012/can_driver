@@ -14,6 +14,7 @@ CanDriverHW::CanDriverHW()
     : deviceManager_(std::make_shared<DeviceManager>())
 {
     motorActionExecutor_.setDeviceManager(deviceManager_);
+    configureCommandGate();
     configureLifecycleCoordinator();
 }
 
@@ -24,6 +25,7 @@ CanDriverHW::CanDriverHW(std::shared_ptr<IDeviceManager> deviceManager)
         deviceManager_ = std::make_shared<DeviceManager>();
     }
     motorActionExecutor_.setDeviceManager(deviceManager_);
+    configureCommandGate();
     configureLifecycleCoordinator();
 }
 
@@ -86,12 +88,10 @@ void CanDriverHW::resetInternalState()
     joints_.clear();
     jointIndexByName_.clear();
     jointGroups_.clear();
-    commandLatchBaselines_.clear();
     rawCommandBuffer_.clear();
     commandValidBuffer_.clear();
     jointZeroOffsetRadByMotorId_.clear();
-    lastDeviceReadyState_.clear();
-    freshCommandRequired_.store(false, std::memory_order_release);
+    commandGate_.reset();
     deviceManager_->shutdownAll();
 }
 
@@ -322,7 +322,6 @@ bool CanDriverHW::parseAndSetupJoints(const ros::NodeHandle &pnh)
     }
 
     rebuildJointGroups();
-    commandLatchBaselines_.assign(joints_.size(), CommandLatchBaseline{});
     rawCommandBuffer_.assign(joints_.size(), 0);
     commandValidBuffer_.assign(joints_.size(), 0);
     return true;
@@ -343,7 +342,6 @@ void CanDriverHW::rebuildJointGroups()
         group.protocol = entry.first.second;
         group.jointIndices = entry.second;
         jointGroups_.push_back(std::move(group));
-        lastDeviceReadyState_[entry.first.first] = false;
     }
 }
 
@@ -471,12 +469,23 @@ void CanDriverHW::configureLifecycleCoordinator()
         return anyMotorFaultActive();
     };
     ops.hold_commands = [this]() {
-        holdCommandsForLifecycleTransition();
+        commandGate_.holdCommands();
     };
     ops.arm_fresh_command_latch = [this]() {
-        armFreshCommandLatch();
+        commandGate_.armFreshCommandLatch();
     };
     lifecycleCoordinator_.SetDriverOps(std::move(ops));
+}
+
+void CanDriverHW::configureCommandGate()
+{
+    commandGate_.configure(
+        [this]() {
+            return captureCommandSnapshots();
+        },
+        [this]() {
+            holdCommandsForLifecycleTransition();
+        });
 }
 
 void CanDriverHW::setupMaintenanceRosComm(ros::NodeHandle &pnh)
@@ -550,77 +559,22 @@ void CanDriverHW::holdCommandsForLifecycleTransition()
     }
 }
 
-void CanDriverHW::armFreshCommandLatch()
+std::vector<CommandGate::Snapshot> CanDriverHW::captureCommandSnapshots() const
 {
     std::lock_guard<std::mutex> stateLock(jointStateMutex_);
-    commandLatchBaselines_.assign(joints_.size(), CommandLatchBaseline{});
+    std::vector<CommandGate::Snapshot> snapshots(joints_.size());
     for (std::size_t i = 0; i < joints_.size(); ++i) {
         const auto &jc = joints_[i];
-        auto &baseline = commandLatchBaselines_[i];
-        baseline.posCmd = jc.posCmd;
-        baseline.velCmd = jc.velCmd;
-        baseline.directPosCmd = jc.directPosCmd;
-        baseline.directVelCmd = jc.directVelCmd;
-        baseline.hasDirectPosCmd = jc.hasDirectPosCmd;
-        baseline.hasDirectVelCmd = jc.hasDirectVelCmd;
+        auto &snapshot = snapshots[i];
+        snapshot.controlMode = jc.controlMode;
+        snapshot.posCmd = jc.posCmd;
+        snapshot.velCmd = jc.velCmd;
+        snapshot.directPosCmd = jc.directPosCmd;
+        snapshot.directVelCmd = jc.directVelCmd;
+        snapshot.hasDirectPosCmd = jc.hasDirectPosCmd;
+        snapshot.hasDirectVelCmd = jc.hasDirectVelCmd;
     }
-    freshCommandRequired_.store(true, std::memory_order_release);
-}
-
-bool CanDriverHW::consumeFreshCommandLatchIfSatisfied()
-{
-    if (!freshCommandRequired_.load(std::memory_order_acquire)) {
-        return true;
-    }
-
-    std::lock_guard<std::mutex> stateLock(jointStateMutex_);
-    if (commandLatchBaselines_.size() != joints_.size()) {
-        freshCommandRequired_.store(false, std::memory_order_release);
-        return true;
-    }
-
-    constexpr double kEps = 1e-12;
-    bool satisfied = false;
-    for (std::size_t i = 0; i < joints_.size(); ++i) {
-        const auto &jc = joints_[i];
-        const auto &baseline = commandLatchBaselines_[i];
-        if (jc.controlMode == "velocity") {
-            if (jc.hasDirectVelCmd != baseline.hasDirectVelCmd) {
-                satisfied = true;
-                break;
-            }
-            if (jc.hasDirectVelCmd &&
-                std::fabs(jc.directVelCmd - baseline.directVelCmd) > kEps) {
-                satisfied = true;
-                break;
-            }
-            if (std::fabs(jc.velCmd - baseline.velCmd) > kEps) {
-                satisfied = true;
-                break;
-            }
-        } else {
-            if (jc.hasDirectPosCmd != baseline.hasDirectPosCmd) {
-                satisfied = true;
-                break;
-            }
-            if (jc.hasDirectPosCmd &&
-                std::fabs(jc.directPosCmd - baseline.directPosCmd) > kEps) {
-                satisfied = true;
-                break;
-            }
-            if (std::fabs(jc.posCmd - baseline.posCmd) > kEps) {
-                satisfied = true;
-                break;
-            }
-        }
-    }
-
-    if (!satisfied) {
-        return false;
-    }
-
-    freshCommandRequired_.store(false, std::memory_order_release);
-    return true;
+    return snapshots;
 }
 
 const CanDriverHW::JointConfig *CanDriverHW::findJointByMotorId(uint16_t motorId) const
@@ -945,7 +899,7 @@ void CanDriverHW::write(const ros::Time & /*time*/, const ros::Duration &period)
         std::fill(commandValidBuffer_.begin(), commandValidBuffer_.end(), 0);
         return;
     }
-    if (!consumeFreshCommandLatchIfSatisfied()) {
+    if (!commandGate_.consumeFreshCommandLatchIfSatisfied()) {
         std::lock_guard<std::mutex> lock(jointStateMutex_);
         std::fill(commandValidBuffer_.begin(), commandValidBuffer_.end(), 0);
         return;
@@ -1068,13 +1022,10 @@ void CanDriverHW::write(const ros::Time & /*time*/, const ros::Duration &period)
         const std::string &device = group.canDevice;
         const CanType protocol = group.protocol;
         const bool isReady = isDeviceReady(device);
-        const auto stateIt = lastDeviceReadyState_.find(device);
-        const bool hadReadyState = (stateIt != lastDeviceReadyState_.end());
-        const bool wasReady = hadReadyState ? stateIt->second : false;
-        lastDeviceReadyState_[device] = isReady;
+        const auto deviceEvent = commandGate_.observeDeviceReady(device, isReady);
 
         if (!isReady) {
-            if (!hadReadyState || wasReady) {
+            if (deviceEvent == CommandGate::DeviceEvent::Lost) {
                 ROS_ERROR_THROTTLE(
                     1.0,
                     "[CanDriverHW] Device '%s' not ready, clear direct commands and block motion.",
@@ -1104,13 +1055,13 @@ void CanDriverHW::write(const ros::Time & /*time*/, const ros::Duration &period)
             continue;
         }
 
-        if (safetyHoldAfterDeviceRecover_ && hadReadyState && !wasReady && isReady) {
+        if (safetyHoldAfterDeviceRecover_ && deviceEvent == CommandGate::DeviceEvent::Recovered) {
             ROS_WARN_THROTTLE(
                 1.0,
                 "[CanDriverHW] Device '%s' recovered, hold one cycle and require fresh command.",
                 device.c_str());
-            holdCommandsForLifecycleTransition();
-            armFreshCommandLatch();
+            commandGate_.holdCommands();
+            commandGate_.armFreshCommandLatch();
             continue;
         }
 
