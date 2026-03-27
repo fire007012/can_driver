@@ -72,6 +72,14 @@ public:
         return lifecycleCoordinator_.mode();
     }
 
+    bool handleInit(can_driver::Init::Request &req, can_driver::Init::Response &res);
+    bool handleShutdown(can_driver::Shutdown::Request &req, can_driver::Shutdown::Response &res);
+    bool handleRecover(can_driver::Recover::Request &req, can_driver::Recover::Response &res);
+    bool handleEnable(std_srvs::Trigger::Request &req, std_srvs::Trigger::Response &res);
+    bool handleDisable(std_srvs::Trigger::Request &req, std_srvs::Trigger::Response &res);
+    bool handleHalt(std_srvs::Trigger::Request &req, std_srvs::Trigger::Response &res);
+    bool handleResume(std_srvs::Trigger::Request &req, std_srvs::Trigger::Response &res);
+
 private:
     // -----------------------------------------------------------------------
     // 关节配置
@@ -148,13 +156,6 @@ private:
     // -----------------------------------------------------------------------
     // ROS 通信
     // -----------------------------------------------------------------------
-    ros::ServiceServer initSrv_;
-    ros::ServiceServer shutdownSrv_;
-    ros::ServiceServer recoverSrv_;
-    ros::ServiceServer enableSrv_;
-    ros::ServiceServer disableSrv_;
-    ros::ServiceServer haltSrv_;
-    ros::ServiceServer resumeSrv_;
     ros::ServiceServer motorCmdSrv_;
     ros::ServiceServer setZeroLimitSrv_;
 
@@ -194,7 +195,7 @@ private:
     void loadJointLimits(const ros::NodeHandle &pnh);
     void startMotorRefreshThreads();
     bool syncStartupPositionAndCommands();
-    void setupRosComm(ros::NodeHandle &pnh);
+    void setupMaintenanceRosComm(ros::NodeHandle &pnh);
     void clearDirectCmd(const std::string &jointName);
     void holdCommandsForLifecycleTransition();
     void armFreshCommandLatch();

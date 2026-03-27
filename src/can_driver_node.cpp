@@ -1,4 +1,5 @@
 #include "can_driver/CanDriverHW.h"
+#include "can_driver/lifecycle_service_gateway.hpp"
 
 #include <controller_manager/controller_manager.h>
 #include <ros/ros.h>
@@ -15,6 +16,8 @@ int main(int argc, char **argv)
         ROS_FATAL("[can_driver_node] Hardware init failed, exiting.");
         return 1;
     }
+
+    LifecycleServiceGateway lifecycleGateway(pnh, &hw);
 
     controller_manager::ControllerManager cm(&hw, nh);
 

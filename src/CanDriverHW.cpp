@@ -30,13 +30,6 @@ CanDriverHW::~CanDriverHW()
 {
     resetInternalState();
 
-    initSrv_.shutdown();
-    shutdownSrv_.shutdown();
-    recoverSrv_.shutdown();
-    enableSrv_.shutdown();
-    disableSrv_.shutdown();
-    haltSrv_.shutdown();
-    resumeSrv_.shutdown();
     motorCmdSrv_.shutdown();
     setZeroLimitSrv_.shutdown();
 }
@@ -62,7 +55,7 @@ bool CanDriverHW::init(ros::NodeHandle &nh, ros::NodeHandle &pnh)
         resetInternalState();
         return false;
     }
-    setupRosComm(pnh);
+    setupMaintenanceRosComm(pnh);
 
     ROS_INFO("[CanDriverHW] Initialized with %zu joints on %zu CAN device(s).",
              joints_.size(), deviceManager_->deviceCount());
@@ -446,15 +439,8 @@ void CanDriverHW::startMotorRefreshThreads()
     }
 }
 
-void CanDriverHW::setupRosComm(ros::NodeHandle &pnh)
+void CanDriverHW::setupMaintenanceRosComm(ros::NodeHandle &pnh)
 {
-    initSrv_     = pnh.advertiseService("init",          &CanDriverHW::onInit,         this);
-    shutdownSrv_ = pnh.advertiseService("shutdown",      &CanDriverHW::onShutdown,     this);
-    recoverSrv_  = pnh.advertiseService("recover",       &CanDriverHW::onRecover,      this);
-    enableSrv_   = pnh.advertiseService("enable",        &CanDriverHW::onEnable,       this);
-    disableSrv_  = pnh.advertiseService("disable",       &CanDriverHW::onDisable,      this);
-    haltSrv_     = pnh.advertiseService("halt",          &CanDriverHW::onHalt,         this);
-    resumeSrv_   = pnh.advertiseService("resume",        &CanDriverHW::onResume,       this);
     motorCmdSrv_ = pnh.advertiseService("motor_command", &CanDriverHW::onMotorCommand, this);
     setZeroLimitSrv_ = pnh.advertiseService("set_zero_limit",
                                             &CanDriverHW::onSetZeroLimit,
@@ -1078,6 +1064,12 @@ bool CanDriverHW::onInit(can_driver::Init::Request &req,
     return true;
 }
 
+bool CanDriverHW::handleInit(can_driver::Init::Request &req,
+                             can_driver::Init::Response &res)
+{
+    return onInit(req, res);
+}
+
 bool CanDriverHW::onShutdown(can_driver::Shutdown::Request & /*req*/,
                               can_driver::Shutdown::Response &res)
 {
@@ -1101,6 +1093,12 @@ bool CanDriverHW::onShutdown(can_driver::Shutdown::Request & /*req*/,
                                                               : transition.message);
     ROS_INFO("[CanDriverHW] All devices shut down.");
     return true;
+}
+
+bool CanDriverHW::handleShutdown(can_driver::Shutdown::Request &req,
+                                 can_driver::Shutdown::Response &res)
+{
+    return onShutdown(req, res);
 }
 
 bool CanDriverHW::onRecover(can_driver::Recover::Request &req,
@@ -1237,6 +1235,12 @@ bool CanDriverHW::onRecover(can_driver::Recover::Request &req,
     return true;
 }
 
+bool CanDriverHW::handleRecover(can_driver::Recover::Request &req,
+                                can_driver::Recover::Response &res)
+{
+    return onRecover(req, res);
+}
+
 bool CanDriverHW::onEnable(std_srvs::Trigger::Request & /*req*/,
                            std_srvs::Trigger::Response &res)
 {
@@ -1301,6 +1305,12 @@ bool CanDriverHW::onEnable(std_srvs::Trigger::Request & /*req*/,
     return true;
 }
 
+bool CanDriverHW::handleEnable(std_srvs::Trigger::Request &req,
+                               std_srvs::Trigger::Response &res)
+{
+    return onEnable(req, res);
+}
+
 bool CanDriverHW::onDisable(std_srvs::Trigger::Request & /*req*/,
                             std_srvs::Trigger::Response &res)
 {
@@ -1325,6 +1335,12 @@ bool CanDriverHW::onDisable(std_srvs::Trigger::Request & /*req*/,
     res.success = true;
     res.message = "disabled (standby)";
     return true;
+}
+
+bool CanDriverHW::handleDisable(std_srvs::Trigger::Request &req,
+                                std_srvs::Trigger::Response &res)
+{
+    return onDisable(req, res);
 }
 
 bool CanDriverHW::onHalt(std_srvs::Trigger::Request & /*req*/,
@@ -1353,6 +1369,12 @@ bool CanDriverHW::onHalt(std_srvs::Trigger::Request & /*req*/,
     return true;
 }
 
+bool CanDriverHW::handleHalt(std_srvs::Trigger::Request &req,
+                             std_srvs::Trigger::Response &res)
+{
+    return onHalt(req, res);
+}
+
 bool CanDriverHW::onResume(std_srvs::Trigger::Request & /*req*/,
                            std_srvs::Trigger::Response &res)
 {
@@ -1371,6 +1393,12 @@ bool CanDriverHW::onResume(std_srvs::Trigger::Request & /*req*/,
                                 : (transition.message.empty() ? "resume failed"
                                                               : transition.message);
     return true;
+}
+
+bool CanDriverHW::handleResume(std_srvs::Trigger::Request &req,
+                               std_srvs::Trigger::Response &res)
+{
+    return onResume(req, res);
 }
 
 bool CanDriverHW::onMotorCommand(can_driver::MotorCommand::Request &req,
