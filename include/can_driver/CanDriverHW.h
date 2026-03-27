@@ -7,6 +7,7 @@
 #include "can_driver/IDeviceManager.h"
 #include "can_driver/JointConfigParser.h"
 #include "can_driver/MotorID.h"
+#include "can_driver/operational_coordinator.hpp"
 
 #include <can_driver/Init.h>
 #include <can_driver/MotorCommand.h>
@@ -64,6 +65,11 @@ public:
      * @brief 从 ros_control 命令缓存读取目标值，下发给协议层。
      */
     void write(const ros::Time &time, const ros::Duration &period) override;
+
+    can_driver::SystemOpMode lifecycleMode() const
+    {
+        return lifecycleCoordinator_.mode();
+    }
 
 private:
     // -----------------------------------------------------------------------
@@ -147,6 +153,7 @@ private:
 
     // 生命周期与并发控制
     std::atomic<bool> active_{false};
+    can_driver::OperationalCoordinator lifecycleCoordinator_;
     mutable std::mutex        jointStateMutex_;
     double directCmdTimeoutSec_{0.5};
     double statePublishPeriodSec_{0.1};

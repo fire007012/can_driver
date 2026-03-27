@@ -63,12 +63,14 @@ bool CanDriverHW::init(ros::NodeHandle &nh, ros::NodeHandle &pnh)
     ROS_INFO("[CanDriverHW] Initialized with %zu joints on %zu CAN device(s).",
              joints_.size(), deviceManager_->deviceCount());
     active_.store(true, std::memory_order_release);
+    lifecycleCoordinator_.SetConfigured();
     return true;
 }
 
 void CanDriverHW::resetInternalState()
 {
     active_.store(false, std::memory_order_release);
+    lifecycleCoordinator_.SetInactive();
     stateTimer_.stop();
 
     for (auto &kv : cmdVelSubs_) {
