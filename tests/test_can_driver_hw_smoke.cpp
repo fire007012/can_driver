@@ -5,7 +5,9 @@
 
 #include "can_driver/CanDriverHW.h"
 #include "can_driver/IDeviceManager.h"
+#include "can_driver/lifecycle_service_gateway.hpp"
 #include "can_driver/MotorCommand.h"
+#include "can_driver/Recover.h"
 
 #include <atomic>
 #include <memory>
@@ -317,6 +319,46 @@ TEST_F(CanDriverHWSmokeTest, MotorCommandServiceEnable)
     EXPECT_TRUE(srv.response.success);
     EXPECT_EQ(fakeDm->protocol()->enableCalls(), 1);
     EXPECT_EQ(fakeDm->protocol()->lastEnableMotor(), 0x141u);
+
+    spinner.stop();
+}
+
+TEST_F(CanDriverHWSmokeTest, RecoverServiceRejectsPerMotorLegacyRequest)
+{
+    auto fakeDm = std::make_shared<FakeDeviceManager>();
+    CanDriverHW hw(fakeDm);
+
+    ros::NodeHandle nh;
+    ros::NodeHandle pnh(uniqueNs("can_driver_hw_smoke_recover_service"));
+
+    pnh.setParam("joints", makeSingleVelocityJoint());
+    pnh.setParam("motor_state_period_sec", 0.2);
+
+    ASSERT_TRUE(hw.init(nh, pnh));
+
+    can_driver::OperationalCoordinator::DriverOps ops;
+    ops.recover_all = []() {
+        return can_driver::OperationalCoordinator::Result{true, "recovered"};
+    };
+    hw.operationalCoordinator().SetDriverOps(std::move(ops));
+    hw.operationalCoordinator().SetFaulted();
+
+    LifecycleServiceGateway gateway(pnh, &hw.operationalCoordinator());
+
+    ros::AsyncSpinner spinner(1);
+    spinner.start();
+
+    const std::string srvName = pnh.resolveName("recover");
+    ros::ServiceClient client = nh.serviceClient<can_driver::Recover>(srvName);
+    ASSERT_TRUE(client.waitForExistence(ros::Duration(1.0)));
+
+    can_driver::Recover srv;
+    srv.request.motor_id = 0x141;
+
+    ASSERT_TRUE(client.call(srv));
+    EXPECT_FALSE(srv.response.success);
+    EXPECT_EQ(srv.response.message,
+              "per-motor recover has been removed; use motor_id=65535 for global recover");
 
     spinner.stop();
 }

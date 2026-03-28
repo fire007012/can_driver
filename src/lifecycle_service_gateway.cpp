@@ -4,6 +4,8 @@
 
 namespace {
 
+constexpr uint16_t kGlobalRecoverMotorId = 0xFFFFu;
+
 template <typename Response>
 bool ensureGatewayReady(can_driver::OperationalCoordinator *coordinator, Response &res)
 {
@@ -72,6 +74,11 @@ bool LifecycleServiceGateway::onRecover(can_driver::Recover::Request &req,
                                         can_driver::Recover::Response &res)
 {
     if (!ensureGatewayReady(coordinator_, res)) {
+        return true;
+    }
+    if (req.motor_id != kGlobalRecoverMotorId) {
+        res.success = false;
+        res.message = "per-motor recover has been removed; use motor_id=65535 for global recover";
         return true;
     }
     const auto result = coordinator_->RequestRecover();
