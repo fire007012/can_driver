@@ -37,6 +37,10 @@ public:
         std::lock_guard<std::mutex> lock(mutex_);
         const auto id = static_cast<uint16_t>(motorId);
         ++disableCalls_[id];
+        const bool result = lookupOr(disableResult_, id, true);
+        if (!result) {
+            return false;
+        }
         enabled_[id] = false;
         return true;
     }
@@ -96,6 +100,12 @@ public:
         fault_[motorId] = value;
     }
 
+    void setDisableResult(uint16_t motorId, bool result)
+    {
+        std::lock_guard<std::mutex> lock(mutex_);
+        disableResult_[motorId] = result;
+    }
+
     int disableCalls(uint16_t motorId) const
     {
         std::lock_guard<std::mutex> lock(mutex_);
@@ -118,6 +128,7 @@ private:
 
     mutable std::mutex mutex_;
     std::map<uint16_t, bool> enableResult_;
+    std::map<uint16_t, bool> disableResult_;
     std::map<uint16_t, bool> resetFaultResult_;
     std::map<uint16_t, bool> clearFaultOnReset_;
     std::map<uint16_t, bool> enabled_;
@@ -215,6 +226,24 @@ TEST(LifecycleDriverOpsTest, EnableAllRollsBackSucceededMotorsOnPartialFailure)
     EXPECT_EQ(result.message, "Enable command rejected.");
     EXPECT_EQ(deviceManager->protocol()->disableCalls(0x141), 1);
     EXPECT_FALSE(deviceManager->protocol()->isEnabled(static_cast<MotorID>(0x141)));
+}
+
+TEST(LifecycleDriverOpsTest, EnableAllReportsRollbackFailureWhenDisableFails)
+{
+    auto deviceManager = std::make_shared<FakeDeviceManager>();
+    MotorActionExecutor executor(deviceManager);
+    can_driver::LifecycleDriverOps ops(deviceManager, &executor);
+    ops.setTargets(makeTargets());
+
+    deviceManager->protocol()->setEnableResult(0x141, true);
+    deviceManager->protocol()->setEnableResult(0x142, false);
+    deviceManager->protocol()->setDisableResult(0x141, false);
+
+    const auto result = ops.enableAll();
+    EXPECT_FALSE(result.ok);
+    EXPECT_EQ(result.message, "Enable rollback failed after partial success.");
+    EXPECT_EQ(deviceManager->protocol()->disableCalls(0x141), 1);
+    EXPECT_TRUE(deviceManager->protocol()->isEnabled(static_cast<MotorID>(0x141)));
 }
 
 TEST(LifecycleDriverOpsTest, InitializeDeviceFiltersTargetsByRequestedBus)

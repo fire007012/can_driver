@@ -164,12 +164,18 @@ LifecycleDriverOps::Result LifecycleDriverOps::enableAll() const
         "Enable");
     if (batch.anyFailure) {
         if (!batch.succeededTargets.empty()) {
-            motorActionExecutor_->executeBatch(
+            const auto rollback = motorActionExecutor_->executeBatch(
                 batch.succeededTargets,
                 [](const std::shared_ptr<CanProtocol> &proto, MotorID id) {
                     return proto->Disable(id);
                 },
                 "Enable rollback");
+            if (rollback.anyFailure) {
+                return makeMotorActionFailureResult(
+                    rollback.firstFailure,
+                    "Enable rollback failed after partial success.",
+                    "Protocol not available during enable rollback.");
+            }
         }
         return makeMotorActionFailureResult(batch.firstFailure,
                                             "Enable command rejected.",
