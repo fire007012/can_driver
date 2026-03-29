@@ -73,6 +73,12 @@ public:
     bool setPosition(MotorID motorId, int32_t position) override;
 
     /**
+     * @brief 快写位置命令（用于 CSP 模式）
+     * @note MtCan 协议暂不支持 CSP 模式，此接口仅为满足基类要求
+     */
+    bool quickSetPosition(MotorID motorId, int32_t position) override;
+
+    /**
      * @brief 标记电机进入可控状态（协议无独立使能命令）
      */
     bool Enable(MotorID motorId) override;

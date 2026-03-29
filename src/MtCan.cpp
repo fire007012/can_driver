@@ -312,6 +312,15 @@ bool MtCan::setPosition(MotorID Id, int32_t position)
     return true;
 }
 
+bool MtCan::quickSetPosition(MotorID Id, int32_t position)
+{
+    // MtCan 协议暂不支持 CSP 模式，此接口仅为满足基类要求
+    // 如需使用 CSP 模式，请使用 EyouCan 协议
+    (void)Id;
+    (void)position;
+    return false;
+}
+
 // [FIX #4] 不再每次 Enable 都设置零点并复位系统
 bool MtCan::Enable(MotorID Id)
 {

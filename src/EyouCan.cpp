@@ -226,7 +226,7 @@ bool EyouCan::setPosition(MotorID Id, int32_t position)
     // 协议示例：先设置速度，再设置位置（位置模式需目标速度）
     // 10 RPM = 10 * 65536 / 60 ≈ 10922.666，取 0x00002AAA
     if (fastWrite) {
-        // 兼容策略：先发快写（满足“快写模式”），再补发普通写（确保动作触发）。
+        // 兼容策略：先发快写（满足”快写模式”），再补发普通写（确保动作触发）。
         sendWriteCommand(motorId, 0x09, 0x00002AAA, 4, kFastWriteCommand);
         sendWriteCommand(motorId, 0x0A, static_cast<uint32_t>(position), 4, kFastWriteCommand);
         sendWriteCommand(motorId, 0x09, 0x00002AAA, 4, kWriteCommand);
@@ -235,6 +235,18 @@ bool EyouCan::setPosition(MotorID Id, int32_t position)
         sendWriteCommand(motorId, 0x09, 0x00002AAA, 4, kWriteCommand);
         sendWriteCommand(motorId, 0x0A, static_cast<uint32_t>(position), 4, kWriteCommand);
     }
+    return true;
+}
+
+bool EyouCan::quickSetPosition(MotorID Id, int32_t position)
+{
+    if (!canController) {
+        return false;
+    }
+    uint8_t motorId = static_cast<uint8_t>(Id);
+    registerManagedMotorId(motorId);
+    // CSP 模式：使用快写命令（CMD=0x05），只发送位置帧，无需等待返回
+    sendWriteCommand(motorId, 0x0A, static_cast<uint32_t>(position), 4, kFastWriteCommand);
     return true;
 }
 

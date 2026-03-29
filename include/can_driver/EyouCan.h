@@ -53,6 +53,12 @@ public:
     bool setPosition(MotorID motorId, int32_t position) override;
 
     /**
+     * @brief 快写位置命令（用于 CSP 模式）
+     * 对应 CMD=0x05 快写命令
+     */
+    bool quickSetPosition(MotorID motorId, int32_t position) override;
+
+    /**
      * @brief 下发使能命令（0x10 子命令）
      */
     bool Enable(MotorID motorId) override;
