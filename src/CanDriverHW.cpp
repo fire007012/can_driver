@@ -930,6 +930,12 @@ void CanDriverHW::write(const ros::Time & /*time*/, const ros::Duration &period)
                                           "[CanDriverHW] setVelocity rejected on '%s'.",
                                           device.c_str());
                     }
+                } else if (jc.controlMode == "csp") {
+                    if (!proto->quickSetPosition(jc.motorId, rawCommandBuffer_[idx])) {
+                        ROS_WARN_THROTTLE(1.0,
+                                          "[CanDriverHW] quickSetPosition rejected on '%s'.",
+                                          device.c_str());
+                    }
                 } else {
                     if (!proto->setPosition(jc.motorId, rawCommandBuffer_[idx])) {
                         ROS_WARN_THROTTLE(1.0,
