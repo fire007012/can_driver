@@ -165,6 +165,11 @@ private:
     std::chrono::milliseconds computeRefreshSleep(std::size_t motorCount) const;
     void stopRefreshLoop();
     void publishWriteCountersParam() const;
+
+    /// refresh 轮询周期计数，用于 slow 项分频
+    uint64_t refreshCycleCount_{0};
+    /// slow 项分频系数（每 N 个 refresh 周期查一次 mode/enable/fault/current）
+    static constexpr uint64_t kSlowDivider = 50;
 };
 
 #endif // EyouCan_H

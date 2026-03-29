@@ -70,12 +70,22 @@ bool parse(const XmlRpc::XmlRpcValue &jointList,
             return false;
         }
 
-        // scale 为可选参数，未配置时使用 1.0（即不缩放）。
+        // scale 支持两种填写方式：
+        //   1. 直接填换算系数（小数，如 9.587e-05），raw * scale = rad
+        //   2. 填每圈脉冲数 PPR（>=2 的整数，如 65536），自动换算为 2π/PPR
         if (jv.hasMember("position_scale")) {
-            jc.positionScale = static_cast<double>(jv["position_scale"]);
+            const auto &sv = jv["position_scale"];
+            const double val = (sv.getType() == XmlRpc::XmlRpcValue::TypeInt)
+                                   ? static_cast<double>(static_cast<int>(sv))
+                                   : static_cast<double>(sv);
+            jc.positionScale = (val >= 2.0) ? (2.0 * M_PI / val) : val;
         }
         if (jv.hasMember("velocity_scale")) {
-            jc.velocityScale = static_cast<double>(jv["velocity_scale"]);
+            const auto &sv = jv["velocity_scale"];
+            const double val = (sv.getType() == XmlRpc::XmlRpcValue::TypeInt)
+                                   ? static_cast<double>(static_cast<int>(sv))
+                                   : static_cast<double>(sv);
+            jc.velocityScale = (val >= 2.0) ? (2.0 * M_PI / val) : val;
         }
         if (!std::isfinite(jc.positionScale) || jc.positionScale <= 0.0) {
             errorMsg = "Joint '" + jc.name + "': invalid position_scale.";

@@ -673,16 +673,24 @@ void EyouCan::refreshMotorStates()
         return;
     }
 
+    const bool slowCycle = (refreshCycleCount_ % kSlowDivider == 0);
+    ++refreshCycleCount_;
+
     for (uint8_t motorId : motorIds) {
         if (!refreshLoopActive.load()) {
             break;
         }
+        // 位置 + 速度：每周期都查（控制闭环需要）
         requestPosition(motorId);
-        requestMode(motorId);
-        requestEnable(motorId);
-        requestFault(motorId);
-        requestCurrent(motorId);   // [FIX #7] 轮询电流
-        requestVelocity(motorId);  // [FIX #8] 轮询实际速度
+        requestVelocity(motorId);
+
+        // mode / enable / fault / current：每 kSlowDivider 个周期查一次
+        if (slowCycle) {
+            requestMode(motorId);
+            requestEnable(motorId);
+            requestFault(motorId);
+            requestCurrent(motorId);
+        }
     }
 }
 
