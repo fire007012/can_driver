@@ -525,3 +525,130 @@ Lely 风格架构本质上做了三件事：
 - 不会把“状态机重构”误做成“只改 service 名字和状态名”
 
 本质上，`can_driver` 下一步最该学的不是“再建一个 lifecycle”，而是“像 `Eyou_Canopen_Master` 一样，让生命周期下面真的有一个可靠的闭环运行时”。
+
+## 12. 按 Commit 实施计划
+
+为避免本轮重构再次失控，建议严格按 commit 切分推进，每个 commit 都只解决一个层次的问题。
+
+### Commit 1
+
+`feat(can_driver): add per-device tx/rx stats and query backoff`
+
+目标：
+
+- 先把当前爆队列问题看清楚
+- 先止血，不大改架构
+
+内容：
+
+- 为每个 CAN 设备增加 TX/RX 统计
+- 记录 `tx_ok`、`tx_eagain`、`tx_link_down`、`tx_drop_query`、`rx_ok`、`rx_timeout`
+- 记录 `last_rx_time`
+- 给查询类请求增加基础退避与降频
+- 队列饱和时优先丢查询帧
+
+验收：
+
+- 运行中可看到更明确的设备级统计日志
+- 出现读超时时，不再继续无节制追发查询帧
+
+### Commit 2
+
+`refactor(can_driver): funnel all socketcan writes through a single tx entry`
+
+目标：
+
+- 先统一发送入口
+- 为后续 `DeviceRuntime` 做结构准备
+
+内容：
+
+- 收口所有 socket 发送路径
+- 协议类不再各自随意直接写 transport
+- `CanDriverHW` 和维护路径统一走一个发送入口
+
+验收：
+
+- 仓内所有发送路径都可以追到同一个 TX 入口
+
+### Commit 3
+
+`refactor(can_driver): introduce device runtime with prioritized nonblocking tx`
+
+目标：
+
+- 建立每设备唯一 TX owner
+
+内容：
+
+- 引入 `DeviceRuntime`
+- 按 `Control` / `Recover` / `Query` 分类发送
+- 非阻塞发送失败时先丢 `Query`
+- 统一维护队列深度、发送失败和退避状态
+
+验收：
+
+- 不同业务路径不再直接争抢同一个 socket
+- `TX queue saturated` 不再由零散路径分别触发
+
+### Commit 4
+
+`refactor(can_driver): introduce shared driver state for feedback freshness and intents`
+
+目标：
+
+- 收敛跨线程数据面
+
+内容：
+
+- 增加统一的 feedback/command/intent 共享状态
+- 建立 `last_rx_time`、`consecutive_timeout_count` 等正式字段
+- 让 lifecycle、axis runtime、ROS 适配层共享同一份状态
+
+验收：
+
+- 反馈新鲜度和设备健康状态不再散落在多个对象里
+
+### Commit 5
+
+`refactor(can_driver): add axis runtime closed-loop states for pp path`
+
+目标：
+
+- 给现有主路径先补上轴级闭环状态
+
+内容：
+
+- 引入 `Offline/Seen/Standby/Armed/Running/Faulted/Recovering` 轴级状态
+- 基于真实反馈判断 ready，而不是只看 service 成功
+- 让恢复、使能、运行都依赖真实回读
+
+验收：
+
+- lifecycle mode 与轴真实状态不再脱节
+
+### Commit 6
+
+`refactor(can_driver): slim CanDriverHW and remove protocol-owned refresh loops`
+
+目标：
+
+- 让 `CanDriverHW` 回到适配层角色
+
+内容：
+
+- 迁出总线调度与刷新策略
+- 协议层只保留协议语义
+- `CanDriverHW` 只保留 `RobotHW` / ROS 接线职责
+
+验收：
+
+- `CanDriverHW` 不再继续膨胀成运行时和策略中心
+
+### 实施顺序说明
+
+本轮应立即开始的是 `Commit 1`，原因有三点：
+
+- 风险最低，不会大面积扰动现有控制链
+- 能最快回答“为什么平均负载不高却依然爆队列”
+- 它会直接决定后续 `DeviceRuntime` 需要怎样设计优先级和退避策略
