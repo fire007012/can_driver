@@ -4,6 +4,7 @@
 #include "can_driver/MtCan.h"
 
 #include <array>
+#include <chrono>
 #include <cstdint>
 #include <memory>
 #include <mutex>
@@ -79,6 +80,31 @@ public:
     static void refresh(MtCan &mt)
     {
         mt.refreshMotorStates();
+    }
+
+    static void ageAllPendingRequests(MtCan &mt, std::chrono::milliseconds age)
+    {
+        const auto now = std::chrono::steady_clock::now();
+        std::lock_guard<std::mutex> lock(mt.pendingReadMutex_);
+        for (auto &entry : mt.pendingReadRequests_) {
+            entry.second.inFlight = true;
+            entry.second.lastSent = now - age;
+        }
+    }
+
+    static void expireAllPendingBackoff(MtCan &mt)
+    {
+        std::lock_guard<std::mutex> lock(mt.pendingReadMutex_);
+        for (auto &entry : mt.pendingReadRequests_) {
+            entry.second.nextEligibleSend = std::chrono::steady_clock::time_point {};
+        }
+    }
+
+    static std::size_t consecutiveTimeouts(MtCan &mt, uint8_t motorId, uint8_t command)
+    {
+        std::lock_guard<std::mutex> lock(mt.pendingReadMutex_);
+        const auto it = mt.pendingReadRequests_.find(MtCan::pendingReadKey(motorId, command));
+        return (it == mt.pendingReadRequests_.end()) ? 0u : it->second.consecutiveTimeouts;
     }
 };
 
@@ -225,6 +251,23 @@ TEST_F(MtCanTest, RefreshDoesNotResendSameReadWhileRequestIsInFlight)
 
     MtCanTestAccessor::refresh(mt);
     EXPECT_EQ(transport->sentFrames.size(), 3u);
+}
+
+TEST_F(MtCanTest, RefreshBacksOffAfterRepeatedReadTimeouts)
+{
+    MtCanTestAccessor::setRefreshState(mt, {0x01}, true);
+
+    MtCanTestAccessor::refresh(mt);
+    ASSERT_EQ(transport->sentFrames.size(), 3u);
+
+    MtCanTestAccessor::ageAllPendingRequests(mt, std::chrono::milliseconds(25));
+    MtCanTestAccessor::refresh(mt);
+    EXPECT_EQ(transport->sentFrames.size(), 3u);
+    EXPECT_EQ(MtCanTestAccessor::consecutiveTimeouts(mt, 0x01, 0x9C), 1u);
+
+    MtCanTestAccessor::expireAllPendingBackoff(mt);
+    MtCanTestAccessor::refresh(mt);
+    EXPECT_EQ(transport->sentFrames.size(), 6u);
 }
 
 TEST_F(MtCanTest, EnableDisableAndFaultStateAreObservable)

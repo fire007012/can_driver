@@ -137,7 +137,9 @@ private:
     };
     struct PendingReadRequest {
         std::chrono::steady_clock::time_point lastSent {};
+        std::chrono::steady_clock::time_point nextEligibleSend {};
         bool inFlight {false};
+        std::size_t consecutiveTimeouts {0};
     };
 
     std::shared_ptr<CanTransport> canController;
@@ -200,6 +202,8 @@ private:
     void markReadResponseReceived(uint8_t motorId, uint8_t command);
     void resetReadTracking();
     static uint16_t pendingReadKey(uint8_t motorId, uint8_t command);
+    static std::chrono::milliseconds computeTimeoutBackoff(std::size_t consecutiveTimeouts,
+                                                           std::chrono::milliseconds baseTimeout);
 };
 
 #endif // MTCAN_H

@@ -502,24 +502,43 @@ bool EyouCan::tryIssueReadCommand(uint8_t motorId, uint8_t subCommand)
 
     const auto now = std::chrono::steady_clock::now();
     const auto timeout = computeReadRequestTimeout();
-    bool timedOut = false;
+    bool delayRetry = false;
+    std::size_t consecutiveTimeouts = 0;
+    std::chrono::milliseconds retryBackoff(0);
     {
         std::lock_guard<std::mutex> lock(pendingReadMutex_);
         auto &request = pendingReadRequests_[pendingReadKey(motorId, subCommand)];
+        if (request.nextEligibleSend != std::chrono::steady_clock::time_point {} &&
+            now < request.nextEligibleSend) {
+            return false;
+        }
         if (request.inFlight && (now - request.lastSent) < timeout) {
             return false;
         }
-        timedOut = request.inFlight;
-        request.inFlight = true;
-        request.lastSent = now;
+        if (request.inFlight) {
+            request.inFlight = false;
+            request.consecutiveTimeouts = std::min<std::size_t>(request.consecutiveTimeouts + 1, 8);
+            request.nextEligibleSend = now + computeTimeoutBackoff(request.consecutiveTimeouts, timeout);
+            consecutiveTimeouts = request.consecutiveTimeouts;
+            retryBackoff = std::chrono::duration_cast<std::chrono::milliseconds>(
+                request.nextEligibleSend - now);
+            delayRetry = true;
+        } else {
+            request.inFlight = true;
+            request.lastSent = now;
+            request.nextEligibleSend = std::chrono::steady_clock::time_point {};
+        }
     }
 
-    if (timedOut) {
+    if (delayRetry) {
         ROS_WARN_STREAM_THROTTLE(
             1.0,
             "[EyouCan] Read timeout on motor " << static_cast<unsigned>(motorId)
             << " subcmd=0x" << std::hex << static_cast<unsigned>(subCommand) << std::dec
-            << ", retrying");
+            << ", backing off for " << retryBackoff.count()
+            << " ms before retry"
+            << " (consecutive_timeouts=" << consecutiveTimeouts << ")");
+        return false;
     }
 
     sendReadCommand(motorId, subCommand);
@@ -532,6 +551,8 @@ void EyouCan::markReadResponseReceived(uint8_t motorId, uint8_t subCommand)
     auto it = pendingReadRequests_.find(pendingReadKey(motorId, subCommand));
     if (it != pendingReadRequests_.end()) {
         it->second.inFlight = false;
+        it->second.nextEligibleSend = std::chrono::steady_clock::time_point {};
+        it->second.consecutiveTimeouts = 0;
     }
 }
 
@@ -556,6 +577,15 @@ std::chrono::milliseconds EyouCan::computeReadRequestTimeout() const
     const auto refreshSleep = computeRefreshSleep(motorCount);
     const auto timeout = refreshSleep * 3;
     return std::max(std::chrono::milliseconds(20), std::min(timeout, std::chrono::milliseconds(200)));
+}
+
+std::chrono::milliseconds EyouCan::computeTimeoutBackoff(std::size_t consecutiveTimeouts,
+                                                         std::chrono::milliseconds baseTimeout)
+{
+    const std::size_t cappedTimeouts = std::min<std::size_t>(consecutiveTimeouts, 4);
+    const auto multiplier = static_cast<int64_t>(1ULL << cappedTimeouts);
+    const auto backoff = baseTimeout * multiplier;
+    return std::min(std::chrono::milliseconds(500), std::max(baseTimeout, backoff));
 }
 
 // [FIX #2, #3, #4] 重写 handleResponse，修正写返回解析和读返回偏移

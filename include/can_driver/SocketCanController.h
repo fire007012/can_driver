@@ -6,6 +6,7 @@
 #include <linux/can.h>
 
 #include <atomic>
+#include <cstdint>
 #include <memory>
 #include <mutex>
 #include <string>
@@ -19,6 +20,18 @@ class SocketCanController : public CanTransport {
     friend class SocketCanControllerTestAccessor;
 
 public:
+    struct Stats {
+        std::uint64_t txOk{0};
+        std::uint64_t txBackpressure{0};
+        std::uint64_t txLinkUnavailable{0};
+        std::uint64_t txError{0};
+        std::uint64_t txPartial{0};
+        std::uint64_t rxOk{0};
+        std::uint64_t rxError{0};
+        std::uint64_t rxShortRead{0};
+        std::int64_t lastRxSteadyNs{0};
+    };
+
     SocketCanController();
     ~SocketCanController() override;
 
@@ -40,6 +53,7 @@ public:
 
     bool isReady() const;
     std::string device() const;
+    Stats snapshotStats() const;
 
 private:
     void receiveLoop();
@@ -50,10 +64,20 @@ private:
     static bool shouldReceiveOwnMessages(bool loopback);
     static bool isBackpressureSendError(int errorCode);
     static bool isLinkUnavailableSendError(int errorCode);
+    void resetStats();
 
     std::atomic<bool> initialized_{false};
     std::atomic<bool> stopRequested_{false};
     std::atomic<std::size_t> nextHandlerId_{1};
+    std::atomic<std::uint64_t> txOkCount_{0};
+    std::atomic<std::uint64_t> txBackpressureCount_{0};
+    std::atomic<std::uint64_t> txLinkUnavailableCount_{0};
+    std::atomic<std::uint64_t> txErrorCount_{0};
+    std::atomic<std::uint64_t> txPartialCount_{0};
+    std::atomic<std::uint64_t> rxOkCount_{0};
+    std::atomic<std::uint64_t> rxErrorCount_{0};
+    std::atomic<std::uint64_t> rxShortReadCount_{0};
+    std::atomic<std::int64_t> lastRxSteadyNs_{0};
     std::unordered_map<std::size_t, ReceiveHandler> handlers_;
     mutable std::mutex handlerMutex_;
     std::thread receiveThread_;

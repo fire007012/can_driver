@@ -125,7 +125,9 @@ private:
     };
     struct PendingReadRequest {
         std::chrono::steady_clock::time_point lastSent {};
+        std::chrono::steady_clock::time_point nextEligibleSend {};
         bool inFlight {false};
+        std::size_t consecutiveTimeouts {0};
     };
 
     std::shared_ptr<CanTransport> canController;
@@ -177,6 +179,8 @@ private:
     void markReadResponseReceived(uint8_t motorId, uint8_t subCommand);
     void resetReadTracking();
     static uint16_t pendingReadKey(uint8_t motorId, uint8_t subCommand);
+    static std::chrono::milliseconds computeTimeoutBackoff(std::size_t consecutiveTimeouts,
+                                                           std::chrono::milliseconds baseTimeout);
 
     /// refresh 轮询周期计数，用于 slow 项分频
     uint64_t refreshCycleCount_{0};

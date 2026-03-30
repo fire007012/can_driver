@@ -3,6 +3,7 @@
 
 #include "can_driver/EyouCan.h"
 
+#include <chrono>
 #include <cstdint>
 #include <memory>
 #include <mutex>
@@ -83,6 +84,31 @@ public:
     static void refresh(EyouCan &eyou)
     {
         eyou.refreshMotorStates();
+    }
+
+    static void ageAllPendingRequests(EyouCan &eyou, std::chrono::milliseconds age)
+    {
+        const auto now = std::chrono::steady_clock::now();
+        std::lock_guard<std::mutex> lock(eyou.pendingReadMutex_);
+        for (auto &entry : eyou.pendingReadRequests_) {
+            entry.second.inFlight = true;
+            entry.second.lastSent = now - age;
+        }
+    }
+
+    static void expireAllPendingBackoff(EyouCan &eyou)
+    {
+        std::lock_guard<std::mutex> lock(eyou.pendingReadMutex_);
+        for (auto &entry : eyou.pendingReadRequests_) {
+            entry.second.nextEligibleSend = std::chrono::steady_clock::time_point {};
+        }
+    }
+
+    static std::size_t consecutiveTimeouts(EyouCan &eyou, uint8_t motorId, uint8_t subCommand)
+    {
+        std::lock_guard<std::mutex> lock(eyou.pendingReadMutex_);
+        const auto it = eyou.pendingReadRequests_.find(EyouCan::pendingReadKey(motorId, subCommand));
+        return (it == eyou.pendingReadRequests_.end()) ? 0u : it->second.consecutiveTimeouts;
     }
 };
 
@@ -168,6 +194,23 @@ TEST_F(EyouCanTest, RefreshDoesNotResendSameReadWhileRequestIsInFlight)
 
     EyouCanTestAccessor::refresh(eyou);
     EXPECT_EQ(transport->sentFrames.size(), 6u);
+}
+
+TEST_F(EyouCanTest, RefreshBacksOffAfterRepeatedReadTimeouts)
+{
+    EyouCanTestAccessor::setRefreshState(eyou, {0x05}, true);
+
+    EyouCanTestAccessor::refresh(eyou);
+    ASSERT_EQ(transport->sentFrames.size(), 6u);
+
+    EyouCanTestAccessor::ageAllPendingRequests(eyou, std::chrono::milliseconds(25));
+    EyouCanTestAccessor::refresh(eyou);
+    EXPECT_EQ(transport->sentFrames.size(), 6u);
+    EXPECT_EQ(EyouCanTestAccessor::consecutiveTimeouts(eyou, 0x05, 0x07), 1u);
+
+    EyouCanTestAccessor::expireAllPendingBackoff(eyou);
+    EyouCanTestAccessor::refresh(eyou);
+    EXPECT_EQ(transport->sentFrames.size(), 8u);
 }
 
 TEST_F(EyouCanTest, HandleReadResponseUpdatesPositionCache)

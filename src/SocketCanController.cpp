@@ -9,6 +9,7 @@
 #include <unistd.h>
 #include <cstring>
 #include <algorithm>
+#include <chrono>
 #include <vector>
 
 namespace {
@@ -19,6 +20,20 @@ bool setNonBlocking(int fd) {
     return false;
   }
   return ::fcntl(fd, F_SETFL, flags | O_NONBLOCK) == 0;
+}
+
+std::int64_t steadyNowNs() {
+  return std::chrono::duration_cast<std::chrono::nanoseconds>(
+             std::chrono::steady_clock::now().time_since_epoch())
+      .count();
+}
+
+long long lastRxAgeMs(std::int64_t lastRxSteadyNs) {
+  if (lastRxSteadyNs <= 0) {
+    return -1;
+  }
+  const auto ageNs = steadyNowNs() - lastRxSteadyNs;
+  return ageNs > 0 ? static_cast<long long>(ageNs / 1000000) : 0;
 }
 
 } // namespace
@@ -33,6 +48,7 @@ SocketCanController::~SocketCanController() {
 bool SocketCanController::initialize(const std::string &device, bool loopback) {
   // 允许重复初始化：先清理旧 socket 和线程。
   shutdown();
+  resetStats();
 
   const int fd = ::socket(PF_CAN, SOCK_RAW, CAN_RAW);
   if (fd < 0) {
@@ -96,6 +112,7 @@ void SocketCanController::shutdown() {
     handlers_.clear();
     nextHandlerId_.store(1);
   }
+  resetStats();
   deviceName_.clear();
 }
 
@@ -105,6 +122,20 @@ bool SocketCanController::isReady() const {
 
 std::string SocketCanController::device() const {
   return deviceName_;
+}
+
+SocketCanController::Stats SocketCanController::snapshotStats() const {
+  Stats stats;
+  stats.txOk = txOkCount_.load(std::memory_order_relaxed);
+  stats.txBackpressure = txBackpressureCount_.load(std::memory_order_relaxed);
+  stats.txLinkUnavailable = txLinkUnavailableCount_.load(std::memory_order_relaxed);
+  stats.txError = txErrorCount_.load(std::memory_order_relaxed);
+  stats.txPartial = txPartialCount_.load(std::memory_order_relaxed);
+  stats.rxOk = rxOkCount_.load(std::memory_order_relaxed);
+  stats.rxError = rxErrorCount_.load(std::memory_order_relaxed);
+  stats.rxShortRead = rxShortReadCount_.load(std::memory_order_relaxed);
+  stats.lastRxSteadyNs = lastRxSteadyNs_.load(std::memory_order_relaxed);
+  return stats;
 }
 
 void SocketCanController::send(const CanTransport::Frame &frame) {
@@ -118,34 +149,64 @@ void SocketCanController::send(const CanTransport::Frame &frame) {
   if (written < 0) {
     const int errorCode = errno;
     if (isBackpressureSendError(errorCode)) {
+      txBackpressureCount_.fetch_add(1, std::memory_order_relaxed);
+      const auto stats = snapshotStats();
       ROS_WARN_STREAM_THROTTLE(1.0,
                                "[SocketCanController] TX queue saturated on " << deviceName_
                                << ", dropping frame without blocking"
                                << " (errno=" << errorCode << ": "
-                               << std::strerror(errorCode) << ")");
+                               << std::strerror(errorCode) << ")"
+                               << " stats={tx_ok=" << stats.txOk
+                               << ", tx_backpressure=" << stats.txBackpressure
+                               << ", tx_link_down=" << stats.txLinkUnavailable
+                               << ", rx_ok=" << stats.rxOk
+                               << ", rx_error=" << stats.rxError
+                               << ", last_rx_age_ms=" << lastRxAgeMs(stats.lastRxSteadyNs)
+                               << "}");
       return;
     }
     if (isLinkUnavailableSendError(errorCode)) {
+      txLinkUnavailableCount_.fetch_add(1, std::memory_order_relaxed);
+      const auto stats = snapshotStats();
       ROS_WARN_STREAM_THROTTLE(1.0,
                                "[SocketCanController] CAN link unavailable on " << deviceName_
                                << ", dropping frame"
                                << " (errno=" << errorCode << ": "
-                               << std::strerror(errorCode) << ")");
+                               << std::strerror(errorCode) << ")"
+                               << " stats={tx_ok=" << stats.txOk
+                               << ", tx_backpressure=" << stats.txBackpressure
+                               << ", tx_link_down=" << stats.txLinkUnavailable
+                               << ", rx_ok=" << stats.rxOk
+                               << ", rx_error=" << stats.rxError
+                               << ", last_rx_age_ms=" << lastRxAgeMs(stats.lastRxSteadyNs)
+                               << "}");
       return;
     }
 
+    txErrorCount_.fetch_add(1, std::memory_order_relaxed);
+    const auto stats = snapshotStats();
     ROS_ERROR_STREAM_THROTTLE(1.0,
                               "[SocketCanController] send() failed on " << deviceName_
                               << " (errno=" << errorCode << ": "
-                              << std::strerror(errorCode) << ")");
+                              << std::strerror(errorCode) << ")"
+                              << " stats={tx_ok=" << stats.txOk
+                              << ", tx_error=" << stats.txError
+                              << ", rx_ok=" << stats.rxOk
+                              << ", rx_error=" << stats.rxError
+                              << ", last_rx_age_ms=" << lastRxAgeMs(stats.lastRxSteadyNs)
+                              << "}");
     return;
   }
 
   if (written != static_cast<ssize_t>(sizeof(socketFrame))) {
+    txPartialCount_.fetch_add(1, std::memory_order_relaxed);
     ROS_ERROR_STREAM_THROTTLE(1.0,
                               "[SocketCanController] Partial send on " << deviceName_
                               << ": " << written << " bytes");
+    return;
   }
+
+  txOkCount_.fetch_add(1, std::memory_order_relaxed);
 }
 
 bool SocketCanController::shouldEnableLocalLoopback() {
@@ -196,6 +257,8 @@ void SocketCanController::receiveLoop() {
     struct can_frame rxFrame {};
     const auto n = ::read(socketFd_, &rxFrame, sizeof(rxFrame));
     if (n == static_cast<ssize_t>(sizeof(rxFrame))) {
+      rxOkCount_.fetch_add(1, std::memory_order_relaxed);
+      lastRxSteadyNs_.store(steadyNowNs(), std::memory_order_relaxed);
       dispatchReceive(fromLinuxCanFrame(rxFrame));
       continue;
     }
@@ -205,6 +268,7 @@ void SocketCanController::receiveLoop() {
       if (errorCode == EAGAIN || errorCode == EWOULDBLOCK || errorCode == EINTR) {
         continue;
       }
+      rxErrorCount_.fetch_add(1, std::memory_order_relaxed);
       ROS_WARN_STREAM_THROTTLE(1.0,
                                "[SocketCanController] read() failed on " << deviceName_
                                << " (errno=" << errorCode << ": "
@@ -212,6 +276,7 @@ void SocketCanController::receiveLoop() {
       continue;
     }
 
+    rxShortReadCount_.fetch_add(1, std::memory_order_relaxed);
     ROS_WARN_STREAM_THROTTLE(1.0,
                              "[SocketCanController] Short read on " << deviceName_
                              << ": " << n << " bytes");
@@ -280,4 +345,16 @@ CanTransport::Frame SocketCanController::fromLinuxCanFrame(const struct can_fram
     userFrame.data[i] = frame.data[i];
   }
   return userFrame;
+}
+
+void SocketCanController::resetStats() {
+  txOkCount_.store(0, std::memory_order_relaxed);
+  txBackpressureCount_.store(0, std::memory_order_relaxed);
+  txLinkUnavailableCount_.store(0, std::memory_order_relaxed);
+  txErrorCount_.store(0, std::memory_order_relaxed);
+  txPartialCount_.store(0, std::memory_order_relaxed);
+  rxOkCount_.store(0, std::memory_order_relaxed);
+  rxErrorCount_.store(0, std::memory_order_relaxed);
+  rxShortReadCount_.store(0, std::memory_order_relaxed);
+  lastRxSteadyNs_.store(0, std::memory_order_relaxed);
 }
