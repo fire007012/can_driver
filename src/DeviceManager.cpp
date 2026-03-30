@@ -1,4 +1,5 @@
 #include "can_driver/DeviceManager.h"
+#include "can_driver/DeviceRuntime.h"
 
 #include <ros/ros.h>
 
@@ -19,7 +20,7 @@ bool DeviceManager::ensureTransport(const std::string &device, bool loopback)
     }
 
     transports_[device] = transport;
-    txDispatchers_[device] = std::make_shared<DirectCanTxDispatcher>(transport);
+    txDispatchers_[device] = std::make_shared<DeviceRuntime>(transport, device);
     // 同步创建该设备的命令互斥锁，供上层 write() 串行下发命令使用。
     deviceCmdMutexes_[device] = std::make_shared<std::mutex>();
     ROS_INFO("[CanDriverHW] Opened CAN device '%s'.", device.c_str());
@@ -37,7 +38,7 @@ bool DeviceManager::ensureProtocol(const std::string &device, CanType type)
     auto transport = transportIt->second;
     auto txDispatcherIt = txDispatchers_.find(device);
     if (txDispatcherIt == txDispatchers_.end()) {
-        txDispatchers_[device] = std::make_shared<DirectCanTxDispatcher>(transport);
+        txDispatchers_[device] = std::make_shared<DeviceRuntime>(transport, device);
         txDispatcherIt = txDispatchers_.find(device);
     }
     auto txDispatcher = txDispatcherIt->second;
@@ -71,7 +72,7 @@ bool DeviceManager::initDevice(const std::string &device,
             return false;
         }
         transports_[device] = transport;
-        txDispatchers_[device] = std::make_shared<DirectCanTxDispatcher>(transport);
+        txDispatchers_[device] = std::make_shared<DeviceRuntime>(transport, device);
         deviceCmdMutexes_[device] = std::make_shared<std::mutex>();
         transportIt = transports_.find(device);
     } else {
@@ -87,7 +88,7 @@ bool DeviceManager::initDevice(const std::string &device,
         deviceCmdMutexes_[device] = std::make_shared<std::mutex>();
     }
     if (txDispatchers_.find(device) == txDispatchers_.end()) {
-        txDispatchers_[device] = std::make_shared<DirectCanTxDispatcher>(transportIt->second);
+        txDispatchers_[device] = std::make_shared<DeviceRuntime>(transportIt->second, device);
     }
 
     // 按协议拆分电机列表，避免不必要地创建协议实例。
@@ -174,11 +175,11 @@ void DeviceManager::shutdownAll()
     // 先释放协议（包含内部线程/handler），再关闭 transport。
     mtProtocols_.clear();
     eyouProtocols_.clear();
+    txDispatchers_.clear();
     for (auto &kv : transports_) {
         kv.second->shutdown();
     }
     transports_.clear();
-    txDispatchers_.clear();
     deviceCmdMutexes_.clear();
 }
 

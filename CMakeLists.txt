@@ -140,6 +140,7 @@ include_directories(
 ## Declare a C++ library
 add_library(can_driver_transport
   src/DeviceManager.cpp
+  src/DeviceRuntime.cpp
   src/JointConfigParser.cpp
   src/MtCan.cpp
   src/EyouCan.cpp
@@ -293,6 +294,26 @@ if(CATKIN_ENABLE_TESTING)
       )
     else()
       target_link_libraries(test_device_manager
+        can_driver_transport
+        ${catkin_LIBRARIES}
+        ${GTEST_LIBRARIES} ${GTEST_MAIN_LIBRARIES}
+      )
+    endif()
+  endif()
+
+  catkin_add_gtest(test_device_runtime
+    tests/test_device_runtime.cpp
+  )
+  if(TARGET test_device_runtime)
+    target_include_directories(test_device_runtime PRIVATE include ${GTEST_INCLUDE_DIRS})
+    if (TARGET GTest::GTest)
+      target_link_libraries(test_device_runtime
+        can_driver_transport
+        ${catkin_LIBRARIES}
+        GTest::GTest GTest::Main
+      )
+    else()
+      target_link_libraries(test_device_runtime
         can_driver_transport
         ${catkin_LIBRARIES}
         ${GTEST_LIBRARIES} ${GTEST_MAIN_LIBRARIES}
