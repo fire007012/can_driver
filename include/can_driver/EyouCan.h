@@ -107,6 +107,10 @@ public:
     void initializeMotorRefresh(const std::vector<MotorID> &motorIds) override;
     /// 设置状态轮询频率（Hz）；<=0 表示使用默认自适应周期。
     void setRefreshRateHz(double hz);
+    /// 执行一轮状态查询，由外部刷新 worker 调度。
+    void runRefreshCycle();
+    /// 返回当前注册电机的建议查询周期。
+    std::chrono::milliseconds refreshSleepInterval() const;
     /// 设置是否启用 PP 快写命令（CMD=0x05）。
     void setFastWriteEnabled(bool enabled);
     uint64_t fastWriteSentCount() const;
@@ -148,8 +152,6 @@ private:
     std::vector<uint8_t> refreshMotorIds;
     mutable std::unordered_set<uint8_t> managedMotorIds;
     mutable std::mutex refreshMutex;
-    std::atomic<bool> refreshLoopActive {false};
-    std::thread refreshThread;
     std::atomic<double> refreshRateHz_{0.0};
     std::atomic<bool> fastWriteEnabled_{false};
     std::atomic<uint64_t> fastWriteSentCount_{0};

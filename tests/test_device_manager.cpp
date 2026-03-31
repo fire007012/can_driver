@@ -2,8 +2,12 @@
 #include <ros/time.h>
 
 #include "can_driver/DeviceManager.h"
+#include "can_driver/ProtocolRefreshWorker.h"
 
+#include <atomic>
+#include <chrono>
 #include <filesystem>
+#include <thread>
 
 namespace {
 
@@ -71,6 +75,25 @@ TEST_F(RosTimeFixture, SharedDriverStateIsStableAndAvailable)
 
     ASSERT_NE(first, nullptr);
     EXPECT_EQ(first, second);
+}
+
+TEST_F(RosTimeFixture, ProtocolRefreshWorkerRunsTickLoopUntilStopped)
+{
+    std::atomic<int> tickCount{0};
+    can_driver::ProtocolRefreshWorker worker(
+        [&tickCount]() { ++tickCount; },
+        []() { return std::chrono::milliseconds(1); });
+
+    worker.start();
+
+    const auto deadline = std::chrono::steady_clock::now() + std::chrono::milliseconds(50);
+    while (tickCount.load() < 2 && std::chrono::steady_clock::now() < deadline) {
+        std::this_thread::sleep_for(std::chrono::milliseconds(1));
+    }
+
+    worker.stop();
+    EXPECT_GE(tickCount.load(), 2);
+    EXPECT_FALSE(worker.running());
 }
 
 TEST_F(RosTimeFixture, EnsureProtocolCreatesProtocol)

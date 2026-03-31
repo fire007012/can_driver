@@ -135,29 +135,7 @@ void EyouCan::initializeMotorRefresh(const std::vector<MotorID> &motorIds)
 
     if (motorIds.empty()) {
         stopRefreshLoop();
-        return;
     }
-
-    if (refreshLoopActive.load()) {
-        return;
-    }
-
-    bool expected = false;
-    if (!refreshLoopActive.compare_exchange_strong(expected, true)) {
-        return;
-    }
-
-    refreshThread = std::thread([this]() {
-        while (refreshLoopActive.load()) {
-            refreshMotorStates();
-            std::size_t motorCount = 0;
-            {
-                std::lock_guard<std::mutex> lock(refreshMutex);
-                motorCount = refreshMotorIds.size();
-            }
-            std::this_thread::sleep_for(this->computeRefreshSleep(motorCount));
-        }
-    });
 }
 
 void EyouCan::setRefreshRateHz(double hz)
@@ -167,6 +145,21 @@ void EyouCan::setRefreshRateHz(double hz)
         return;
     }
     refreshRateHz_.store(hz, std::memory_order_relaxed);
+}
+
+void EyouCan::runRefreshCycle()
+{
+    refreshMotorStates();
+}
+
+std::chrono::milliseconds EyouCan::refreshSleepInterval() const
+{
+    std::size_t motorCount = 0;
+    {
+        std::lock_guard<std::mutex> lock(refreshMutex);
+        motorCount = refreshMotorIds.size();
+    }
+    return computeRefreshSleep(std::max<std::size_t>(1, motorCount));
 }
 
 void EyouCan::setFastWriteEnabled(bool enabled)
@@ -935,9 +928,6 @@ void EyouCan::refreshMotorStates()
     ++refreshCycleCount_;
 
     for (uint8_t motorId : motorIds) {
-        if (!refreshLoopActive.load()) {
-            break;
-        }
         // 位置 + 速度：每周期都查（控制闭环需要）
         requestPosition(motorId);
         requestVelocity(motorId);
@@ -954,10 +944,6 @@ void EyouCan::refreshMotorStates()
 
 void EyouCan::stopRefreshLoop()
 {
-    refreshLoopActive.store(false);
-
-    if (refreshThread.joinable()) {
-        refreshThread.join();
-    }
+    refreshCycleCount_ = 0;
     resetReadTracking();
 }

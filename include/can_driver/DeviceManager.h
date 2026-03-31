@@ -8,6 +8,7 @@
 #include "can_driver/IDeviceManager.h"
 #include "can_driver/MotorID.h"
 #include "can_driver/MtCan.h"
+#include "can_driver/ProtocolRefreshWorker.h"
 #include "can_driver/SharedDriverState.h"
 #include "can_driver/SocketCanController.h"
 
@@ -58,6 +59,10 @@ public:
     std::size_t deviceCount() const override;
 
 private:
+    void startRefreshWorkerLocked(const std::string &device, CanType type);
+    void stopRefreshWorkerLocked(const std::string &device, CanType type);
+    void stopAllRefreshWorkersLocked();
+
     // 读多写少：读取协议/transport 时使用 shared_lock，创建/销毁时 unique_lock。
     mutable std::shared_mutex mutex_;
     // key = can device name（例如 can0/vcan0）。
@@ -65,6 +70,8 @@ private:
     std::map<std::string, std::shared_ptr<CanTxDispatcher>> txDispatchers_;
     std::map<std::string, std::shared_ptr<MtCan>> mtProtocols_;
     std::map<std::string, std::shared_ptr<EyouCan>> eyouProtocols_;
+    std::map<std::string, std::shared_ptr<can_driver::ProtocolRefreshWorker>> mtRefreshWorkers_;
+    std::map<std::string, std::shared_ptr<can_driver::ProtocolRefreshWorker>> eyouRefreshWorkers_;
     std::shared_ptr<can_driver::SharedDriverState> sharedState_{
         std::make_shared<can_driver::SharedDriverState>()};
     bool ppFastWriteEnabled_{false};

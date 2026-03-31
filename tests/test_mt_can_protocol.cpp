@@ -95,9 +95,9 @@ class MtCanTestAccessor {
 public:
     static void setRefreshState(MtCan &mt, const std::vector<uint8_t> &motorIds, bool active)
     {
+        (void)active;
         std::lock_guard<std::mutex> lock(mt.refreshMutex);
         mt.refreshMotorIds = motorIds;
-        mt.refreshLoopActive.store(active);
         std::lock_guard<std::mutex> pendingLock(mt.pendingReadMutex_);
         mt.pendingReadRequests_.clear();
     }

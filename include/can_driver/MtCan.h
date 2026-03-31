@@ -127,6 +127,10 @@ public:
 
     /// 设置状态轮询频率（Hz）；<=0 表示使用默认自适应周期。
     void setRefreshRateHz(double hz);
+    /// 执行一轮状态查询，由外部刷新 worker 调度。
+    void runRefreshCycle();
+    /// 返回当前注册电机的建议查询周期。
+    std::chrono::milliseconds refreshSleepInterval() const;
 
 private:
     struct MotorState {
@@ -159,8 +163,6 @@ private:
     std::size_t receiveHandlerId = 0;
     std::vector<uint8_t> refreshMotorIds;
     mutable std::mutex refreshMutex;
-    std::atomic<bool> refreshLoopActive {false};
-    std::thread refreshThread;
     std::atomic<double> refreshRateHz_{0.0};
     mutable std::mutex pendingReadMutex_;
     std::unordered_map<uint16_t, PendingReadRequest> pendingReadRequests_;

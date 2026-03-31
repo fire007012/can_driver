@@ -123,29 +123,6 @@ void MtCan::initializeMotorRefresh(const std::vector<MotorID> &motorIds)
         return;
     }
 
-    if (refreshLoopActive.load()) {
-        std::this_thread::sleep_for(std::chrono::milliseconds(50));
-        broadcastCommunicationTimeout(300);
-        return;
-    }
-
-    bool expected = false;
-    if (!refreshLoopActive.compare_exchange_strong(expected, true)) {
-        return;
-    }
-
-    refreshThread = std::thread([this]() {
-        while (refreshLoopActive.load()) {
-            refreshMotorStates();
-            std::size_t motorCount = 0;
-            {
-                std::lock_guard<std::mutex> lock(refreshMutex);
-                motorCount = refreshMotorIds.size();
-            }
-            std::this_thread::sleep_for(this->computeRefreshSleep(motorCount));
-        }
-    });
-
     // 电机注册后自动下发通讯中断保护，避免控制链路异常时失控
     std::this_thread::sleep_for(std::chrono::milliseconds(50));
     broadcastCommunicationTimeout(300);
@@ -158,6 +135,21 @@ void MtCan::setRefreshRateHz(double hz)
         return;
     }
     refreshRateHz_.store(hz, std::memory_order_relaxed);
+}
+
+void MtCan::runRefreshCycle()
+{
+    refreshMotorStates();
+}
+
+std::chrono::milliseconds MtCan::refreshSleepInterval() const
+{
+    std::size_t motorCount = 0;
+    {
+        std::lock_guard<std::mutex> lock(refreshMutex);
+        motorCount = refreshMotorIds.size();
+    }
+    return computeRefreshSleep(std::max<std::size_t>(1, motorCount));
 }
 
 bool MtCan::setMode(MotorID Id, MotorMode mode)
@@ -612,9 +604,6 @@ void MtCan::refreshMotorStates()
     }
 
     for (uint8_t motorId : motorIds) {
-        if (!refreshLoopActive.load()) {
-            break;
-        }
         requestState(motorId);            // 0x9C: 温度、电流、速度、编码器
         requestMultiTurnAngle(motorId);   // 0x92: 多圈角度（实际位置）
         requestError(motorId);            // 0x9A: 错误标志
@@ -623,11 +612,6 @@ void MtCan::refreshMotorStates()
 
 void MtCan::stopRefreshLoop()
 {
-    refreshLoopActive.store(false);
-
-    if (refreshThread.joinable()) {
-        refreshThread.join();
-    }
     resetReadTracking();
 }
 

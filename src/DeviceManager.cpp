@@ -1,7 +1,96 @@
 #include "can_driver/DeviceManager.h"
 #include "can_driver/DeviceRuntime.h"
 
+#include <chrono>
+
 #include <ros/ros.h>
+
+void DeviceManager::startRefreshWorkerLocked(const std::string &device, CanType type)
+{
+    if (type == CanType::MT) {
+        const auto protoIt = mtProtocols_.find(device);
+        if (protoIt == mtProtocols_.end() || !protoIt->second) {
+            return;
+        }
+
+        auto &worker = mtRefreshWorkers_[device];
+        if (!worker) {
+            std::weak_ptr<MtCan> weakProtocol = protoIt->second;
+            worker = std::make_shared<can_driver::ProtocolRefreshWorker>(
+                [weakProtocol]() {
+                    if (const auto protocol = weakProtocol.lock()) {
+                        protocol->runRefreshCycle();
+                    }
+                },
+                [weakProtocol]() {
+                    if (const auto protocol = weakProtocol.lock()) {
+                        return protocol->refreshSleepInterval();
+                    }
+                    return std::chrono::milliseconds(5);
+                });
+        }
+
+        worker->start();
+        worker->notify();
+        return;
+    }
+
+    const auto protoIt = eyouProtocols_.find(device);
+    if (protoIt == eyouProtocols_.end() || !protoIt->second) {
+        return;
+    }
+
+    auto &worker = eyouRefreshWorkers_[device];
+    if (!worker) {
+        std::weak_ptr<EyouCan> weakProtocol = protoIt->second;
+        worker = std::make_shared<can_driver::ProtocolRefreshWorker>(
+            [weakProtocol]() {
+                if (const auto protocol = weakProtocol.lock()) {
+                    protocol->runRefreshCycle();
+                }
+            },
+            [weakProtocol]() {
+                if (const auto protocol = weakProtocol.lock()) {
+                    return protocol->refreshSleepInterval();
+                }
+                return std::chrono::milliseconds(5);
+            });
+    }
+
+    worker->start();
+    worker->notify();
+}
+
+void DeviceManager::stopRefreshWorkerLocked(const std::string &device, CanType type)
+{
+    auto *workers = (type == CanType::MT) ? &mtRefreshWorkers_ : &eyouRefreshWorkers_;
+    const auto it = workers->find(device);
+    if (it == workers->end()) {
+        return;
+    }
+
+    if (it->second) {
+        it->second->stop();
+    }
+    workers->erase(it);
+}
+
+void DeviceManager::stopAllRefreshWorkersLocked()
+{
+    for (auto &entry : mtRefreshWorkers_) {
+        if (entry.second) {
+            entry.second->stop();
+        }
+    }
+    mtRefreshWorkers_.clear();
+
+    for (auto &entry : eyouRefreshWorkers_) {
+        if (entry.second) {
+            entry.second->stop();
+        }
+    }
+    eyouRefreshWorkers_.clear();
+}
 
 // 幂等创建 transport：同一 device 只创建一次。
 bool DeviceManager::ensureTransport(const std::string &device, bool loopback)
@@ -145,9 +234,15 @@ bool DeviceManager::initDevice(const std::string &device,
     }
     if (!mtIds.empty()) {
         mtProtocols_[device]->initializeMotorRefresh(mtIds);
+        startRefreshWorkerLocked(device, CanType::MT);
+    } else {
+        stopRefreshWorkerLocked(device, CanType::MT);
     }
     if (!ppIds.empty()) {
         eyouProtocols_[device]->initializeMotorRefresh(ppIds);
+        startRefreshWorkerLocked(device, CanType::PP);
+    } else {
+        stopRefreshWorkerLocked(device, CanType::PP);
     }
 
     ROS_INFO("[CanDriverHW] Initialized '%s'.", device.c_str());
@@ -158,20 +253,26 @@ void DeviceManager::startRefresh(const std::string &device,
                                  CanType type,
                                  const std::vector<MotorID> &ids)
 {
-    std::shared_lock<std::shared_mutex> lock(mutex_);
-    // 空列表表示无需刷新，直接返回。
-    if (ids.empty()) {
-        return;
-    }
+    std::unique_lock<std::shared_mutex> lock(mutex_);
     if (type == CanType::MT) {
         auto it = mtProtocols_.find(device);
         if (it != mtProtocols_.end()) {
             it->second->initializeMotorRefresh(ids);
+            if (ids.empty()) {
+                stopRefreshWorkerLocked(device, type);
+            } else {
+                startRefreshWorkerLocked(device, type);
+            }
         }
     } else {
         auto it = eyouProtocols_.find(device);
         if (it != eyouProtocols_.end()) {
             it->second->initializeMotorRefresh(ids);
+            if (ids.empty()) {
+                stopRefreshWorkerLocked(device, type);
+            } else {
+                startRefreshWorkerLocked(device, type);
+            }
         }
     }
 }
@@ -187,6 +288,16 @@ void DeviceManager::setRefreshRateHz(double hz)
     for (auto &kv : eyouProtocols_) {
         if (kv.second) {
             kv.second->setRefreshRateHz(hz);
+        }
+    }
+    for (auto &kv : mtRefreshWorkers_) {
+        if (kv.second) {
+            kv.second->notify();
+        }
+    }
+    for (auto &kv : eyouRefreshWorkers_) {
+        if (kv.second) {
+            kv.second->notify();
         }
     }
 }
@@ -221,6 +332,7 @@ void DeviceManager::shutdownAll()
                 });
         }
     }
+    stopAllRefreshWorkersLocked();
     // 先释放协议（包含内部线程/handler），再关闭 transport。
     mtProtocols_.clear();
     eyouProtocols_.clear();

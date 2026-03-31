@@ -94,13 +94,13 @@ class EyouCanTestAccessor {
 public:
     static void setRefreshState(EyouCan &eyou, const std::vector<uint8_t> &motorIds, bool active)
     {
+        (void)active;
         std::lock_guard<std::mutex> lock(eyou.refreshMutex);
         eyou.refreshMotorIds = motorIds;
         eyou.managedMotorIds.clear();
         for (const auto motorId : motorIds) {
             eyou.managedMotorIds.insert(motorId);
         }
-        eyou.refreshLoopActive.store(active);
         eyou.refreshCycleCount_ = 0;
         std::lock_guard<std::mutex> pendingLock(eyou.pendingReadMutex_);
         eyou.pendingReadRequests_.clear();
