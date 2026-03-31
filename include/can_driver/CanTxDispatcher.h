@@ -26,22 +26,4 @@ public:
     virtual void submit(const Request &request) = 0;
 };
 
-class DirectCanTxDispatcher final : public CanTxDispatcher {
-public:
-    explicit DirectCanTxDispatcher(std::shared_ptr<CanTransport> transport)
-        : transport_(std::move(transport))
-    {
-    }
-
-    void submit(const Request &request) override
-    {
-        if (transport_) {
-            (void)transport_->send(request.frame);
-        }
-    }
-
-private:
-    std::shared_ptr<CanTransport> transport_;
-};
-
 #endif // CAN_DRIVER_CAN_TX_DISPATCHER_H

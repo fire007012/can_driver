@@ -21,7 +21,6 @@ public:
      * @brief 构造函数
         * @param controller 基于 CanTransport 的 CAN 传输实现
      */
-    explicit MtCan(std::shared_ptr<CanTransport> controller);
     MtCan(std::shared_ptr<CanTransport> controller,
           std::shared_ptr<CanTxDispatcher> txDispatcher);
     MtCan(std::shared_ptr<CanTransport> controller,

@@ -1,4 +1,5 @@
 #include "can_driver/CanDriverHW.h"
+#include "can_driver/CanDriverIoRuntime.h"
 #include "can_driver/SafeCommand.h"
 
 #include <algorithm>
@@ -648,43 +649,8 @@ void CanDriverHW::read(const ros::Time & /*time*/, const ros::Duration & /*perio
     if (!active_.load(std::memory_order_acquire)) {
         return;
     }
-
-    struct JointSnapshot {
-        double pos{0.0};
-        double vel{0.0};
-        double eff{0.0};
-        bool   valid{false};
-    };
-    std::vector<JointSnapshot> snapshots(joints_.size());
-
-    for (const auto &group : jointGroups_) {
-        const std::string &device = group.canDevice;
-        const CanType protocol = group.protocol;
-        auto proto = getProtocol(device, protocol);
-        auto devMutex = getDeviceMutex(device);
-        if (!proto || !devMutex) {
-            continue;
-        }
-
-        std::lock_guard<std::mutex> devLock(*devMutex);
-        for (const std::size_t i : group.jointIndices) {
-            const auto &jc = joints_[i];
-            snapshots[i].pos = static_cast<double>(proto->getPosition(jc.motorId)) * jc.positionScale;
-            snapshots[i].vel = static_cast<double>(proto->getVelocity(jc.motorId)) * jc.velocityScale;
-            snapshots[i].eff = static_cast<double>(proto->getCurrent(jc.motorId));
-            snapshots[i].valid = true;
-        }
-    }
-
-    std::lock_guard<std::mutex> lock(jointStateMutex_);
-    for (std::size_t i = 0; i < joints_.size(); ++i) {
-        if (!snapshots[i].valid) {
-            continue;
-        }
-        joints_[i].pos = snapshots[i].pos;
-        joints_[i].vel = snapshots[i].vel;
-        joints_[i].eff = snapshots[i].eff;
-    }
+    can_driver::CanDriverIoRuntime::SyncJointFeedback(
+        *deviceManager_, jointGroups_, &joints_, &jointStateMutex_);
 }
 
 // ---------------------------------------------------------------------------
@@ -718,242 +684,25 @@ void CanDriverHW::write(const ros::Time & /*time*/, const ros::Duration &period)
     // 应用关节限位（钳制命令值到安全范围）
     posLimitsIface_.enforceLimits(period);
     velLimitsIface_.enforceLimits(period);
-
-    {
-        std::lock_guard<std::mutex> lock(jointStateMutex_);
-        const ros::Time now = ros::Time::now();
-        const auto clampWithJointLimits = [](const JointConfig &jc, double cmdValue) -> double {
-            if (!jc.hasLimits || !std::isfinite(cmdValue)) {
-                return cmdValue;
-            }
-
-            if (jc.controlMode == "velocity" && jc.limits.has_velocity_limits) {
-                return std::clamp(cmdValue, -jc.limits.max_velocity, jc.limits.max_velocity);
-            }
-            if (jc.controlMode == "position" && jc.limits.has_position_limits) {
-                return std::clamp(cmdValue, jc.limits.min_position, jc.limits.max_position);
-            }
-            return cmdValue;
-        };
-
-        for (std::size_t i = 0; i < joints_.size(); ++i) {
-            auto &jc = joints_[i];
-
-            bool useDirect = false;
-            double cmdValue = 0.0;
-            bool hasCommand = true;
-            if (jc.controlMode == "velocity") {
-                if (jc.hasDirectVelCmd) {
-                    if (debugBypassRosControl_) {
-                        useDirect = true;
-                        cmdValue = jc.directVelCmd;
-                    } else {
-                        const double age = (now - jc.lastDirectVelTime).toSec();
-                        if (age <= directCmdTimeoutSec_) {
-                            useDirect = true;
-                            cmdValue = jc.directVelCmd;
-                        } else {
-                            jc.hasDirectVelCmd = false;
-                        }
-                    }
-                }
-                if (!useDirect) {
-                    if (debugBypassRosControl_) {
-                        hasCommand = false;
-                    } else {
-                        cmdValue = jc.velCmd;
-                    }
-                }
-            } else {
-                if (jc.hasDirectPosCmd) {
-                    if (debugBypassRosControl_) {
-                        useDirect = true;
-                        cmdValue = jc.directPosCmd;
-                    } else {
-                        const double age = (now - jc.lastDirectPosTime).toSec();
-                        if (age <= directCmdTimeoutSec_) {
-                            useDirect = true;
-                            cmdValue = jc.directPosCmd;
-                        } else {
-                            jc.hasDirectPosCmd = false;
-                        }
-                    }
-                }
-                if (!useDirect) {
-                    if (debugBypassRosControl_) {
-                        hasCommand = false;
-                    } else {
-                        cmdValue = jc.posCmd;
-                    }
-                }
-            }
-
-            if (!hasCommand) {
-                commandValidBuffer_[i] = 0;
-                continue;
-            }
-
-            cmdValue = clampWithJointLimits(jc, cmdValue);
-            if (jc.controlMode == "position" && maxPositionStepRad_ > 0.0 &&
-                std::isfinite(cmdValue) && std::isfinite(jc.pos)) {
-                const double delta = cmdValue - jc.pos;
-                if (std::fabs(delta) > maxPositionStepRad_) {
-                    const double limitedCmd =
-                        jc.pos + std::copysign(maxPositionStepRad_, delta);
-                    ROS_WARN_THROTTLE(
-                        1.0,
-                        "[CanDriverHW] Joint '%s' position step limited: cur=%.6f, req=%.6f, limited=%.6f (max_step=%.6f).",
-                        jc.name.c_str(),
-                        jc.pos,
-                        cmdValue,
-                        limitedCmd,
-                        maxPositionStepRad_);
-                    cmdValue = limitedCmd;
-                }
-                cmdValue = clampWithJointLimits(jc, cmdValue);
-            }
-
-            const double scale =
-                (jc.controlMode == "velocity") ? jc.velocityScale : jc.positionScale;
-            commandValidBuffer_[i] = static_cast<uint8_t>(
-                can_driver::safe_command::scaleAndClampToInt32(
-                    cmdValue, scale, jc.name, rawCommandBuffer_[i]));
-        }
-    }
-
-    for (const auto &group : jointGroups_) {
-        const std::string &device = group.canDevice;
-        const CanType protocol = group.protocol;
-        const bool isReady = isDeviceReady(device);
-        const auto deviceEvent = commandGate_.observeDeviceReady(device, isReady);
-
-        if (!isReady) {
-            if (deviceEvent == CommandGate::DeviceEvent::Lost) {
-                ROS_ERROR_THROTTLE(
-                    1.0,
-                    "[CanDriverHW] Device '%s' not ready, clear direct commands and block motion.",
-                    device.c_str());
-            } else {
-                ROS_WARN_THROTTLE(
-                    1.0,
-                    "[CanDriverHW] Device '%s' not ready, skip command write.",
-                    device.c_str());
-            }
-
-            {
-                std::lock_guard<std::mutex> lock(jointStateMutex_);
-                for (const std::size_t idx : group.jointIndices) {
-                    auto &jc = joints_[idx];
-                    jc.hasDirectPosCmd = false;
-                    jc.hasDirectVelCmd = false;
-                    jc.stopIssuedOnFault = false;
-                    if (jc.controlMode == "position") {
-                        jc.posCmd = jc.pos;
-                    } else {
-                        jc.velCmd = 0.0;
-                    }
-                    commandValidBuffer_[idx] = 0;
-                }
-            }
-            continue;
-        }
-
-        if (safetyHoldAfterDeviceRecover_ && deviceEvent == CommandGate::DeviceEvent::Recovered) {
-            ROS_WARN_THROTTLE(
-                1.0,
-                "[CanDriverHW] Device '%s' recovered, hold one cycle and require fresh command.",
-                device.c_str());
-            commandGate_.holdCommands();
-            commandGate_.armFreshCommandLatch();
-            continue;
-        }
-
-        auto proto = getProtocol(device, protocol);
-        auto devMutex = getDeviceMutex(device);
-        if (!proto || !devMutex) {
-            continue;
-        }
-
-        std::lock_guard<std::mutex> devLock(*devMutex);
-        for (const std::size_t idx : group.jointIndices) {
-            if (!commandValidBuffer_[idx]) {
-                continue;
-            }
-            const auto &jc = joints_[idx];
-            try {
-                if (safetyStopOnFault_) {
-                    const bool hasFault = proto->hasFault(jc.motorId);
-                    bool needIssueStop = false;
-                    {
-                        std::lock_guard<std::mutex> lock(jointStateMutex_);
-                        if (hasFault) {
-                            if (!joints_[idx].stopIssuedOnFault) {
-                                joints_[idx].stopIssuedOnFault = true;
-                                needIssueStop = true;
-                            }
-                        } else {
-                            joints_[idx].stopIssuedOnFault = false;
-                        }
-                    }
-
-                    if (hasFault) {
-                        anyFaultObserved = true;
-                        if (needIssueStop) {
-                            if (!proto->Stop(jc.motorId)) {
-                                ROS_WARN_THROTTLE(
-                                    1.0,
-                                    "[CanDriverHW] Joint '%s' has fault, auto Stop rejected on '%s'.",
-                                    jc.name.c_str(),
-                                    device.c_str());
-                            } else {
-                                ROS_WARN_THROTTLE(
-                                    1.0,
-                                    "[CanDriverHW] Joint '%s' has fault, auto Stop sent and motion command blocked.",
-                                    jc.name.c_str());
-                            }
-                        }
-                        continue;
-                    }
-                }
-
-                if (safetyRequireEnabledForMotion_ && !proto->isEnabled(jc.motorId)) {
-                    ROS_WARN_THROTTLE(
-                        1.0,
-                        "[CanDriverHW] Joint '%s' is not enabled, motion command blocked.",
-                        jc.name.c_str());
-                    continue;
-                }
-
-                if (jc.controlMode == "velocity") {
-                    if (!proto->setVelocity(jc.motorId, rawCommandBuffer_[idx])) {
-                        ROS_WARN_THROTTLE(1.0,
-                                          "[CanDriverHW] setVelocity rejected on '%s'.",
-                                          device.c_str());
-                    }
-                } else if (jc.controlMode == "csp") {
-                    if (!proto->quickSetPosition(jc.motorId, rawCommandBuffer_[idx])) {
-                        ROS_WARN_THROTTLE(1.0,
-                                          "[CanDriverHW] quickSetPosition rejected on '%s'.",
-                                          device.c_str());
-                    }
-                } else {
-                    if (!proto->setPosition(jc.motorId, rawCommandBuffer_[idx])) {
-                        ROS_WARN_THROTTLE(1.0,
-                                          "[CanDriverHW] setPosition rejected on '%s'.",
-                                          device.c_str());
-                    }
-                }
-            } catch (const std::exception &e) {
-                ROS_ERROR_THROTTLE(1.0, "[CanDriverHW] write() command failed on '%s': %s",
-                                   device.c_str(), e.what());
-            } catch (...) {
-                ROS_ERROR_THROTTLE(
-                    1.0,
-                    "[CanDriverHW] write() command failed on '%s' (unknown exception).",
-                    device.c_str());
-            }
-        }
-    }
+    const can_driver::CanDriverIoRuntime::WriteConfig writeConfig{
+        directCmdTimeoutSec_,
+        debugBypassRosControl_,
+        safetyStopOnFault_,
+        safetyRequireEnabledForMotion_,
+        maxPositionStepRad_,
+        safetyHoldAfterDeviceRecover_,
+    };
+    can_driver::CanDriverIoRuntime::PrepareCommands(
+        &joints_, &rawCommandBuffer_, &commandValidBuffer_, &jointStateMutex_, writeConfig);
+    can_driver::CanDriverIoRuntime::DispatchPreparedCommands(*deviceManager_,
+                                                             jointGroups_,
+                                                             &joints_,
+                                                             rawCommandBuffer_,
+                                                             &commandValidBuffer_,
+                                                             &jointStateMutex_,
+                                                             &commandGate_,
+                                                             writeConfig,
+                                                             &anyFaultObserved);
     lifecycleCoordinator_.UpdateFromFeedback(anyFaultObserved);
 #endif
 }
@@ -993,64 +742,13 @@ void CanDriverHW::publishMotorStates(const ros::TimerEvent & /*e*/)
     if (!active_.load(std::memory_order_acquire)) {
         return;
     }
-
-    struct StatusSnapshot {
-        bool enabled{false};
-        bool fault{false};
-        bool valid{false};
-    };
-    std::vector<StatusSnapshot> statusSnapshots(joints_.size());
-    for (const auto &group : jointGroups_) {
-        auto proto = getProtocol(group.canDevice, group.protocol);
-        auto devMutex = getDeviceMutex(group.canDevice);
-        if (!proto || !devMutex) {
-            continue;
-        }
-
-        std::lock_guard<std::mutex> devLock(*devMutex);
-        for (const std::size_t idx : group.jointIndices) {
-            const auto &jc = joints_[idx];
-            statusSnapshots[idx].enabled = proto->isEnabled(jc.motorId);
-            statusSnapshots[idx].fault = proto->hasFault(jc.motorId);
-            statusSnapshots[idx].valid = true;
-        }
-    }
-
-    std::vector<can_driver::MotorState> msgs;
-    msgs.reserve(joints_.size());
-    bool anyFault = false;
-    {
-        std::lock_guard<std::mutex> lock(jointStateMutex_);
-        for (std::size_t i = 0; i < joints_.size(); ++i) {
-            const auto &jc = joints_[i];
-            can_driver::MotorState msg;
-            msg.motor_id = static_cast<uint16_t>(jc.motorId);
-            msg.name     = jc.name;
-
-            const double rawPos = jc.pos / jc.positionScale;
-            const double rawVel = jc.vel / jc.velocityScale;
-            msg.position = can_driver::safe_command::clampToInt32(rawPos);
-            msg.velocity = can_driver::safe_command::clampToInt16(rawVel);
-            msg.current  = can_driver::safe_command::clampToInt16(jc.eff);
-
-            if (jc.controlMode == "velocity")
-                msg.mode = can_driver::MotorState::MODE_VELOCITY;
-            else
-                msg.mode = can_driver::MotorState::MODE_POSITION;
-            if (statusSnapshots[i].valid) {
-                msg.enabled = statusSnapshots[i].enabled;
-                msg.fault = statusSnapshots[i].fault;
-                anyFault = anyFault || statusSnapshots[i].fault;
-            }
-
-            msgs.push_back(msg);
-        }
-    }
-    lifecycleCoordinator_.UpdateFromFeedback(anyFault);
+    auto publishResult = can_driver::CanDriverIoRuntime::BuildMotorStateMessages(
+        *deviceManager_, jointGroups_, joints_, &jointStateMutex_);
+    lifecycleCoordinator_.UpdateFromFeedback(publishResult.anyFault);
     if (!active_.load(std::memory_order_acquire)) {
         return;
     }
-    for (const auto &msg : msgs) {
+    for (const auto &msg : publishResult.messages) {
         motorStatesPub_.publish(msg);
     }
 }

@@ -65,11 +65,6 @@ std::chrono::milliseconds MtCan::computeRefreshSleep(std::size_t motorCount) con
     return std::chrono::milliseconds(intervalMs);
 }
 
-MtCan::MtCan(std::shared_ptr<CanTransport> controller)
-    : MtCan(std::move(controller), nullptr, nullptr, "")
-{
-}
-
 MtCan::MtCan(std::shared_ptr<CanTransport> controller,
              std::shared_ptr<CanTxDispatcher> txDispatcher)
     : MtCan(std::move(controller), std::move(txDispatcher), nullptr, "")
@@ -85,9 +80,6 @@ MtCan::MtCan(std::shared_ptr<CanTransport> controller,
     , sharedState_(std::move(sharedState))
     , deviceName_(std::move(deviceName))
 {
-    if (!txDispatcher_ && canController) {
-        txDispatcher_ = std::make_shared<DirectCanTxDispatcher>(canController);
-    }
     if (canController) {
         receiveHandlerId = canController->addReceiveHandler(
             [this](const CanTransport::Frame &frame) { handleResponse(frame); });

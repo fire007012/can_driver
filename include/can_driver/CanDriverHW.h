@@ -2,6 +2,7 @@
 #define CAN_DRIVER_CAN_DRIVER_HW_H
 
 #include "can_driver/CanProtocol.h"
+#include "can_driver/CanDriverHwTypes.h"
 #include "can_driver/CanType.h"
 #include "can_driver/command_gate.hpp"
 #include "can_driver/DeviceManager.h"
@@ -81,45 +82,8 @@ private:
     // -----------------------------------------------------------------------
     // 关节配置
     // -----------------------------------------------------------------------
-    struct JointConfig {
-        std::string name;
-        MotorID     motorId{MotorID::LeftWheel};
-        CanType     protocol{CanType::MT};
-        std::string canDevice;
-        std::string controlMode;   // "velocity" | "position"
-
-        // 单位换算：协议原始整数值 × scale = SI 单位（rad 或 rad/s）
-        // 从 YAML 的 position_scale / velocity_scale 读取，默认 1.0（不换算）
-        double positionScale{1.0};
-        double velocityScale{1.0};
-
-        // ros_control 状态/命令缓存（由 hardware_interface handle 指向这里）
-        double pos{0.0};
-        double vel{0.0};
-        double eff{0.0};
-        double posCmd{0.0};
-        double velCmd{0.0};
-
-        // direct topic 缓冲（由 write() 统一下发，避免回调线程直接打总线）
-        double directPosCmd{0.0};
-        double directVelCmd{0.0};
-        bool   hasDirectPosCmd{false};
-        bool   hasDirectVelCmd{false};
-        ros::Time lastDirectPosTime;
-        ros::Time lastDirectVelTime;
-
-        // 当前关节解析后的限位参数（用于 direct 命令钳制）
-        joint_limits_interface::JointLimits limits;
-        bool hasLimits{false};
-
-        // 安全状态：故障时是否已下发过 Stop（避免刷总线）。
-        bool stopIssuedOnFault{false};
-    };
-    struct DeviceProtocolGroup {
-        std::string canDevice;
-        CanType protocol{CanType::MT};
-        std::vector<std::size_t> jointIndices;
-    };
+    using JointConfig = can_driver::CanDriverJointConfig;
+    using DeviceProtocolGroup = can_driver::CanDriverDeviceProtocolGroup;
     std::deque<JointConfig> joints_;
     std::map<std::string, std::size_t> jointIndexByName_;
     std::vector<DeviceProtocolGroup> jointGroups_;
