@@ -48,10 +48,17 @@ struct AxisRuntimeStatus {
     bool feedbackFresh{false};
     bool degraded{false};
     bool fault{false};
+    bool faultCleared{false};
     bool enabled{false};
+    bool enabledReady{false};
     bool commandValid{false};
     bool modeExpected{false};
     bool modeMatched{true};
+    bool modeReady{true};
+    bool feedbackReady{false};
+    bool axisReadyForEnable{false};
+    bool axisReadyForRun{false};
+    bool recoverConfirmed{false};
 };
 
 class AxisRuntime {
@@ -75,14 +82,12 @@ public:
         std::int64_t nowNs = SharedDriverSteadyNowNs())
     {
         AxisRuntimeStatus status = EvaluateBase(feedback, command, intent, deviceHealth, nowNs);
+        const bool healthyRecoverSample = status.axisReadyForEnable;
         if (intent == AxisIntent::Recover) {
-            if (status.state == AxisRuntimeState::Standby ||
-                status.state == AxisRuntimeState::Armed ||
-                status.state == AxisRuntimeState::Running) {
+            if (healthyRecoverSample) {
                 if (feedback.lastRxSteadyNs != lastRecoverSampleNs_) {
                     lastRecoverSampleNs_ = feedback.lastRxSteadyNs;
-                    if (lastStatus_.state == AxisRuntimeState::Recovering ||
-                        lastStatus_.intent == AxisIntent::Recover) {
+                    if (lastStatus_.intent == AxisIntent::Recover && lastStatus_.axisReadyForEnable) {
                         ++recoverHealthyCycles_;
                     } else {
                         recoverHealthyCycles_ = 1;
@@ -92,15 +97,19 @@ public:
                 }
                 if (recoverHealthyCycles_ < config_.recoverConfirmCycles) {
                     status.state = AxisRuntimeState::Recovering;
+                } else {
+                    status.recoverConfirmed = true;
                 }
             } else {
                 recoverHealthyCycles_ = 0;
                 lastRecoverSampleNs_ = 0;
                 status.state = AxisRuntimeState::Recovering;
+                status.recoverConfirmed = false;
             }
         } else {
             recoverHealthyCycles_ = 0;
             lastRecoverSampleNs_ = 0;
+            status.recoverConfirmed = status.axisReadyForEnable;
         }
 
         lastStatus_ = status;
@@ -112,39 +121,52 @@ public:
         return lastStatus_;
     }
 
-    static bool MotionReady(const AxisRuntimeStatus &status)
+    static bool ReadyForEnable(const AxisRuntimeStatus &status)
     {
-        if (status.state == AxisRuntimeState::Running) {
-            return status.modeMatched;
-        }
-        if (status.state == AxisRuntimeState::Armed) {
-            return status.modeMatched;
-        }
-        return false;
+        return status.axisReadyForEnable;
     }
 
-    static std::string DescribeMotionBlock(const AxisRuntimeStatus &status)
+    static bool ReadyForRun(const AxisRuntimeStatus &status)
+    {
+        return status.axisReadyForRun;
+    }
+
+    static bool RecoverConfirmed(const AxisRuntimeStatus &status)
+    {
+        return status.recoverConfirmed;
+    }
+
+    static bool MotionReady(const AxisRuntimeStatus &status)
+    {
+        return ReadyForRun(status);
+    }
+
+    static std::string DescribeBlockReason(const AxisRuntimeStatus &status)
     {
         if (!status.deviceReady || status.state == AxisRuntimeState::Offline) {
             return "Feedback offline.";
         }
-        if (status.state == AxisRuntimeState::Seen) {
+        if (!status.feedbackReady) {
             return "Feedback degraded.";
         }
-        if (status.state == AxisRuntimeState::Standby) {
+        if (!status.faultCleared) {
+            return "Fault still active.";
+        }
+        if (!status.enabledReady) {
             return "Axis not enabled.";
         }
-        if ((status.state == AxisRuntimeState::Armed || status.state == AxisRuntimeState::Running) &&
-            !status.modeMatched) {
+        if (!status.modeReady) {
             return "Mode not ready.";
-        }
-        if (status.state == AxisRuntimeState::Faulted) {
-            return "Fault still active.";
         }
         if (status.state == AxisRuntimeState::Recovering) {
             return "Axis still recovering.";
         }
         return std::string();
+    }
+
+    static std::string DescribeMotionBlock(const AxisRuntimeStatus &status)
+    {
+        return DescribeBlockReason(status);
     }
 
 private:
@@ -183,19 +205,28 @@ private:
             status.modeMatched = timestampMatched || valueMatched;
         }
 
+        status.feedbackReady =
+            status.deviceReady && status.feedbackSeen && status.feedbackFresh && !status.degraded;
+        status.faultCleared = !status.fault;
+        status.enabledReady = status.enabled;
+        status.modeReady = !status.modeExpected || status.modeMatched;
+        status.axisReadyForEnable = status.feedbackReady && status.faultCleared;
+        status.axisReadyForRun =
+            status.axisReadyForEnable && status.enabledReady && status.modeReady;
+
         if (!status.deviceReady || !status.feedbackSeen) {
             status.state = AxisRuntimeState::Offline;
             return status;
         }
-        if (!status.feedbackFresh || status.degraded) {
+        if (!status.feedbackReady) {
             status.state = AxisRuntimeState::Seen;
             return status;
         }
-        if (status.fault) {
+        if (!status.faultCleared) {
             status.state = AxisRuntimeState::Faulted;
             return status;
         }
-        if (!status.enabled) {
+        if (!status.enabledReady) {
             status.state = AxisRuntimeState::Standby;
             return status;
         }

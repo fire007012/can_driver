@@ -51,7 +51,7 @@ private:
     std::shared_ptr<std::mutex> getDeviceMutex(const std::string &device) const;
     bool isDeviceReady(const std::string &device) const;
     std::shared_ptr<SharedDriverState> getSharedDriverState() const;
-    AxisRuntimeStatus evaluateAxisRuntime(
+    AxisRuntimeStatus evaluateAxisReadiness(
         const SharedDriverState::AxisKey &axisKey,
         const SharedDriverState::AxisFeedbackState &feedback,
         const SharedDriverState::AxisCommandState *command,

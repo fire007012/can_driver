@@ -139,7 +139,7 @@ std::shared_ptr<SharedDriverState> LifecycleDriverOps::getSharedDriverState() co
     return deviceManager_->getSharedDriverState();
 }
 
-AxisRuntimeStatus LifecycleDriverOps::evaluateAxisRuntime(
+AxisRuntimeStatus LifecycleDriverOps::evaluateAxisReadiness(
     const SharedDriverState::AxisKey &axisKey,
     const SharedDriverState::AxisFeedbackState &feedback,
     const SharedDriverState::AxisCommandState *command,
@@ -313,14 +313,12 @@ LifecycleDriverOps::Result LifecycleDriverOps::recoverAll() const
                             ? &deviceHealth
                             : nullptr;
 
-                    const auto runtime = evaluateAxisRuntime(axisKey,
-                                                             feedback,
-                                                             commandPtr,
-                                                             sharedState->getAxisIntent(axisKey),
-                                                             deviceHealthPtr);
-                    if (runtime.state != AxisRuntimeState::Standby &&
-                        runtime.state != AxisRuntimeState::Armed &&
-                        runtime.state != AxisRuntimeState::Running) {
+                    const auto readiness = evaluateAxisReadiness(axisKey,
+                                                                 feedback,
+                                                                 commandPtr,
+                                                                 AxisIntent::Recover,
+                                                                 deviceHealthPtr);
+                    if (!AxisRuntime::RecoverConfirmed(readiness)) {
                         allHealthy = false;
                         break;
                     }
@@ -391,15 +389,15 @@ bool LifecycleDriverOps::motionHealthy(std::string *detail) const
                         ? &deviceHealth
                         : nullptr;
 
-                const auto runtime = evaluateAxisRuntime(
+                const auto readiness = evaluateAxisReadiness(
                     axisKey,
                     feedback,
                     commandPtr,
                     sharedState->getAxisIntent(axisKey),
                     deviceHealthPtr);
-                if (!AxisRuntime::MotionReady(runtime)) {
+                if (!AxisRuntime::ReadyForRun(readiness)) {
                     if (detail) {
-                        *detail = AxisRuntime::DescribeMotionBlock(runtime);
+                        *detail = AxisRuntime::DescribeBlockReason(readiness);
                     }
                     return false;
                 }

@@ -245,7 +245,8 @@ TEST(AxisRuntimeTest, PpAxisTransitionsFromArmedToRunningWhenFeedbackIsFresh)
     const auto armed = runtime.Evaluate(
         feedback, &command, can_driver::AxisIntent::Enable, &deviceHealth, nowNs);
     EXPECT_EQ(armed.state, can_driver::AxisRuntimeState::Armed);
-    EXPECT_TRUE(can_driver::AxisRuntime::MotionReady(armed));
+    EXPECT_TRUE(can_driver::AxisRuntime::ReadyForEnable(armed));
+    EXPECT_TRUE(can_driver::AxisRuntime::ReadyForRun(armed));
 
     command.valid = true;
     command.desiredMode = CanProtocol::MotorMode::Position;
@@ -256,7 +257,8 @@ TEST(AxisRuntimeTest, PpAxisTransitionsFromArmedToRunningWhenFeedbackIsFresh)
     const auto running = runtime.Evaluate(
         feedback, &command, can_driver::AxisIntent::Enable, &deviceHealth, nowNs);
     EXPECT_EQ(running.state, can_driver::AxisRuntimeState::Running);
-    EXPECT_TRUE(can_driver::AxisRuntime::MotionReady(running));
+    EXPECT_TRUE(can_driver::AxisRuntime::ReadyForEnable(running));
+    EXPECT_TRUE(can_driver::AxisRuntime::ReadyForRun(running));
 }
 
 TEST(AxisRuntimeTest, PpAxisUsesSeenAndFaultedStatesForUnhealthyPaths)
@@ -281,15 +283,18 @@ TEST(AxisRuntimeTest, PpAxisUsesSeenAndFaultedStatesForUnhealthyPaths)
     const auto seen = runtime.Evaluate(
         feedback, &command, can_driver::AxisIntent::Enable, &deviceHealth, nowNs);
     EXPECT_EQ(seen.state, can_driver::AxisRuntimeState::Seen);
-    EXPECT_FALSE(can_driver::AxisRuntime::MotionReady(seen));
-    EXPECT_EQ(can_driver::AxisRuntime::DescribeMotionBlock(seen), "Feedback degraded.");
+    EXPECT_FALSE(can_driver::AxisRuntime::ReadyForEnable(seen));
+    EXPECT_FALSE(can_driver::AxisRuntime::ReadyForRun(seen));
+    EXPECT_EQ(can_driver::AxisRuntime::DescribeBlockReason(seen), "Feedback degraded.");
 
     feedback.lastRxSteadyNs = nowNs;
     feedback.fault = true;
     const auto faulted = runtime.Evaluate(
         feedback, &command, can_driver::AxisIntent::Enable, &deviceHealth, nowNs);
     EXPECT_EQ(faulted.state, can_driver::AxisRuntimeState::Faulted);
-    EXPECT_EQ(can_driver::AxisRuntime::DescribeMotionBlock(faulted), "Fault still active.");
+    EXPECT_FALSE(faulted.faultCleared);
+    EXPECT_FALSE(can_driver::AxisRuntime::ReadyForEnable(faulted));
+    EXPECT_EQ(can_driver::AxisRuntime::DescribeBlockReason(faulted), "Fault still active.");
 }
 
 TEST(AxisRuntimeTest, RecoveringRequiresTwoFreshHealthyFeedbackSamples)
@@ -314,10 +319,12 @@ TEST(AxisRuntimeTest, RecoveringRequiresTwoFreshHealthyFeedbackSamples)
     const auto firstRecovering = runtime.Evaluate(
         feedback, &command, can_driver::AxisIntent::Recover, &deviceHealth, nowNs);
     EXPECT_EQ(firstRecovering.state, can_driver::AxisRuntimeState::Recovering);
+    EXPECT_FALSE(can_driver::AxisRuntime::RecoverConfirmed(firstRecovering));
 
     const auto sameFrameRecovering = runtime.Evaluate(
         feedback, &command, can_driver::AxisIntent::Recover, &deviceHealth, nowNs + 1000000LL);
     EXPECT_EQ(sameFrameRecovering.state, can_driver::AxisRuntimeState::Recovering);
+    EXPECT_FALSE(can_driver::AxisRuntime::RecoverConfirmed(sameFrameRecovering));
 
     feedback.lastRxSteadyNs = nowNs + 20000000LL;
     feedback.fault = false;
@@ -328,6 +335,8 @@ TEST(AxisRuntimeTest, RecoveringRequiresTwoFreshHealthyFeedbackSamples)
         &deviceHealth,
         feedback.lastRxSteadyNs);
     EXPECT_EQ(recovered.state, can_driver::AxisRuntimeState::Armed);
+    EXPECT_TRUE(can_driver::AxisRuntime::RecoverConfirmed(recovered));
+    EXPECT_TRUE(can_driver::AxisRuntime::ReadyForEnable(recovered));
 }
 
 TEST(AxisRuntimeTest, ArmedAxisStillRequiresSelectedModeToMatchBeforeRelease)
@@ -356,15 +365,16 @@ TEST(AxisRuntimeTest, ArmedAxisStillRequiresSelectedModeToMatchBeforeRelease)
     const auto armedBlocked = runtime.Evaluate(
         feedback, &command, can_driver::AxisIntent::Enable, &deviceHealth, nowNs);
     EXPECT_EQ(armedBlocked.state, can_driver::AxisRuntimeState::Armed);
-    EXPECT_FALSE(can_driver::AxisRuntime::MotionReady(armedBlocked));
-    EXPECT_EQ(can_driver::AxisRuntime::DescribeMotionBlock(armedBlocked), "Mode not ready.");
+    EXPECT_TRUE(can_driver::AxisRuntime::ReadyForEnable(armedBlocked));
+    EXPECT_FALSE(can_driver::AxisRuntime::ReadyForRun(armedBlocked));
+    EXPECT_EQ(can_driver::AxisRuntime::DescribeBlockReason(armedBlocked), "Mode not ready.");
 
     feedback.mode = CanProtocol::MotorMode::Velocity;
     feedback.lastModeMatchSteadyNs = nowNs;
     const auto armedReady = runtime.Evaluate(
         feedback, &command, can_driver::AxisIntent::Enable, &deviceHealth, nowNs);
     EXPECT_EQ(armedReady.state, can_driver::AxisRuntimeState::Armed);
-    EXPECT_TRUE(can_driver::AxisRuntime::MotionReady(armedReady));
+    EXPECT_TRUE(can_driver::AxisRuntime::ReadyForRun(armedReady));
 }
 
 TEST(LifecycleDriverOpsTest, EnableAllRollsBackSucceededMotorsOnPartialFailure)
