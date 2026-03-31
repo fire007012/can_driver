@@ -21,16 +21,24 @@ TEST(RefreshSchedulerTest, PpHealthyPlanRotatesLifecycleSampling)
     EXPECT_EQ(plan0.items[2], can_driver::PpRefreshQuery::Mode);
 
     const auto plan1 = can_driver::BuildPpRefreshPlan(1, 0, false, snapshot);
-    ASSERT_EQ(plan1.count, 3u);
-    EXPECT_EQ(plan1.items[2], can_driver::PpRefreshQuery::Enable);
+    ASSERT_EQ(plan1.count, 1u);
+    EXPECT_EQ(plan1.items[0], can_driver::PpRefreshQuery::Position);
 
     const auto plan2 = can_driver::BuildPpRefreshPlan(2, 0, false, snapshot);
     ASSERT_EQ(plan2.count, 3u);
-    EXPECT_EQ(plan2.items[2], can_driver::PpRefreshQuery::Fault);
+    EXPECT_EQ(plan2.items[2], can_driver::PpRefreshQuery::Enable);
 
     const auto plan3 = can_driver::BuildPpRefreshPlan(3, 0, false, snapshot);
-    ASSERT_EQ(plan3.count, 3u);
-    EXPECT_EQ(plan3.items[2], can_driver::PpRefreshQuery::Current);
+    ASSERT_EQ(plan3.count, 1u);
+    EXPECT_EQ(plan3.items[0], can_driver::PpRefreshQuery::Position);
+
+    const auto plan4 = can_driver::BuildPpRefreshPlan(4, 0, false, snapshot);
+    ASSERT_EQ(plan4.count, 3u);
+    EXPECT_EQ(plan4.items[2], can_driver::PpRefreshQuery::Fault);
+
+    const auto plan6 = can_driver::BuildPpRefreshPlan(6, 0, false, snapshot);
+    ASSERT_EQ(plan6.count, 3u);
+    EXPECT_EQ(plan6.items[2], can_driver::PpRefreshQuery::Current);
 }
 
 TEST(RefreshSchedulerTest, PpPriorityPlanKeepsLifecycleQueriesAndSamplesCurrent)

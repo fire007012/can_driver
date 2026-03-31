@@ -95,9 +95,8 @@ inline PpRefreshPlan BuildPpRefreshPlan(std::uint64_t cycle,
     }
 
     plan.push(PpRefreshQuery::Position);
-    plan.push(PpRefreshQuery::Velocity);
-
     if (NeedsPpPriorityLifecycleQueries(snapshot)) {
+        plan.push(PpRefreshQuery::Velocity);
         plan.push(PpRefreshQuery::Mode);
         plan.push(PpRefreshQuery::Enable);
         plan.push(PpRefreshQuery::Fault);
@@ -107,19 +106,28 @@ inline PpRefreshPlan BuildPpRefreshPlan(std::uint64_t cycle,
         return plan;
     }
 
-    switch (static_cast<std::size_t>((cycle + motorIndex) % 4)) {
+    if (((cycle + motorIndex) % 2) == 0) {
+        plan.push(PpRefreshQuery::Velocity);
+    }
+
+    switch (static_cast<std::size_t>((cycle + motorIndex) % 8)) {
     case 0:
         plan.push(PpRefreshQuery::Mode);
         break;
-    case 1:
+    case 2:
         plan.push(PpRefreshQuery::Enable);
         break;
-    case 2:
+    case 4:
         plan.push(PpRefreshQuery::Fault);
         break;
-    case 3:
+    case 6:
     default:
         plan.push(PpRefreshQuery::Current);
+        break;
+    case 1:
+    case 3:
+    case 5:
+    case 7:
         break;
     }
     return plan;
