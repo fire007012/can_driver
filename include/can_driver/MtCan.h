@@ -165,6 +165,12 @@ private:
     std::atomic<double> refreshRateHz_{0.0};
     mutable std::mutex pendingReadMutex_;
     std::unordered_map<uint16_t, PendingReadRequest> pendingReadRequests_;
+    /// refresh 轮询周期计数，用于背压期分相查询。
+    uint64_t refreshCycleCount_{0};
+    /// 最近一次观测到的设备 TX backpressure 计数。
+    uint64_t lastObservedTxBackpressure_{0};
+    /// 背压出现后，在若干 refresh 周期内压缩查询量。
+    uint64_t queryPressureUntilCycle_{0};
 
     /**
      * @brief 将节点 ID 组合成 CAN ID（高位取 canBaseId，高 8 位 + motorId）
@@ -229,6 +235,7 @@ private:
     static uint16_t pendingReadKey(uint8_t motorId, uint8_t command);
     static std::chrono::milliseconds computeTimeoutBackoff(std::size_t consecutiveTimeouts,
                                                            std::chrono::milliseconds baseTimeout);
+    static constexpr uint64_t kQueryPressureHoldCycles = 20;
 };
 
 #endif // MTCAN_H

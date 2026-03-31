@@ -98,6 +98,9 @@ public:
         (void)active;
         std::lock_guard<std::mutex> lock(mt.refreshMutex);
         mt.refreshMotorIds = motorIds;
+        mt.refreshCycleCount_ = 0;
+        mt.lastObservedTxBackpressure_ = 0;
+        mt.queryPressureUntilCycle_ = 0;
         std::lock_guard<std::mutex> pendingLock(mt.pendingReadMutex_);
         mt.pendingReadRequests_.clear();
     }
@@ -130,6 +133,12 @@ public:
         std::lock_guard<std::mutex> lock(mt.pendingReadMutex_);
         const auto it = mt.pendingReadRequests_.find(MtCan::pendingReadKey(motorId, command));
         return (it == mt.pendingReadRequests_.end()) ? 0u : it->second.consecutiveTimeouts;
+    }
+
+    static void clearPendingRequests(MtCan &mt)
+    {
+        std::lock_guard<std::mutex> lock(mt.pendingReadMutex_);
+        mt.pendingReadRequests_.clear();
     }
 };
 
@@ -384,6 +393,44 @@ TEST_F(MtCanTest, RefreshBacksOffAfterRepeatedReadTimeouts)
                                      &feedback));
     EXPECT_EQ(feedback.consecutiveTimeoutCount, 1u);
     EXPECT_TRUE(feedback.degraded);
+}
+
+TEST_F(MtCanTest, BackpressureReducesRefreshQueriesButKeepsErrorSampling)
+{
+    sharedState->mutateDeviceHealth(
+        "can0",
+        [](can_driver::SharedDriverState::DeviceHealthState *health) {
+            health->transportReady = true;
+            health->txBackpressure = 1;
+        });
+
+    MtCanTestAccessor::setRefreshState(mt, {0x01}, true);
+    MtCanTestAccessor::refresh(mt);
+
+    ASSERT_EQ(transport->sentFrames.size(), 2u);
+    EXPECT_EQ(transport->sentFrames[0].data[0], 0x9Cu);
+    EXPECT_EQ(transport->sentFrames[1].data[0], 0x9Au);
+}
+
+TEST_F(MtCanTest, BackpressureAlternatesFastFeedbackQueriesAcrossCycles)
+{
+    sharedState->mutateDeviceHealth(
+        "can0",
+        [](can_driver::SharedDriverState::DeviceHealthState *health) {
+            health->transportReady = true;
+            health->txBackpressure = 1;
+        });
+
+    MtCanTestAccessor::setRefreshState(mt, {0x01}, true);
+    MtCanTestAccessor::refresh(mt);
+    ASSERT_EQ(transport->sentFrames.size(), 2u);
+    EXPECT_EQ(transport->sentFrames[0].data[0], 0x9Cu);
+
+    transport->clearSent();
+    MtCanTestAccessor::clearPendingRequests(mt);
+    MtCanTestAccessor::refresh(mt);
+    ASSERT_EQ(transport->sentFrames.size(), 2u);
+    EXPECT_EQ(transport->sentFrames[0].data[0], 0x92u);
 }
 
 TEST_F(MtCanTest, EnableDisableAndFaultStateAreObservable)
