@@ -58,13 +58,18 @@ public:
     void submit(const Request &request) override
     {
         requests.push_back(request);
-        if (transport) {
-            transport->send(request.frame);
+        if (autoSend && transport) {
+            const auto eventTime = std::chrono::steady_clock::now();
+            const auto result = transport->send(request.frame);
+            if (request.completion) {
+                request.completion(true, result, eventTime);
+            }
         }
     }
 
     std::shared_ptr<MockTransport> transport;
     std::vector<Request> requests;
+    bool autoSend{true};
 };
 
 class EyouCanTest : public ::testing::Test {
@@ -115,6 +120,20 @@ public:
         std::lock_guard<std::mutex> lock(eyou.pendingReadMutex_);
         const auto it = eyou.pendingReadRequests_.find(EyouCan::pendingReadKey(motorId, subCommand));
         return (it == eyou.pendingReadRequests_.end()) ? 0u : it->second.consecutiveTimeouts;
+    }
+
+    static bool isQueued(EyouCan &eyou, uint8_t motorId, uint8_t subCommand)
+    {
+        std::lock_guard<std::mutex> lock(eyou.pendingReadMutex_);
+        const auto it = eyou.pendingReadRequests_.find(EyouCan::pendingReadKey(motorId, subCommand));
+        return (it == eyou.pendingReadRequests_.end()) ? false : it->second.queued;
+    }
+
+    static bool isInFlight(EyouCan &eyou, uint8_t motorId, uint8_t subCommand)
+    {
+        std::lock_guard<std::mutex> lock(eyou.pendingReadMutex_);
+        const auto it = eyou.pendingReadRequests_.find(EyouCan::pendingReadKey(motorId, subCommand));
+        return (it == eyou.pendingReadRequests_.end()) ? false : it->second.inFlight;
     }
 };
 
@@ -287,6 +306,23 @@ TEST_F(EyouCanTest, IssueRefreshQueryDoesNotResendSameReadWhileRequestIsInFlight
 
     eyou.issueRefreshQuery(static_cast<MotorID>(0x05), EyouCan::RefreshQuery::Position);
     EXPECT_EQ(transport->sentFrames.size(), 1u);
+}
+
+TEST_F(EyouCanTest, QueuedReadRequestDoesNotStartTimeoutBeforeActualSend)
+{
+    txDispatcher->autoSend = false;
+
+    eyou.issueRefreshQuery(static_cast<MotorID>(0x05), EyouCan::RefreshQuery::Position);
+    ASSERT_EQ(txDispatcher->requests.size(), 1u);
+    EXPECT_TRUE(EyouCanTestAccessor::isQueued(eyou, 0x05, 0x07));
+    EXPECT_FALSE(EyouCanTestAccessor::isInFlight(eyou, 0x05, 0x07));
+
+    EyouCanTestAccessor::ageAllPendingRequests(eyou, std::chrono::milliseconds(500));
+    eyou.issueRefreshQuery(static_cast<MotorID>(0x05), EyouCan::RefreshQuery::Position);
+
+    EXPECT_EQ(txDispatcher->requests.size(), 1u);
+    EXPECT_EQ(EyouCanTestAccessor::consecutiveTimeouts(eyou, 0x05, 0x07), 0u);
+    EXPECT_TRUE(EyouCanTestAccessor::isQueued(eyou, 0x05, 0x07));
 }
 
 TEST_F(EyouCanTest, IssueRefreshQueryBacksOffAfterRepeatedReadTimeouts)

@@ -150,6 +150,7 @@ private:
     struct PendingReadRequest {
         std::chrono::steady_clock::time_point lastSent {};
         std::chrono::steady_clock::time_point nextEligibleSend {};
+        bool queued {false};
         bool inFlight {false};
         std::size_t consecutiveTimeouts {0};
     };
@@ -213,6 +214,11 @@ private:
     bool submitTx(const CanTransport::Frame &frame,
                   CanTxDispatcher::Category category,
                   const char *source) const;
+    void onReadDispatchResult(uint8_t motorId,
+                              uint8_t command,
+                              bool attemptedSend,
+                              CanTransport::SendResult sendResult,
+                              std::chrono::steady_clock::time_point eventTime);
     bool tryIssueReadCommand(uint8_t motorId, uint8_t command);
     void markReadResponseReceived(uint8_t motorId, uint8_t command);
     void resetReadTracking();

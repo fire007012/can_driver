@@ -610,7 +610,28 @@ void EyouCan::sendReadCommand(uint8_t motorId, uint8_t subCommand)
     frame.data.fill(0);
     frame.data[0] = kReadCommand;
     frame.data[1] = subCommand;
-    (void)submitTx(frame, CanTxDispatcher::Category::Query, "EyouCan::sendReadCommand");
+
+    if (!txDispatcher_) {
+        ROS_ERROR_STREAM_THROTTLE(1.0,
+                                  "[EyouCan] TX dispatcher unavailable for EyouCan::sendReadCommand");
+        onReadDispatchResult(motorId,
+                             subCommand,
+                             false,
+                             CanTransport::SendResult::Error,
+                             std::chrono::steady_clock::now());
+        return;
+    }
+
+    CanTxDispatcher::Request request;
+    request.frame = frame;
+    request.category = CanTxDispatcher::Category::Query;
+    request.source = "EyouCan::sendReadCommand";
+    request.completion = [this, motorId, subCommand](bool attemptedSend,
+                                                     CanTransport::SendResult sendResult,
+                                                     std::chrono::steady_clock::time_point eventTime) {
+        onReadDispatchResult(motorId, subCommand, attemptedSend, sendResult, eventTime);
+    };
+    txDispatcher_->submit(request);
 }
 
 bool EyouCan::submitTx(const CanTransport::Frame &frame,
@@ -650,6 +671,9 @@ bool EyouCan::tryIssueReadCommand(uint8_t motorId, uint8_t subCommand)
             now < request.nextEligibleSend) {
             return false;
         }
+        if (request.queued) {
+            return false;
+        }
         if (request.inFlight && (now - request.lastSent) < timeout) {
             return false;
         }
@@ -662,8 +686,7 @@ bool EyouCan::tryIssueReadCommand(uint8_t motorId, uint8_t subCommand)
                 request.nextEligibleSend - now);
             delayRetry = true;
         } else {
-            request.inFlight = true;
-            request.lastSent = now;
+            request.queued = true;
             request.nextEligibleSend = std::chrono::steady_clock::time_point {};
         }
     }
@@ -684,6 +707,27 @@ bool EyouCan::tryIssueReadCommand(uint8_t motorId, uint8_t subCommand)
     return true;
 }
 
+void EyouCan::onReadDispatchResult(uint8_t motorId,
+                                   uint8_t subCommand,
+                                   bool attemptedSend,
+                                   CanTransport::SendResult sendResult,
+                                   std::chrono::steady_clock::time_point eventTime)
+{
+    std::lock_guard<std::mutex> lock(pendingReadMutex_);
+    auto it = pendingReadRequests_.find(pendingReadKey(motorId, subCommand));
+    if (it == pendingReadRequests_.end()) {
+        return;
+    }
+
+    auto &request = it->second;
+    request.queued = false;
+    request.inFlight = false;
+    if (attemptedSend && sendResult == CanTransport::SendResult::Ok) {
+        request.inFlight = true;
+        request.lastSent = eventTime;
+    }
+}
+
 void EyouCan::markReadResponseReceived(uint8_t motorId, uint8_t subCommand)
 {
     std::size_t recoveredTimeouts = 0;
@@ -698,6 +742,7 @@ void EyouCan::markReadResponseReceived(uint8_t motorId, uint8_t subCommand)
                                     std::chrono::steady_clock::now() - it->second.lastSent)
                                     .count();
             }
+            it->second.queued = false;
             it->second.inFlight = false;
             it->second.nextEligibleSend = std::chrono::steady_clock::time_point {};
             it->second.consecutiveTimeouts = 0;

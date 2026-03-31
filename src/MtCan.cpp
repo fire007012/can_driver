@@ -522,7 +522,28 @@ void MtCan::requestState(uint8_t motorId)
     frame.isRemoteRequest = false;
     frame.data.fill(0);
     frame.data[0] = 0x9C;
-    (void)submitTx(frame, CanTxDispatcher::Category::Query, "MtCan::requestState");
+
+    if (!txDispatcher_) {
+        ROS_ERROR_STREAM_THROTTLE(1.0,
+                                  "[MtCan] TX dispatcher unavailable for MtCan::requestState");
+        onReadDispatchResult(motorId,
+                             0x9C,
+                             false,
+                             CanTransport::SendResult::Error,
+                             std::chrono::steady_clock::now());
+        return;
+    }
+
+    CanTxDispatcher::Request request;
+    request.frame = frame;
+    request.category = CanTxDispatcher::Category::Query;
+    request.source = "MtCan::requestState";
+    request.completion = [this, motorId](bool attemptedSend,
+                                         CanTransport::SendResult sendResult,
+                                         std::chrono::steady_clock::time_point eventTime) {
+        onReadDispatchResult(motorId, 0x9C, attemptedSend, sendResult, eventTime);
+    };
+    txDispatcher_->submit(request);
 }
 
 // [FIX #2] DLC 改为 8，数据全部清零
@@ -543,7 +564,28 @@ void MtCan::requestError(uint8_t motorId)
     frame.isRemoteRequest = false;
     frame.data.fill(0);
     frame.data[0] = 0x9A;
-    (void)submitTx(frame, CanTxDispatcher::Category::Query, "MtCan::requestError");
+
+    if (!txDispatcher_) {
+        ROS_ERROR_STREAM_THROTTLE(1.0,
+                                  "[MtCan] TX dispatcher unavailable for MtCan::requestError");
+        onReadDispatchResult(motorId,
+                             0x9A,
+                             false,
+                             CanTransport::SendResult::Error,
+                             std::chrono::steady_clock::now());
+        return;
+    }
+
+    CanTxDispatcher::Request request;
+    request.frame = frame;
+    request.category = CanTxDispatcher::Category::Query;
+    request.source = "MtCan::requestError";
+    request.completion = [this, motorId](bool attemptedSend,
+                                         CanTransport::SendResult sendResult,
+                                         std::chrono::steady_clock::time_point eventTime) {
+        onReadDispatchResult(motorId, 0x9A, attemptedSend, sendResult, eventTime);
+    };
+    txDispatcher_->submit(request);
 }
 
 // [FIX #5 NEW] 请求多圈角度 (0x92) 以获取实际位置
@@ -564,7 +606,28 @@ void MtCan::requestMultiTurnAngle(uint8_t motorId)
     frame.isRemoteRequest = false;
     frame.data.fill(0);
     frame.data[0] = 0x92;
-    (void)submitTx(frame, CanTxDispatcher::Category::Query, "MtCan::requestMultiTurnAngle");
+
+    if (!txDispatcher_) {
+        ROS_ERROR_STREAM_THROTTLE(
+            1.0, "[MtCan] TX dispatcher unavailable for MtCan::requestMultiTurnAngle");
+        onReadDispatchResult(motorId,
+                             0x92,
+                             false,
+                             CanTransport::SendResult::Error,
+                             std::chrono::steady_clock::now());
+        return;
+    }
+
+    CanTxDispatcher::Request request;
+    request.frame = frame;
+    request.category = CanTxDispatcher::Category::Query;
+    request.source = "MtCan::requestMultiTurnAngle";
+    request.completion = [this, motorId](bool attemptedSend,
+                                         CanTransport::SendResult sendResult,
+                                         std::chrono::steady_clock::time_point eventTime) {
+        onReadDispatchResult(motorId, 0x92, attemptedSend, sendResult, eventTime);
+    };
+    txDispatcher_->submit(request);
 }
 
 bool MtCan::submitTx(const CanTransport::Frame &frame,
@@ -621,6 +684,9 @@ bool MtCan::tryIssueReadCommand(uint8_t motorId, uint8_t command)
             now < request.nextEligibleSend) {
             return false;
         }
+        if (request.queued) {
+            return false;
+        }
         if (request.inFlight && (now - request.lastSent) < timeout) {
             return false;
         }
@@ -633,8 +699,7 @@ bool MtCan::tryIssueReadCommand(uint8_t motorId, uint8_t command)
                 request.nextEligibleSend - now);
             delayRetry = true;
         } else {
-            request.inFlight = true;
-            request.lastSent = now;
+            request.queued = true;
             request.nextEligibleSend = std::chrono::steady_clock::time_point {};
         }
     }
@@ -654,6 +719,27 @@ bool MtCan::tryIssueReadCommand(uint8_t motorId, uint8_t command)
     return true;
 }
 
+void MtCan::onReadDispatchResult(uint8_t motorId,
+                                 uint8_t command,
+                                 bool attemptedSend,
+                                 CanTransport::SendResult sendResult,
+                                 std::chrono::steady_clock::time_point eventTime)
+{
+    std::lock_guard<std::mutex> lock(pendingReadMutex_);
+    auto it = pendingReadRequests_.find(pendingReadKey(motorId, command));
+    if (it == pendingReadRequests_.end()) {
+        return;
+    }
+
+    auto &request = it->second;
+    request.queued = false;
+    request.inFlight = false;
+    if (attemptedSend && sendResult == CanTransport::SendResult::Ok) {
+        request.inFlight = true;
+        request.lastSent = eventTime;
+    }
+}
+
 void MtCan::markReadResponseReceived(uint8_t motorId, uint8_t command)
 {
     std::size_t recoveredTimeouts = 0;
@@ -668,6 +754,7 @@ void MtCan::markReadResponseReceived(uint8_t motorId, uint8_t command)
                                     std::chrono::steady_clock::now() - it->second.lastSent)
                                     .count();
             }
+            it->second.queued = false;
             it->second.inFlight = false;
             it->second.nextEligibleSend = std::chrono::steady_clock::time_point {};
             it->second.consecutiveTimeouts = 0;

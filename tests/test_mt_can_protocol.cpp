@@ -59,13 +59,18 @@ public:
     void submit(const Request &request) override
     {
         requests.push_back(request);
-        if (transport) {
-            transport->send(request.frame);
+        if (autoSend && transport) {
+            const auto eventTime = std::chrono::steady_clock::now();
+            const auto result = transport->send(request.frame);
+            if (request.completion) {
+                request.completion(true, result, eventTime);
+            }
         }
     }
 
     std::shared_ptr<MockTransport> transport;
     std::vector<Request> requests;
+    bool autoSend{true};
 };
 
 class MtCanTest : public ::testing::Test {
@@ -116,6 +121,20 @@ public:
         std::lock_guard<std::mutex> lock(mt.pendingReadMutex_);
         const auto it = mt.pendingReadRequests_.find(MtCan::pendingReadKey(motorId, command));
         return (it == mt.pendingReadRequests_.end()) ? 0u : it->second.consecutiveTimeouts;
+    }
+
+    static bool isQueued(MtCan &mt, uint8_t motorId, uint8_t command)
+    {
+        std::lock_guard<std::mutex> lock(mt.pendingReadMutex_);
+        const auto it = mt.pendingReadRequests_.find(MtCan::pendingReadKey(motorId, command));
+        return (it == mt.pendingReadRequests_.end()) ? false : it->second.queued;
+    }
+
+    static bool isInFlight(MtCan &mt, uint8_t motorId, uint8_t command)
+    {
+        std::lock_guard<std::mutex> lock(mt.pendingReadMutex_);
+        const auto it = mt.pendingReadRequests_.find(MtCan::pendingReadKey(motorId, command));
+        return (it == mt.pendingReadRequests_.end()) ? false : it->second.inFlight;
     }
 };
 
@@ -354,6 +373,23 @@ TEST_F(MtCanTest, IssueRefreshQueryDoesNotResendSameReadWhileRequestIsInFlight)
 
     mt.issueRefreshQuery(static_cast<MotorID>(0x01), MtCan::RefreshQuery::State);
     EXPECT_EQ(transport->sentFrames.size(), 1u);
+}
+
+TEST_F(MtCanTest, QueuedReadRequestDoesNotStartTimeoutBeforeActualSend)
+{
+    txDispatcher->autoSend = false;
+
+    mt.issueRefreshQuery(static_cast<MotorID>(0x01), MtCan::RefreshQuery::State);
+    ASSERT_EQ(txDispatcher->requests.size(), 1u);
+    EXPECT_TRUE(MtCanTestAccessor::isQueued(mt, 0x01, 0x9C));
+    EXPECT_FALSE(MtCanTestAccessor::isInFlight(mt, 0x01, 0x9C));
+
+    MtCanTestAccessor::ageAllPendingRequests(mt, std::chrono::milliseconds(500));
+    mt.issueRefreshQuery(static_cast<MotorID>(0x01), MtCan::RefreshQuery::State);
+
+    EXPECT_EQ(txDispatcher->requests.size(), 1u);
+    EXPECT_EQ(MtCanTestAccessor::consecutiveTimeouts(mt, 0x01, 0x9C), 0u);
+    EXPECT_TRUE(MtCanTestAccessor::isQueued(mt, 0x01, 0x9C));
 }
 
 TEST_F(MtCanTest, IssueRefreshQueryBacksOffAfterRepeatedReadTimeouts)

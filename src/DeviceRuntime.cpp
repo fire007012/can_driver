@@ -78,6 +78,11 @@ void DeviceRuntime::submit(const Request &request)
     }
 
     if (!accepted) {
+        if (request.completion) {
+            request.completion(false,
+                               CanTransport::SendResult::Error,
+                               std::chrono::steady_clock::now());
+        }
         ROS_WARN_STREAM_THROTTLE(
             1.0,
             "[DeviceRuntime] Dropping " << categoryName(request.category)
@@ -199,8 +204,12 @@ void DeviceRuntime::workerLoop()
 
         // --- Attempt send and handle result ---
         CanTransport::SendResult result = CanTransport::SendResult::Error;
+        const auto sendTime = std::chrono::steady_clock::now();
         if (transport_) {
             result = transport_->send(request.frame);
+        }
+        if (request.completion) {
+            request.completion(true, result, sendTime);
         }
 
         switch (result) {
