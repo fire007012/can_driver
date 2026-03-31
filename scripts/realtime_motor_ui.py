@@ -19,8 +19,11 @@ import threading
 import tkinter as tk
 from tkinter import ttk
 import math
+from pathlib import Path
 
 import rospy
+import rospkg
+import yaml
 from std_msgs.msg import Float64
 from std_srvs.srv import Trigger
 
@@ -121,12 +124,20 @@ class RealtimeMotorUI:
     def __init__(self) -> None:
         rospy.init_node("realtime_motor_ui", anonymous=True)
 
-        self.joints = self._load_joints()
+        self.node_cfg = self._load_node_cfg()
+        self.joints = self._load_joints(self.node_cfg)
         if not self.joints:
-            raise RuntimeError(f"未读取到 {NS}/joints 配置")
+            raise RuntimeError(
+                f"未读取到 {NS}/joints 配置，且默认 can_driver.yaml 中也没有可用 joints"
+            )
         self.can_device = self.joints[0]["can_device"]
         self.init_loopback = bool(rospy.get_param("~init_loopback", False))
-        default_stream_hz = float(rospy.get_param(f"{NS}/control_frequency", 20.0))
+        default_stream_hz = float(
+            self.node_cfg.get(
+                "control_frequency",
+                rospy.get_param(f"{NS}/control_frequency", 20.0),
+            )
+        )
         self.stream_hz = max(1.0, float(rospy.get_param("~stream_hz", default_stream_hz)))
         self.stream_period_ms = max(4, int(round(1000.0 / self.stream_hz)))
 
@@ -169,7 +180,7 @@ class RealtimeMotorUI:
         self.status_text = tk.StringVar(
             value=(
                 f"就绪 — 当前 CAN={self.can_device}, loopback={self.init_loopback}, "
-                f"连续发送={self.stream_hz:.1f}Hz"
+                f"连续发送={self.stream_hz:.1f}Hz, joints来源={self.node_cfg.get('_source', 'param')}"
             )
         )
 
@@ -184,8 +195,63 @@ class RealtimeMotorUI:
         self.root.protocol("WM_DELETE_WINDOW", self._on_close)
 
     # ------------------------------------------------------------------ load
-    def _load_joints(self):
-        joints = rospy.get_param(f"{NS}/joints", [])
+    def _default_config_file(self):
+        config_file = rospy.get_param("~config_file", "")
+        if config_file:
+            return config_file
+        try:
+            pkg_dir = rospkg.RosPack().get_path("can_driver")
+            return str(Path(pkg_dir) / "config" / "can_driver.yaml")
+        except rospkg.ResourceNotFound:
+            return ""
+
+    def _load_node_cfg(self):
+        param_cfg = rospy.get_param(NS, None)
+        if isinstance(param_cfg, dict) and param_cfg.get("joints"):
+            cfg = dict(param_cfg)
+            cfg["_source"] = "param"
+            return cfg
+
+        file_cfg, config_file = self._load_node_cfg_from_file()
+        if file_cfg:
+            if isinstance(param_cfg, dict):
+                rospy.logwarn(
+                    f"[UI] 参数服务器中的 {NS} 缺少可用 joints，已回退到配置文件: {config_file}"
+                )
+            else:
+                rospy.logwarn(
+                    f"[UI] 参数服务器中不存在 {NS}，已回退到配置文件: {config_file}"
+                )
+            return file_cfg
+
+        if isinstance(param_cfg, dict):
+            cfg = dict(param_cfg)
+            cfg["_source"] = "param"
+            return cfg
+        return {"_source": "missing"}
+
+    def _load_node_cfg_from_file(self):
+        config_file = self._default_config_file()
+        if not config_file:
+            return None, ""
+
+        try:
+            with open(config_file, "r", encoding="utf-8") as f:
+                data = yaml.safe_load(f) or {}
+        except Exception as exc:
+            rospy.logwarn(f"[UI] 读取配置文件失败: {config_file} ({exc})")
+            return None, config_file
+
+        node_cfg = data.get("can_driver_node", {})
+        if not isinstance(node_cfg, dict):
+            return None, config_file
+
+        cfg = dict(node_cfg)
+        cfg["_source"] = Path(config_file).name
+        return cfg, config_file
+
+    def _load_joints(self, node_cfg):
+        joints = node_cfg.get("joints", [])
         out = []
         for j in joints:
             out.append(

@@ -18,11 +18,13 @@
 
 ## 启动前提
 
-1. 已启动 `can_driver_node`
+1. 推荐已启动 `can_driver_node`
 2. 可访问以下接口：
    - `/can_driver_node/motor_command`
    - `/can_driver_node/motor/<joint>/cmd_position`
    - `/can_driver_node/motor/<joint>/cmd_velocity`
+3. 如果参数服务器上还没有 `/can_driver_node/joints`，UI 会自动回退读取
+   `can_driver/config/can_driver.yaml` 中的关节配置；但真正发命令仍然需要上面的服务和话题可用
 
 ## 启动命令
 
