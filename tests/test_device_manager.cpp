@@ -1,8 +1,8 @@
 #include <gtest/gtest.h>
 #include <ros/time.h>
 
+#include "can_driver/DeviceRefreshWorker.h"
 #include "can_driver/DeviceManager.h"
-#include "can_driver/ProtocolRefreshWorker.h"
 
 #include <atomic>
 #include <chrono>
@@ -34,6 +34,11 @@ public:
     static bool hasTransport(const DeviceManager &dm, const std::string &device)
     {
         return dm.transports_.find(device) != dm.transports_.end();
+    }
+
+    static std::size_t refreshWorkerCount(const DeviceManager &dm)
+    {
+        return dm.deviceRefreshRuntimes_.size();
     }
 };
 
@@ -105,10 +110,10 @@ TEST_F(RosTimeFixture, SharedDriverStateIsStableAndAvailable)
     EXPECT_EQ(first, second);
 }
 
-TEST_F(RosTimeFixture, ProtocolRefreshWorkerRunsTickLoopUntilStopped)
+TEST_F(RosTimeFixture, DeviceRefreshWorkerRunsTickLoopUntilStopped)
 {
     std::atomic<int> tickCount{0};
-    can_driver::ProtocolRefreshWorker worker(
+    can_driver::DeviceRefreshWorker worker(
         [&tickCount]() { ++tickCount; },
         []() { return std::chrono::milliseconds(1); });
 
@@ -242,6 +247,7 @@ TEST_F(RosTimeFixture, InitDeviceRecreatesProtocolsAfterTransportReinit)
     ASSERT_NE(newPp, nullptr);
     EXPECT_NE(newMt, oldMt);
     EXPECT_NE(newPp, oldPp);
+    EXPECT_EQ(DeviceManagerTestAccessor::refreshWorkerCount(dm), 1u);
 }
 
 TEST_F(RosTimeFixture, IsDeviceReadyDropsImmediatelyAfterRecentLinkDown)

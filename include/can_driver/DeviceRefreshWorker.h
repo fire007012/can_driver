@@ -1,5 +1,5 @@
-#ifndef CAN_DRIVER_PROTOCOL_REFRESH_WORKER_H
-#define CAN_DRIVER_PROTOCOL_REFRESH_WORKER_H
+#ifndef CAN_DRIVER_DEVICE_REFRESH_WORKER_H
+#define CAN_DRIVER_DEVICE_REFRESH_WORKER_H
 
 #include <atomic>
 #include <chrono>
@@ -11,18 +11,18 @@
 
 namespace can_driver {
 
-class ProtocolRefreshWorker {
+class DeviceRefreshWorker {
 public:
     using TickFn = std::function<void()>;
     using SleepFn = std::function<std::chrono::milliseconds()>;
 
-    ProtocolRefreshWorker(TickFn tick, SleepFn sleepFor)
+    DeviceRefreshWorker(TickFn tick, SleepFn sleepFor)
         : tick_(std::move(tick))
         , sleepFor_(std::move(sleepFor))
     {
     }
 
-    ~ProtocolRefreshWorker()
+    ~DeviceRefreshWorker()
     {
         stop();
     }
@@ -100,4 +100,4 @@ private:
 
 } // namespace can_driver
 
-#endif // CAN_DRIVER_PROTOCOL_REFRESH_WORKER_H
+#endif // CAN_DRIVER_DEVICE_REFRESH_WORKER_H

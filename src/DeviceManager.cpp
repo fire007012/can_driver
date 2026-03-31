@@ -1,101 +1,172 @@
 #include "can_driver/DeviceManager.h"
 #include "can_driver/DeviceRuntime.h"
 
+#include <algorithm>
 #include <chrono>
 
 #include <ros/ros.h>
 
-void DeviceManager::startRefreshWorkerLocked(const std::string &device, CanType type)
+namespace {
+
+std::chrono::milliseconds clampRefreshSleep(std::chrono::milliseconds sleepFor)
 {
-    if (type == CanType::MT) {
-        const auto protoIt = mtProtocols_.find(device);
-        if (protoIt == mtProtocols_.end() || !protoIt->second) {
-            return;
-        }
+    if (sleepFor < std::chrono::milliseconds(1)) {
+        return std::chrono::milliseconds(1);
+    }
+    return sleepFor;
+}
 
-        auto &worker = mtRefreshWorkers_[device];
-        if (!worker) {
-            std::weak_ptr<MtCan> weakProtocol = protoIt->second;
-            worker = std::make_shared<can_driver::ProtocolRefreshWorker>(
-                [weakProtocol]() {
-                    if (const auto protocol = weakProtocol.lock()) {
-                        protocol->runRefreshCycle();
-                    }
-                },
-                [weakProtocol]() {
-                    if (const auto protocol = weakProtocol.lock()) {
-                        return protocol->refreshSleepInterval();
-                    }
-                    return std::chrono::milliseconds(5);
-                });
-        }
+} // namespace
 
-        worker->start();
-        worker->notify();
+void DeviceManager::syncDeviceRefreshRuntimeLocked(const std::string &device)
+{
+    auto &runtime = deviceRefreshRuntimes_[device];
+    if (!runtime) {
+        runtime = std::make_shared<DeviceRefreshRuntime>();
+    }
+    const auto mtIt = mtProtocols_.find(device);
+    runtime->mtProtocol =
+        (mtIt != mtProtocols_.end()) ? mtIt->second : std::shared_ptr<MtCan>();
+    const auto ppIt = eyouProtocols_.find(device);
+    runtime->ppProtocol = (ppIt != eyouProtocols_.end()) ? ppIt->second
+                                                         : std::shared_ptr<EyouCan>();
+
+    if (runtime->worker) {
         return;
     }
 
-    const auto protoIt = eyouProtocols_.find(device);
-    if (protoIt == eyouProtocols_.end() || !protoIt->second) {
-        return;
-    }
+    std::weak_ptr<DeviceRefreshRuntime> weakRuntime = runtime;
+    runtime->worker = std::make_shared<can_driver::DeviceRefreshWorker>(
+        [weakRuntime]() {
+            const auto runtime = weakRuntime.lock();
+            if (!runtime) {
+                return;
+            }
 
-    auto &worker = eyouRefreshWorkers_[device];
-    if (!worker) {
-        std::weak_ptr<EyouCan> weakProtocol = protoIt->second;
-        worker = std::make_shared<can_driver::ProtocolRefreshWorker>(
-            [weakProtocol]() {
-                if (const auto protocol = weakProtocol.lock()) {
+            const auto now = std::chrono::steady_clock::now();
+
+            if (runtime->mtActive.load(std::memory_order_acquire)) {
+                const auto protocol = runtime->mtProtocol.lock();
+                bool due = false;
+                {
+                    std::lock_guard<std::mutex> lock(runtime->scheduleMutex);
+                    due = (runtime->nextMtTick == std::chrono::steady_clock::time_point {}) ||
+                          (now >= runtime->nextMtTick);
+                }
+                if (protocol && due) {
                     protocol->runRefreshCycle();
+                    const auto nextSleep = clampRefreshSleep(protocol->refreshSleepInterval());
+                    std::lock_guard<std::mutex> lock(runtime->scheduleMutex);
+                    runtime->nextMtTick = std::chrono::steady_clock::now() + nextSleep;
                 }
-            },
-            [weakProtocol]() {
-                if (const auto protocol = weakProtocol.lock()) {
-                    return protocol->refreshSleepInterval();
-                }
-                return std::chrono::milliseconds(5);
-            });
-    }
+            } else {
+                std::lock_guard<std::mutex> lock(runtime->scheduleMutex);
+                runtime->nextMtTick = std::chrono::steady_clock::time_point {};
+            }
 
-    worker->start();
-    worker->notify();
+            if (runtime->ppActive.load(std::memory_order_acquire)) {
+                const auto protocol = runtime->ppProtocol.lock();
+                bool due = false;
+                {
+                    std::lock_guard<std::mutex> lock(runtime->scheduleMutex);
+                    due = (runtime->nextPpTick == std::chrono::steady_clock::time_point {}) ||
+                          (now >= runtime->nextPpTick);
+                }
+                if (protocol && due) {
+                    protocol->runRefreshCycle();
+                    const auto nextSleep = clampRefreshSleep(protocol->refreshSleepInterval());
+                    std::lock_guard<std::mutex> lock(runtime->scheduleMutex);
+                    runtime->nextPpTick = std::chrono::steady_clock::now() + nextSleep;
+                }
+            } else {
+                std::lock_guard<std::mutex> lock(runtime->scheduleMutex);
+                runtime->nextPpTick = std::chrono::steady_clock::time_point {};
+            }
+        },
+        [weakRuntime]() {
+            const auto runtime = weakRuntime.lock();
+            if (!runtime) {
+                return std::chrono::milliseconds(5);
+            }
+
+            const auto now = std::chrono::steady_clock::now();
+            std::chrono::milliseconds sleepFor(5);
+            bool hasPending = false;
+            {
+                std::lock_guard<std::mutex> lock(runtime->scheduleMutex);
+                if (runtime->mtActive.load(std::memory_order_acquire)) {
+                    if (runtime->nextMtTick == std::chrono::steady_clock::time_point {}) {
+                        return std::chrono::milliseconds(1);
+                    }
+                    const auto mtWait = std::chrono::duration_cast<std::chrono::milliseconds>(
+                        runtime->nextMtTick > now ? (runtime->nextMtTick - now)
+                                                  : std::chrono::steady_clock::duration::zero());
+                    sleepFor = hasPending ? std::min(sleepFor, mtWait) : mtWait;
+                    hasPending = true;
+                }
+                if (runtime->ppActive.load(std::memory_order_acquire)) {
+                    if (runtime->nextPpTick == std::chrono::steady_clock::time_point {}) {
+                        return std::chrono::milliseconds(1);
+                    }
+                    const auto ppWait = std::chrono::duration_cast<std::chrono::milliseconds>(
+                        runtime->nextPpTick > now ? (runtime->nextPpTick - now)
+                                                  : std::chrono::steady_clock::duration::zero());
+                    sleepFor = hasPending ? std::min(sleepFor, ppWait) : ppWait;
+                    hasPending = true;
+                }
+            }
+
+            if (!hasPending) {
+                return std::chrono::milliseconds(5);
+            }
+            return clampRefreshSleep(sleepFor);
+        });
 }
 
-void DeviceManager::stopRefreshWorkerLocked(const std::string &device, CanType type)
+void DeviceManager::startDeviceRefreshWorkerLocked(const std::string &device)
 {
-    auto *workers = (type == CanType::MT) ? &mtRefreshWorkers_ : &eyouRefreshWorkers_;
-    const auto it = workers->find(device);
-    if (it == workers->end()) {
+    const auto it = deviceRefreshRuntimes_.find(device);
+    if (it == deviceRefreshRuntimes_.end() || !it->second) {
         return;
     }
 
-    if (it->second) {
-        it->second->stop();
+    const auto &runtime = it->second;
+    const bool anyActive = runtime->mtActive.load(std::memory_order_acquire) ||
+                           runtime->ppActive.load(std::memory_order_acquire);
+    if (!anyActive || !runtime->worker) {
+        return;
     }
-    workers->erase(it);
+
+    runtime->worker->start();
+    runtime->worker->notify();
 }
 
-void DeviceManager::stopAllRefreshWorkersLocked()
+void DeviceManager::stopDeviceRefreshWorkerLocked(const std::string &device)
 {
-    for (auto &entry : mtRefreshWorkers_) {
-        if (entry.second) {
-            entry.second->stop();
-        }
+    const auto it = deviceRefreshRuntimes_.find(device);
+    if (it == deviceRefreshRuntimes_.end()) {
+        return;
     }
-    mtRefreshWorkers_.clear();
 
-    for (auto &entry : eyouRefreshWorkers_) {
-        if (entry.second) {
-            entry.second->stop();
+    if (it->second && it->second->worker) {
+        it->second->worker->stop();
+    }
+    deviceRefreshRuntimes_.erase(it);
+}
+
+void DeviceManager::stopAllDeviceRefreshWorkersLocked()
+{
+    for (auto &entry : deviceRefreshRuntimes_) {
+        if (entry.second && entry.second->worker) {
+            entry.second->worker->stop();
         }
     }
-    eyouRefreshWorkers_.clear();
+    deviceRefreshRuntimes_.clear();
 }
 
 void DeviceManager::resetDeviceRuntimeLocked(const std::string &device)
 {
-    stopRefreshWorkerLocked(device, CanType::MT);
-    stopRefreshWorkerLocked(device, CanType::PP);
+    stopDeviceRefreshWorkerLocked(device);
     mtProtocols_.erase(device);
     eyouProtocols_.erase(device);
     txDispatchers_.erase(device);
@@ -276,18 +347,30 @@ bool DeviceManager::initDevice(const std::string &device,
         eyou->setFastWriteEnabled(ppFastWriteEnabled_);
         eyouProtocols_[device] = std::move(eyou);
     }
+
+    syncDeviceRefreshRuntimeLocked(device);
+
     if (!mtIds.empty()) {
         mtProtocols_[device]->initializeMotorRefresh(mtIds);
-        startRefreshWorkerLocked(device, CanType::MT);
+        deviceRefreshRuntimes_[device]->mtActive.store(true, std::memory_order_release);
+        std::lock_guard<std::mutex> lock(deviceRefreshRuntimes_[device]->scheduleMutex);
+        deviceRefreshRuntimes_[device]->nextMtTick = std::chrono::steady_clock::time_point {};
     } else {
-        stopRefreshWorkerLocked(device, CanType::MT);
+        deviceRefreshRuntimes_[device]->mtActive.store(false, std::memory_order_release);
+        std::lock_guard<std::mutex> lock(deviceRefreshRuntimes_[device]->scheduleMutex);
+        deviceRefreshRuntimes_[device]->nextMtTick = std::chrono::steady_clock::time_point {};
     }
     if (!ppIds.empty()) {
         eyouProtocols_[device]->initializeMotorRefresh(ppIds);
-        startRefreshWorkerLocked(device, CanType::PP);
+        deviceRefreshRuntimes_[device]->ppActive.store(true, std::memory_order_release);
+        std::lock_guard<std::mutex> lock(deviceRefreshRuntimes_[device]->scheduleMutex);
+        deviceRefreshRuntimes_[device]->nextPpTick = std::chrono::steady_clock::time_point {};
     } else {
-        stopRefreshWorkerLocked(device, CanType::PP);
+        deviceRefreshRuntimes_[device]->ppActive.store(false, std::memory_order_release);
+        std::lock_guard<std::mutex> lock(deviceRefreshRuntimes_[device]->scheduleMutex);
+        deviceRefreshRuntimes_[device]->nextPpTick = std::chrono::steady_clock::time_point {};
     }
+    startDeviceRefreshWorkerLocked(device);
 
     ROS_INFO("[CanDriverHW] Initialized '%s'.", device.c_str());
     return true;
@@ -302,20 +385,36 @@ void DeviceManager::startRefresh(const std::string &device,
         auto it = mtProtocols_.find(device);
         if (it != mtProtocols_.end()) {
             it->second->initializeMotorRefresh(ids);
-            if (ids.empty()) {
-                stopRefreshWorkerLocked(device, type);
+            syncDeviceRefreshRuntimeLocked(device);
+            auto runtime = deviceRefreshRuntimes_[device];
+            runtime->mtActive.store(!ids.empty(), std::memory_order_release);
+            {
+                std::lock_guard<std::mutex> scheduleLock(runtime->scheduleMutex);
+                runtime->nextMtTick = std::chrono::steady_clock::time_point {};
+            }
+            if (runtime->mtActive.load(std::memory_order_acquire) ||
+                runtime->ppActive.load(std::memory_order_acquire)) {
+                startDeviceRefreshWorkerLocked(device);
             } else {
-                startRefreshWorkerLocked(device, type);
+                stopDeviceRefreshWorkerLocked(device);
             }
         }
     } else {
         auto it = eyouProtocols_.find(device);
         if (it != eyouProtocols_.end()) {
             it->second->initializeMotorRefresh(ids);
-            if (ids.empty()) {
-                stopRefreshWorkerLocked(device, type);
+            syncDeviceRefreshRuntimeLocked(device);
+            auto runtime = deviceRefreshRuntimes_[device];
+            runtime->ppActive.store(!ids.empty(), std::memory_order_release);
+            {
+                std::lock_guard<std::mutex> scheduleLock(runtime->scheduleMutex);
+                runtime->nextPpTick = std::chrono::steady_clock::time_point {};
+            }
+            if (runtime->mtActive.load(std::memory_order_acquire) ||
+                runtime->ppActive.load(std::memory_order_acquire)) {
+                startDeviceRefreshWorkerLocked(device);
             } else {
-                startRefreshWorkerLocked(device, type);
+                stopDeviceRefreshWorkerLocked(device);
             }
         }
     }
@@ -334,14 +433,16 @@ void DeviceManager::setRefreshRateHz(double hz)
             kv.second->setRefreshRateHz(hz);
         }
     }
-    for (auto &kv : mtRefreshWorkers_) {
+    for (auto &kv : deviceRefreshRuntimes_) {
         if (kv.second) {
-            kv.second->notify();
-        }
-    }
-    for (auto &kv : eyouRefreshWorkers_) {
-        if (kv.second) {
-            kv.second->notify();
+            {
+                std::lock_guard<std::mutex> scheduleLock(kv.second->scheduleMutex);
+                kv.second->nextMtTick = std::chrono::steady_clock::time_point {};
+                kv.second->nextPpTick = std::chrono::steady_clock::time_point {};
+            }
+            if (kv.second->worker) {
+                kv.second->worker->notify();
+            }
         }
     }
 }
@@ -370,7 +471,7 @@ void DeviceManager::shutdownAll()
         shutdownDeviceLocked(device);
     }
 
-    stopAllRefreshWorkersLocked();
+    stopAllDeviceRefreshWorkersLocked();
     mtProtocols_.clear();
     eyouProtocols_.clear();
     txDispatchers_.clear();

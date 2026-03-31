@@ -4,14 +4,15 @@
 #include "can_driver/CanProtocol.h"
 #include "can_driver/CanTxDispatcher.h"
 #include "can_driver/CanType.h"
+#include "can_driver/DeviceRefreshWorker.h"
 #include "can_driver/EyouCan.h"
 #include "can_driver/IDeviceManager.h"
 #include "can_driver/MotorID.h"
 #include "can_driver/MtCan.h"
-#include "can_driver/ProtocolRefreshWorker.h"
 #include "can_driver/SharedDriverState.h"
 #include "can_driver/SocketCanController.h"
 
+#include <atomic>
 #include <map>
 #include <memory>
 #include <mutex>
@@ -62,9 +63,21 @@ public:
     std::size_t deviceCount() const override;
 
 private:
-    void startRefreshWorkerLocked(const std::string &device, CanType type);
-    void stopRefreshWorkerLocked(const std::string &device, CanType type);
-    void stopAllRefreshWorkersLocked();
+    struct DeviceRefreshRuntime {
+        std::weak_ptr<MtCan> mtProtocol;
+        std::weak_ptr<EyouCan> ppProtocol;
+        std::shared_ptr<can_driver::DeviceRefreshWorker> worker;
+        std::atomic<bool> mtActive{false};
+        std::atomic<bool> ppActive{false};
+        std::chrono::steady_clock::time_point nextMtTick {};
+        std::chrono::steady_clock::time_point nextPpTick {};
+        mutable std::mutex scheduleMutex;
+    };
+
+    void syncDeviceRefreshRuntimeLocked(const std::string &device);
+    void startDeviceRefreshWorkerLocked(const std::string &device);
+    void stopDeviceRefreshWorkerLocked(const std::string &device);
+    void stopAllDeviceRefreshWorkersLocked();
     void resetDeviceRuntimeLocked(const std::string &device);
     void shutdownDeviceLocked(const std::string &device);
 
@@ -75,8 +88,7 @@ private:
     std::map<std::string, std::shared_ptr<CanTxDispatcher>> txDispatchers_;
     std::map<std::string, std::shared_ptr<MtCan>> mtProtocols_;
     std::map<std::string, std::shared_ptr<EyouCan>> eyouProtocols_;
-    std::map<std::string, std::shared_ptr<can_driver::ProtocolRefreshWorker>> mtRefreshWorkers_;
-    std::map<std::string, std::shared_ptr<can_driver::ProtocolRefreshWorker>> eyouRefreshWorkers_;
+    std::map<std::string, std::shared_ptr<DeviceRefreshRuntime>> deviceRefreshRuntimes_;
     std::shared_ptr<can_driver::SharedDriverState> sharedState_{
         std::make_shared<can_driver::SharedDriverState>()};
     bool ppFastWriteEnabled_{false};
