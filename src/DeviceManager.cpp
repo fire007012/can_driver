@@ -92,6 +92,15 @@ void DeviceManager::stopAllRefreshWorkersLocked()
     eyouRefreshWorkers_.clear();
 }
 
+void DeviceManager::resetDeviceRuntimeLocked(const std::string &device)
+{
+    stopRefreshWorkerLocked(device, CanType::MT);
+    stopRefreshWorkerLocked(device, CanType::PP);
+    mtProtocols_.erase(device);
+    eyouProtocols_.erase(device);
+    txDispatchers_.erase(device);
+}
+
 // 幂等创建 transport：同一 device 只创建一次。
 bool DeviceManager::ensureTransport(const std::string &device, bool loopback)
 {
@@ -181,6 +190,8 @@ bool DeviceManager::initDevice(const std::string &device,
         transportIt = transports_.find(device);
     } else {
         const auto &transport = transportIt->second;
+        // Re-init must rebuild protocol handlers and TX runtime for this bus.
+        resetDeviceRuntimeLocked(device);
         transport->shutdown();
         if (!transport->initialize(device, loopback)) {
             ROS_ERROR("[CanDriverHW] Re-init of '%s' failed.", device.c_str());
@@ -191,9 +202,7 @@ bool DeviceManager::initDevice(const std::string &device,
     if (deviceCmdMutexes_.find(device) == deviceCmdMutexes_.end()) {
         deviceCmdMutexes_[device] = std::make_shared<std::mutex>();
     }
-    if (txDispatchers_.find(device) == txDispatchers_.end()) {
-        txDispatchers_[device] = std::make_shared<DeviceRuntime>(transportIt->second, device);
-    }
+    txDispatchers_[device] = std::make_shared<DeviceRuntime>(transportIt->second, device);
     if (sharedState_) {
         for (const auto &entry : motors) {
             sharedState_->registerAxis(device, entry.first, entry.second);

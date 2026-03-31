@@ -62,6 +62,7 @@ private:
     void startRefreshWorkerLocked(const std::string &device, CanType type);
     void stopRefreshWorkerLocked(const std::string &device, CanType type);
     void stopAllRefreshWorkersLocked();
+    void resetDeviceRuntimeLocked(const std::string &device);
 
     // 读多写少：读取协议/transport 时使用 shared_lock，创建/销毁时 unique_lock。
     mutable std::shared_mutex mutex_;

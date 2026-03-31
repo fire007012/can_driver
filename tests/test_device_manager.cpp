@@ -146,3 +146,35 @@ TEST_F(RosTimeFixture, ShutdownAllClearsDevices)
     EXPECT_EQ(dm.deviceCount(), 0u);
     EXPECT_EQ(dm.getTransport("vcan0"), nullptr);
 }
+
+TEST_F(RosTimeFixture, InitDeviceRecreatesProtocolsAfterTransportReinit)
+{
+    if (!hasVcan0()) {
+        GTEST_SKIP() << "vcan0 not available; skipping transport re-init regression path.";
+    }
+
+    DeviceManager dm;
+    ASSERT_TRUE(dm.ensureTransport("vcan0", true));
+    ASSERT_TRUE(dm.ensureProtocol("vcan0", CanType::MT));
+    ASSERT_TRUE(dm.ensureProtocol("vcan0", CanType::PP));
+
+    const auto oldMt = dm.getProtocol("vcan0", CanType::MT);
+    const auto oldPp = dm.getProtocol("vcan0", CanType::PP);
+    ASSERT_NE(oldMt, nullptr);
+    ASSERT_NE(oldPp, nullptr);
+
+    ASSERT_TRUE(dm.initDevice(
+        "vcan0",
+        {
+            {CanType::MT, static_cast<MotorID>(0x01)},
+            {CanType::PP, static_cast<MotorID>(0x02)},
+        },
+        true));
+
+    const auto newMt = dm.getProtocol("vcan0", CanType::MT);
+    const auto newPp = dm.getProtocol("vcan0", CanType::PP);
+    ASSERT_NE(newMt, nullptr);
+    ASSERT_NE(newPp, nullptr);
+    EXPECT_NE(newMt, oldMt);
+    EXPECT_NE(newPp, oldPp);
+}
