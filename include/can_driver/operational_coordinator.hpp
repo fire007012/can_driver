@@ -36,6 +36,7 @@ public:
         std::function<Result()> halt_all;
         std::function<Result()> recover_all;
         std::function<Result(bool)> shutdown_all;
+        std::function<bool(std::string *)> enable_healthy;
         std::function<bool(std::string *)> motion_healthy;
         std::function<bool()> any_fault_active;
         std::function<void()> hold_commands;

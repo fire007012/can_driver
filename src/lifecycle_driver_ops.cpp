@@ -412,6 +412,61 @@ bool LifecycleDriverOps::anyFaultActive() const
     return false;
 }
 
+bool LifecycleDriverOps::enableHealthy(std::string *detail) const
+{
+    for (const auto &target : targetsSnapshot()) {
+        if (!isDeviceReady(target.canDevice)) {
+            if (detail) {
+                *detail = "CAN device not ready.";
+            }
+            return false;
+        }
+        if (const auto sharedState = getSharedDriverState()) {
+            const auto axisKey = MakeAxisKey(target.canDevice, target.protocol, target.motorId);
+            SharedDriverState::AxisFeedbackState feedback;
+            if (sharedState->getAxisFeedback(axisKey, &feedback)) {
+                SharedDriverState::AxisCommandState command;
+                const SharedDriverState::AxisCommandState *commandPtr =
+                    sharedState->getAxisCommand(axisKey, &command) ? &command : nullptr;
+
+                SharedDriverState::DeviceHealthState deviceHealth;
+                const SharedDriverState::DeviceHealthState *deviceHealthPtr =
+                    sharedState->getDeviceHealth(target.canDevice, &deviceHealth)
+                        ? &deviceHealth
+                        : nullptr;
+
+                const auto readiness = evaluateAxisReadiness(
+                    axisKey,
+                    feedback,
+                    commandPtr,
+                    AxisIntent::Enable,
+                    deviceHealthPtr);
+                if (!AxisReadinessEvaluator::ReadyForEnable(readiness)) {
+                    if (detail) {
+                        *detail = AxisReadinessEvaluator::DescribeBlockReason(readiness);
+                    }
+                    return false;
+                }
+                continue;
+            }
+        }
+        bool hasFault = false;
+        if (!queryMotorFault(target, &hasFault)) {
+            if (detail) {
+                *detail = "Protocol not available.";
+            }
+            return false;
+        }
+        if (hasFault) {
+            if (detail) {
+                *detail = "Fault still active.";
+            }
+            return false;
+        }
+    }
+    return true;
+}
+
 bool LifecycleDriverOps::motionHealthy(std::string *detail) const
 {
     for (const auto &target : targetsSnapshot()) {

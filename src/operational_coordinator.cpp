@@ -154,6 +154,9 @@ OperationalCoordinator::Result OperationalCoordinator::RequestEnable()
         {SystemOpMode::Standby},
         SystemOpMode::Armed,
         [this](std::string *detail) {
+            if (driverOps_.enable_healthy && !driverOps_.enable_healthy(detail)) {
+                return false;
+            }
             if (!driverOps_.enable_all) {
                 if (detail) {
                     *detail = "enable path not available";

@@ -463,6 +463,9 @@ void CanDriverHW::configureLifecycleCoordinator()
     ops.enable_all = [this]() {
         return lifecycleDriverOps_.enableAll();
     };
+    ops.enable_healthy = [this](std::string *detail) {
+        return lifecycleDriverOps_.enableHealthy(detail);
+    };
     ops.disable_all = [this]() {
         return lifecycleDriverOps_.disableAll();
     };

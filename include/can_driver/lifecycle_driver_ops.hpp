@@ -32,6 +32,7 @@ public:
     Result haltAll() const;
     Result recoverAll() const;
     Result shutdownAll(bool force) const;
+    bool enableHealthy(std::string *detail) const;
     bool anyFaultActive() const;
     bool motionHealthy(std::string *detail) const;
 

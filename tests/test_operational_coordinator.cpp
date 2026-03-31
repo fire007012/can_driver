@@ -25,6 +25,9 @@ can_driver::OperationalCoordinator::DriverOps makeHappyOps()
     ops.shutdown_all = [](bool) {
         return can_driver::OperationalCoordinator::Result{true, "shutdown"};
     };
+    ops.enable_healthy = [](std::string *) {
+        return true;
+    };
     ops.motion_healthy = [](std::string *) {
         return true;
     };
@@ -137,6 +140,35 @@ TEST(OperationalCoordinatorTest, InitHoldsCommandsBeforeArmingFreshLatch)
     EXPECT_EQ(coordinator.mode(), can_driver::SystemOpMode::Armed);
     EXPECT_EQ(holdOrder, 1);
     EXPECT_EQ(armOrder, 2);
+}
+
+TEST(OperationalCoordinatorTest, EnableRejectsUnhealthyStandbyBeforeIssuingEnable)
+{
+    bool enableCalled = false;
+
+    auto ops = makeHappyOps();
+    ops.enable_healthy = [](std::string *detail) {
+        if (detail) {
+            *detail = "Fault still active.";
+        }
+        return false;
+    };
+    ops.enable_all = [&]() {
+        enableCalled = true;
+        return can_driver::OperationalCoordinator::Result{true, "enabled"};
+    };
+
+    can_driver::OperationalCoordinator coordinator(ops);
+    coordinator.SetConfigured();
+    ASSERT_TRUE(coordinator.RequestInit("fake0", false).ok);
+    ASSERT_TRUE(coordinator.RequestDisable().ok);
+    ASSERT_EQ(coordinator.mode(), can_driver::SystemOpMode::Standby);
+
+    const auto result = coordinator.RequestEnable();
+    EXPECT_FALSE(result.ok);
+    EXPECT_EQ(result.message, "Fault still active.");
+    EXPECT_FALSE(enableCalled);
+    EXPECT_EQ(coordinator.mode(), can_driver::SystemOpMode::Standby);
 }
 
 } // namespace
