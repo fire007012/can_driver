@@ -370,9 +370,13 @@ public:
             message.position = can_driver::safe_command::clampToInt32(rawPos);
             message.velocity = can_driver::safe_command::clampToInt16(rawVel);
             message.current = can_driver::safe_command::clampToInt16(joint.eff);
-            message.mode = (joint.controlMode == "velocity")
-                               ? can_driver::MotorState::MODE_VELOCITY
-                               : can_driver::MotorState::MODE_POSITION;
+            if (joint.controlMode == "velocity") {
+                message.mode = can_driver::MotorState::MODE_VELOCITY;
+            } else if (joint.controlMode == "csp") {
+                message.mode = can_driver::MotorState::MODE_CSP;
+            } else {
+                message.mode = can_driver::MotorState::MODE_POSITION;
+            }
             if (statusSnapshots[index].valid) {
                 message.enabled = statusSnapshots[index].enabled;
                 message.fault = statusSnapshots[index].fault;

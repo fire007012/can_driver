@@ -330,6 +330,31 @@ TEST_F(EyouCanTest, ReadResponsesUpdateSharedFeedbackFreshness)
     EXPECT_GT(feedback.lastRxSteadyNs, 0);
 }
 
+TEST_F(EyouCanTest, ModeReadResponseDecodesCspAndUpdatesSharedFeedback)
+{
+    constexpr MotorID kMotorId = static_cast<MotorID>(0x05);
+    const auto axisKey = can_driver::MakeAxisKey("can0", CanType::PP, kMotorId);
+
+    CanTransport::Frame frame {};
+    frame.id = 0x0005;
+    frame.isExtended = false;
+    frame.isRemoteRequest = false;
+    frame.dlc = 6;
+    frame.data[0] = 0x04;
+    frame.data[1] = 0x0F;
+    frame.data[2] = 0x00;
+    frame.data[3] = 0x00;
+    frame.data[4] = 0x00;
+    frame.data[5] = 0x05;
+
+    transport->simulateReceive(frame);
+
+    can_driver::SharedDriverState::AxisFeedbackState feedback;
+    ASSERT_TRUE(sharedState->getAxisFeedback(axisKey, &feedback));
+    EXPECT_TRUE(feedback.feedbackSeen);
+    EXPECT_EQ(feedback.mode, CanProtocol::MotorMode::CSP);
+}
+
 TEST_F(EyouCanTest, HandleResponseIgnoresExtendedFrame)
 {
     // 协议仅支持标准帧，扩展帧必须被忽略。

@@ -615,7 +615,7 @@ TEST_F(CanDriverHWSmokeTest, InitCspJointSetsModeAndPublishesRawFeedbackFromPprC
     EXPECT_EQ(latestState.motor_id, 0x05u);
     EXPECT_EQ(latestState.position, 16384);
     EXPECT_EQ(latestState.velocity, 512);
-    EXPECT_EQ(latestState.mode, can_driver::MotorState::MODE_POSITION);
+    EXPECT_EQ(latestState.mode, can_driver::MotorState::MODE_CSP);
 
     spinner.stop();
 }

@@ -804,9 +804,18 @@ void EyouCan::handleResponse(const CanTransport::Frame &frame)
             case 0x0F:
                 // 当前工作模式
                 // 读返回: data[2..5] 为32位数据，模式值在最低字节
-                state.mode = dataByteOrZero(frame, 5) == 0x03
-                                 ? MotorMode::Velocity
-                                 : MotorMode::Position;
+                switch (dataByteOrZero(frame, 5)) {
+                case 0x03:
+                    state.mode = MotorMode::Velocity;
+                    break;
+                case 0x05:
+                    state.mode = MotorMode::CSP;
+                    break;
+                case 0x01:
+                default:
+                    state.mode = MotorMode::Position;
+                    break;
+                }
                 break;
             case 0x10:
                 // 使能/失能状态

@@ -11,3 +11,4 @@ int16 current    # 电流反馈（协议原始单位）
 uint8 MODE_UNKNOWN=0
 uint8 MODE_POSITION=1
 uint8 MODE_VELOCITY=2
+uint8 MODE_CSP=3
