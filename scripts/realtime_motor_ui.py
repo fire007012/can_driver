@@ -177,6 +177,9 @@ class RealtimeMotorUI:
         self.selected_mode = tk.StringVar(value=self.joints[0]["control_mode"])
         self.stream_enable = tk.BooleanVar(value=False)
         self.command_value = tk.DoubleVar(value=0.0)
+        self.link_mode = tk.StringVar(value="csp")
+        self.link_stream_enable = tk.BooleanVar(value=False)
+        self.link_command_value = tk.DoubleVar(value=0.0)
         self.status_text = tk.StringVar(
             value=(
                 f"就绪 — 当前 CAN={self.can_device}, loopback={self.init_loopback}, "
@@ -188,6 +191,19 @@ class RealtimeMotorUI:
         self.pos_max = tk.DoubleVar(value=3.14159)
         self.vel_min = tk.DoubleVar(value=-5.0)
         self.vel_max = tk.DoubleVar(value=5.0)
+        self.link_pos_min = tk.DoubleVar(value=-3.14159)
+        self.link_pos_max = tk.DoubleVar(value=3.14159)
+        self.link_vel_min = tk.DoubleVar(value=-5.0)
+        self.link_vel_max = tk.DoubleVar(value=5.0)
+        self.link_joint_vars = {
+            j["name"]: {
+                "enabled": tk.BooleanVar(value=True),
+                "scale": tk.DoubleVar(value=1.0),
+                "offset": tk.DoubleVar(value=0.0),
+            }
+            for j in self.joints
+        }
+        self.link_preview_vars = {}
 
         self._build_ui()
 
@@ -404,12 +420,119 @@ class RealtimeMotorUI:
             side=tk.LEFT, padx=4
         )
 
+        # ======== 多轴联动区 ========
+        frm_link = ttk.LabelFrame(self.root, text="多轴联动", padding=6)
+        frm_link.pack(fill=tk.X, padx=8, pady=4)
+
+        row_link_mode = ttk.Frame(frm_link)
+        row_link_mode.pack(fill=tk.X, pady=2)
+        ttk.Label(row_link_mode, text="联动模式").pack(side=tk.LEFT)
+        for label, val in [("位置", "position"), ("速度", "velocity"), ("CSP", "csp")]:
+            ttk.Radiobutton(
+                row_link_mode,
+                text=label,
+                value=val,
+                variable=self.link_mode,
+                command=self._apply_link_range,
+            ).pack(side=tk.LEFT, padx=4)
+
+        ttk.Checkbutton(
+            row_link_mode, text="联动连续发送", variable=self.link_stream_enable
+        ).pack(side=tk.LEFT, padx=12)
+        ttk.Button(
+            row_link_mode, text="联动切模式", command=self._link_set_mode
+        ).pack(side=tk.LEFT, padx=4)
+        ttk.Button(
+            row_link_mode, text="联动发送一次", command=self._link_publish_once
+        ).pack(side=tk.LEFT, padx=4)
+
+        self.link_scale = tk.Scale(
+            frm_link,
+            from_=self.link_pos_min.get(),
+            to=self.link_pos_max.get(),
+            resolution=0.001,
+            orient=tk.HORIZONTAL,
+            length=700,
+            variable=self.link_command_value,
+            command=self._on_link_slider_changed,
+        )
+        self.link_scale.pack(fill=tk.X, pady=4)
+
+        row_link_range = ttk.Frame(frm_link)
+        row_link_range.pack(fill=tk.X, pady=2)
+        ttk.Label(row_link_range, text="位置范围").pack(side=tk.LEFT)
+        ttk.Entry(row_link_range, width=8, textvariable=self.link_pos_min).pack(
+            side=tk.LEFT, padx=2
+        )
+        ttk.Entry(row_link_range, width=8, textvariable=self.link_pos_max).pack(
+            side=tk.LEFT, padx=2
+        )
+        ttk.Label(row_link_range, text="速度范围").pack(side=tk.LEFT, padx=(12, 0))
+        ttk.Entry(row_link_range, width=8, textvariable=self.link_vel_min).pack(
+            side=tk.LEFT, padx=2
+        )
+        ttk.Entry(row_link_range, width=8, textvariable=self.link_vel_max).pack(
+            side=tk.LEFT, padx=2
+        )
+        ttk.Button(row_link_range, text="应用", command=self._apply_link_range).pack(
+            side=tk.LEFT, padx=8
+        )
+        ttk.Button(
+            row_link_range, text="全选", command=lambda: self._set_link_selection(True)
+        ).pack(side=tk.LEFT, padx=4)
+        ttk.Button(
+            row_link_range, text="清空", command=lambda: self._set_link_selection(False)
+        ).pack(side=tk.LEFT, padx=4)
+
+        row_link_motor = ttk.Frame(frm_link)
+        row_link_motor.pack(fill=tk.X, pady=2)
+        ttk.Button(
+            row_link_motor, text="联动使能", command=self._link_enable
+        ).pack(side=tk.LEFT, padx=4)
+        ttk.Button(
+            row_link_motor, text="联动停止", command=self._link_stop
+        ).pack(side=tk.LEFT, padx=4)
+        ttk.Button(
+            row_link_motor, text="联动失能", command=self._link_disable
+        ).pack(side=tk.LEFT, padx=4)
+
+        row_link_header = ttk.Frame(frm_link)
+        row_link_header.pack(fill=tk.X, pady=(6, 2))
+        ttk.Label(row_link_header, text="联动关节", width=20).pack(side=tk.LEFT)
+        ttk.Label(row_link_header, text="倍率", width=10).pack(side=tk.LEFT)
+        ttk.Label(row_link_header, text="偏置", width=10).pack(side=tk.LEFT)
+
+        for joint in self.joints:
+            row_joint = ttk.Frame(frm_link)
+            row_joint.pack(fill=tk.X, pady=1)
+            vars_for_joint = self.link_joint_vars[joint["name"]]
+            ttk.Checkbutton(
+                row_joint,
+                text=f"{joint['name']} (0x{joint['motor_id']:02X})",
+                variable=vars_for_joint["enabled"],
+                command=self._refresh_link_preview,
+            ).pack(side=tk.LEFT)
+            ttk.Entry(row_joint, width=10, textvariable=vars_for_joint["scale"]).pack(
+                side=tk.LEFT, padx=(8, 4)
+            )
+            ttk.Entry(row_joint, width=10, textvariable=vars_for_joint["offset"]).pack(
+                side=tk.LEFT, padx=4
+            )
+            preview = tk.StringVar(value="目标=0.0000")
+            self.link_preview_vars[joint["name"]] = preview
+            ttk.Label(row_joint, textvariable=preview, width=18).pack(
+                side=tk.LEFT, padx=8
+            )
+
         # 状态栏
         frm_status = ttk.Frame(self.root, padding=4)
         frm_status.pack(fill=tk.X, padx=8, pady=(0, 4))
         ttk.Label(frm_status, textvariable=self.status_text, foreground="blue").pack(
             side=tk.LEFT
         )
+
+        self._apply_link_range()
+        self._refresh_link_preview()
 
     # ------------------------------------------------------- lifecycle actions
     def _call_async(self, label, func):
@@ -493,6 +616,11 @@ class RealtimeMotorUI:
 
     def _send_motor_service(self, command: int, value: float = 0.0) -> None:
         cfg = self._get_joint_cfg(self.selected_joint.get())
+        self._send_motor_service_for_cfg(cfg, command, value)
+
+    def _send_motor_service_for_cfg(
+        self, cfg: dict, command: int, value: float = 0.0
+    ) -> None:
         try:
             res = self.srv_motor_cmd(
                 motor_id=cfg["motor_id"], command=command, value=value
@@ -527,6 +655,22 @@ class RealtimeMotorUI:
                 from_=self.pos_min.get(), to=self.pos_max.get(), resolution=0.001
             )
 
+    def _apply_link_range(self) -> None:
+        mode = self.link_mode.get()
+        if mode == "velocity":
+            self.link_scale.configure(
+                from_=self.link_vel_min.get(),
+                to=self.link_vel_max.get(),
+                resolution=0.001,
+            )
+        else:
+            self.link_scale.configure(
+                from_=self.link_pos_min.get(),
+                to=self.link_pos_max.get(),
+                resolution=0.001,
+            )
+        self._refresh_link_preview()
+
     def _motor_enable(self) -> None:
         self._send_motor_service(CMD_ENABLE)
 
@@ -536,16 +680,113 @@ class RealtimeMotorUI:
     def _motor_disable(self) -> None:
         self._send_motor_service(CMD_DISABLE)
 
+    def _selected_link_joints(self):
+        selected = []
+        for joint in self.joints:
+            vars_for_joint = self.link_joint_vars[joint["name"]]
+            if vars_for_joint["enabled"].get():
+                selected.append(joint)
+        return selected
+
+    def _refresh_link_preview(self) -> None:
+        base_value = float(self.link_command_value.get())
+        for joint in self.joints:
+            vars_for_joint = self.link_joint_vars[joint["name"]]
+            target = (
+                base_value * float(vars_for_joint["scale"].get())
+                + float(vars_for_joint["offset"].get())
+            )
+            preview = self.link_preview_vars.get(joint["name"])
+            if preview is not None:
+                preview.set(f"目标={target:.4f}")
+
+    def _set_link_selection(self, enabled: bool) -> None:
+        for vars_for_joint in self.link_joint_vars.values():
+            vars_for_joint["enabled"].set(enabled)
+        self._refresh_link_preview()
+        self.status_text.set(f"联动关节数量: {len(self._selected_link_joints())}")
+
+    def _call_group_motor_service(
+        self, label: str, command: int, value: float = 0.0
+    ) -> None:
+        selected = list(self._selected_link_joints())
+        if not selected:
+            self.status_text.set(f"{label} 已跳过: 未勾选任何关节")
+            return
+
+        self.status_text.set(f"{label} ...")
+
+        def _run():
+            failed = []
+            for cfg in selected:
+                try:
+                    res = self.srv_motor_cmd(
+                        motor_id=cfg["motor_id"], command=command, value=value
+                    )
+                    if not res.success:
+                        failed.append(f"{cfg['name']}:{res.message}")
+                except Exception as exc:
+                    failed.append(f"{cfg['name']}:{exc}")
+
+            if failed:
+                message = f"{label} 部分失败: " + "; ".join(failed[:4])
+            else:
+                message = f"{label} 完成: {len(selected)} 轴"
+            self.root.after(0, lambda: self.status_text.set(message))
+
+        threading.Thread(target=_run, daemon=True).start()
+
+    def _link_set_mode(self) -> None:
+        mode = self.link_mode.get()
+        self._call_group_motor_service("联动切模式", CMD_SET_MODE, MODE_MAP.get(mode, 0.0))
+
+    def _link_enable(self) -> None:
+        self._call_group_motor_service("联动使能", CMD_ENABLE)
+
+    def _link_stop(self) -> None:
+        self._call_group_motor_service("联动停止", CMD_STOP)
+
+    def _link_disable(self) -> None:
+        self._call_group_motor_service("联动失能", CMD_DISABLE)
+
     # -------------------------------------------------------- publish command
     def _publish_once(self) -> None:
         name = self.selected_joint.get()
         val = float(self.command_value.get())
-        msg = Float64(data=val)
-        mode = self.selected_mode.get()
+        cfg = self._get_joint_cfg(name)
+        self._publish_joint_command(cfg, self.selected_mode.get(), val)
+
+    def _publish_joint_command(self, cfg: dict, mode: str, value: float) -> None:
+        msg = Float64(data=value)
         if mode == "velocity":
-            self.pub_vel[name].publish(msg)
+            self.pub_vel[cfg["name"]].publish(msg)
         else:
-            self.pub_pos[name].publish(msg)
+            self.pub_pos[cfg["name"]].publish(msg)
+
+    def _link_publish_once(self) -> None:
+        selected = self._selected_link_joints()
+        if not selected:
+            self.status_text.set("联动发送已跳过: 未勾选任何关节")
+            return
+
+        base_value = float(self.link_command_value.get())
+        mode = self.link_mode.get()
+        preview_parts = []
+        for joint in selected:
+            vars_for_joint = self.link_joint_vars[joint["name"]]
+            target = (
+                base_value * float(vars_for_joint["scale"].get())
+                + float(vars_for_joint["offset"].get())
+            )
+            self._publish_joint_command(joint, mode, target)
+            preview_parts.append(f"{joint['name']}={target:.3f}")
+
+        unit = "rad/s" if mode == "velocity" else "rad"
+        self.status_text.set(
+            f"联动发送[{mode}] {len(selected)}轴: "
+            + ", ".join(preview_parts[:4])
+            + f" {unit}"
+        )
 
     def _on_slider_changed(self, _value: str) -> None:
         if not self.stream_enable.get():
@@ -560,10 +801,24 @@ class RealtimeMotorUI:
         except Exception as exc:
             self.status_text.set(f"发布异常: {exc}")
 
+    def _on_link_slider_changed(self, _value: str) -> None:
+        self._refresh_link_preview()
+        if not self.link_stream_enable.get():
+            return
+        try:
+            self._link_publish_once()
+        except Exception as exc:
+            self.status_text.set(f"联动发布异常: {exc}")
+
     def _stream_loop(self) -> None:
         if self.stream_enable.get():
             try:
                 self._publish_once()
+            except Exception:
+                pass
+        if self.link_stream_enable.get():
+            try:
+                self._link_publish_once()
             except Exception:
                 pass
         self.root.after(self.stream_period_ms, self._stream_loop)
