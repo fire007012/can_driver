@@ -15,6 +15,7 @@
 #include <cmath>
 #include <memory>
 #include <mutex>
+#include <set>
 #include <string>
 #include <thread>
 #include <utility>
@@ -265,13 +266,28 @@ public:
     {
     }
 
-    bool ensureTransport(const std::string &, bool = false) override { return true; }
-    bool ensureProtocol(const std::string &, CanType) override { return true; }
+    bool ensureTransport(const std::string &device, bool = false) override
+    {
+        std::lock_guard<std::mutex> lock(lifecycleMutex_);
+        ++ensureTransportCalls_;
+        ensuredDevices_.insert(device);
+        return true;
+    }
+    bool ensureProtocol(const std::string &device, CanType type) override
+    {
+        std::lock_guard<std::mutex> lock(lifecycleMutex_);
+        ++ensureProtocolCalls_;
+        ensuredProtocols_.insert({device, type});
+        return true;
+    }
 
-    bool initDevice(const std::string &,
+    bool initDevice(const std::string &device,
                     const std::vector<std::pair<CanType, MotorID>> &,
                     bool = false) override
     {
+        std::lock_guard<std::mutex> lock(lifecycleMutex_);
+        ++initDeviceCalls_;
+        initializedDevices_.insert(device);
         return true;
     }
 
@@ -280,11 +296,16 @@ public:
     void setPpFastWriteEnabled(bool) override {}
     void shutdownDevice(const std::string &device) override
     {
-        std::lock_guard<std::mutex> lock(shutdownMutex_);
+        std::lock_guard<std::mutex> lock(lifecycleMutex_);
         ++shutdownDeviceCalls_;
         lastShutdownDevice_ = device;
+        initializedDevices_.erase(device);
     }
-    void shutdownAll() override {}
+    void shutdownAll() override
+    {
+        std::lock_guard<std::mutex> lock(lifecycleMutex_);
+        initializedDevices_.clear();
+    }
 
     std::shared_ptr<CanProtocol> getProtocol(const std::string &, CanType) const override
     {
@@ -301,7 +322,11 @@ public:
         std::lock_guard<std::mutex> lock(readyMutex_);
         return ready_;
     }
-    std::size_t deviceCount() const override { return 1; }
+    std::size_t deviceCount() const override
+    {
+        std::lock_guard<std::mutex> lock(lifecycleMutex_);
+        return initializedDevices_.size();
+    }
     std::shared_ptr<can_driver::SharedDriverState> getSharedDriverState() const override
     {
         return exposeSharedState_ ? sharedState_ : nullptr;
@@ -317,14 +342,32 @@ public:
 
     int shutdownDeviceCalls() const
     {
-        std::lock_guard<std::mutex> lock(shutdownMutex_);
+        std::lock_guard<std::mutex> lock(lifecycleMutex_);
         return shutdownDeviceCalls_;
     }
 
     std::string lastShutdownDevice() const
     {
-        std::lock_guard<std::mutex> lock(shutdownMutex_);
+        std::lock_guard<std::mutex> lock(lifecycleMutex_);
         return lastShutdownDevice_;
+    }
+
+    int ensureTransportCalls() const
+    {
+        std::lock_guard<std::mutex> lock(lifecycleMutex_);
+        return ensureTransportCalls_;
+    }
+
+    int ensureProtocolCalls() const
+    {
+        std::lock_guard<std::mutex> lock(lifecycleMutex_);
+        return ensureProtocolCalls_;
+    }
+
+    int initDeviceCalls() const
+    {
+        std::lock_guard<std::mutex> lock(lifecycleMutex_);
+        return initDeviceCalls_;
     }
 
 private:
@@ -333,10 +376,16 @@ private:
     std::shared_ptr<can_driver::SharedDriverState> sharedState_;
     bool exposeSharedState_{false};
     mutable std::mutex readyMutex_;
-    mutable std::mutex shutdownMutex_;
+    mutable std::mutex lifecycleMutex_;
     bool ready_{true};
     int shutdownDeviceCalls_{0};
     std::string lastShutdownDevice_;
+    int ensureTransportCalls_{0};
+    int ensureProtocolCalls_{0};
+    int initDeviceCalls_{0};
+    std::set<std::string> ensuredDevices_;
+    std::set<std::pair<std::string, CanType>> ensuredProtocols_;
+    std::set<std::string> initializedDevices_;
 };
 
 class CanDriverHWSmokeTest : public ::testing::Test {
@@ -434,6 +483,31 @@ TEST_F(CanDriverHWSmokeTest, InitAndDirectWriteUsesProtocol)
     EXPECT_EQ(fakeDm->protocol()->lastVelocity(), 12);
 
     spinner.stop();
+}
+
+TEST_F(CanDriverHWSmokeTest, InitDefersDeviceActivationUntilLifecycleInit)
+{
+    auto fakeDm = std::make_shared<FakeDeviceManager>();
+    CanDriverHW hw(fakeDm);
+
+    ros::NodeHandle nh;
+    ros::NodeHandle pnh(uniqueNs("can_driver_hw_smoke_deferred_activation"));
+
+    pnh.setParam("joints", makeSingleVelocityJoint());
+    pnh.setParam("motor_state_period_sec", 0.2);
+
+    ASSERT_TRUE(hw.init(nh, pnh));
+    EXPECT_EQ(fakeDm->ensureTransportCalls(), 0);
+    EXPECT_EQ(fakeDm->ensureProtocolCalls(), 0);
+    EXPECT_EQ(fakeDm->initDeviceCalls(), 0);
+    EXPECT_EQ(fakeDm->deviceCount(), 0u);
+
+    const auto initResult = hw.operationalCoordinator().RequestInit("fake0", false);
+    ASSERT_TRUE(initResult.ok) << initResult.message;
+    EXPECT_EQ(fakeDm->ensureTransportCalls(), 0);
+    EXPECT_EQ(fakeDm->ensureProtocolCalls(), 0);
+    EXPECT_EQ(fakeDm->initDeviceCalls(), 1);
+    EXPECT_EQ(fakeDm->deviceCount(), 1u);
 }
 
 TEST_F(CanDriverHWSmokeTest, MotorCommandServiceEnable)

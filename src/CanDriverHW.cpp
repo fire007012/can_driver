@@ -61,8 +61,13 @@ bool CanDriverHW::init(ros::NodeHandle &nh, ros::NodeHandle &pnh)
     loadJointLimits(pnh);
     setupMaintenanceRosComm(pnh);
 
-    ROS_INFO("[CanDriverHW] Initialized with %zu joints on %zu CAN device(s).",
-             joints_.size(), deviceManager_->deviceCount());
+    std::set<std::string> configuredDevices;
+    for (const auto &jc : joints_) {
+        configuredDevices.insert(jc.canDevice);
+    }
+
+    ROS_INFO("[CanDriverHW] Initialized with %zu joints on %zu configured CAN device(s).",
+             joints_.size(), configuredDevices.size());
     lifecycleCoordinator_.SetConfigured();
     return true;
 }
@@ -324,14 +329,6 @@ bool CanDriverHW::parseAndSetupJoints(const ros::NodeHandle &pnh)
 
         joints_.push_back(jc);
         jointIndexByName_[jc.name] = joints_.size() - 1;
-
-        if (!deviceManager_->ensureTransport(jc.canDevice)) {
-            return false;
-        }
-        if (!deviceManager_->ensureProtocol(jc.canDevice, jc.protocol)) {
-            ROS_ERROR("[CanDriverHW] Failed to ensure protocol on '%s'.", jc.canDevice.c_str());
-            return false;
-        }
     }
 
     rebuildJointGroups();
