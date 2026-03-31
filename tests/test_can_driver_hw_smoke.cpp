@@ -434,8 +434,16 @@ TEST_F(CanDriverHWSmokeTest, MotorCommandServiceEnable)
     srv.request.value = 0.0;
 
     ASSERT_TRUE(client.call(srv));
+    EXPECT_FALSE(srv.response.success);
+    EXPECT_EQ(srv.response.message, "Driver inactive.");
+    EXPECT_EQ(fakeDm->protocol()->enableCalls(), 0);
+
+    const auto initResult = hw.operationalCoordinator().RequestInit("fake0", false);
+    ASSERT_TRUE(initResult.ok) << initResult.message;
+
+    ASSERT_TRUE(client.call(srv));
     EXPECT_TRUE(srv.response.success);
-    EXPECT_EQ(fakeDm->protocol()->enableCalls(), 1);
+    EXPECT_EQ(fakeDm->protocol()->enableCalls(), 2);
     EXPECT_EQ(fakeDm->protocol()->lastEnableMotor(), 0x141u);
 
     spinner.stop();
@@ -734,9 +742,7 @@ TEST_F(CanDriverHWSmokeTest, InitCspJointSetsModeAndPublishesRawFeedbackFromPprC
     pnh.setParam("motor_state_period_sec", 0.05);
 
     ASSERT_TRUE(hw.init(nh, pnh));
-    EXPECT_EQ(fakeDm->protocol()->setModeCalls(), 1);
-    EXPECT_EQ(fakeDm->protocol()->lastModeMotor(), 0x05u);
-    EXPECT_EQ(fakeDm->protocol()->lastMode(), CanProtocol::MotorMode::CSP);
+    EXPECT_EQ(fakeDm->protocol()->setModeCalls(), 0);
 
     std::mutex stateMutex;
     can_driver::MotorState latestState;
@@ -751,6 +757,12 @@ TEST_F(CanDriverHWSmokeTest, InitCspJointSetsModeAndPublishesRawFeedbackFromPprC
 
     ros::AsyncSpinner spinner(1);
     spinner.start();
+
+    const auto initResult = hw.operationalCoordinator().RequestInit("fake0", false);
+    ASSERT_TRUE(initResult.ok) << initResult.message;
+    EXPECT_EQ(fakeDm->protocol()->setModeCalls(), 1);
+    EXPECT_EQ(fakeDm->protocol()->lastModeMotor(), 0x05u);
+    EXPECT_EQ(fakeDm->protocol()->lastMode(), CanProtocol::MotorMode::CSP);
 
     for (int i = 0; i < 20 && !gotState; ++i) {
         ros::Duration(0.01).sleep();

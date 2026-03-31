@@ -145,9 +145,8 @@ private:
     void rebuildJointGroups();
     void registerJointInterfaces();
     void loadJointLimits(const ros::NodeHandle &pnh);
-    void startMotorRefreshThreads();
-    bool syncStartupPositionAndCommands();
-    bool applyInitialModes();
+    bool syncStartupPositionAndCommands(const std::string &deviceFilter = std::string());
+    bool applyInitialModes(const std::string &deviceFilter = std::string());
     void setupMaintenanceRosComm(ros::NodeHandle &pnh);
     void configureCommandGate();
     void configureLifecycleCoordinator();

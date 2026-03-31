@@ -196,11 +196,22 @@ bool LifecycleDriverOps::queryMotorFault(const MotorActionExecutor::Target &targ
 LifecycleDriverOps::Result LifecycleDriverOps::initializeDevice(const std::string &device,
                                                                 bool loopback) const
 {
+    const auto prepare = prepareDevice(device, loopback);
+    if (!prepare.ok) {
+        return prepare;
+    }
+    const auto enable = enableDevice(device);
+    if (!enable.ok) {
+        return enable;
+    }
+    return {true, "initialized (armed)"};
+}
+
+LifecycleDriverOps::Result LifecycleDriverOps::prepareDevice(const std::string &device,
+                                                             bool loopback) const
+{
     if (!deviceManager_) {
         return {false, "Device manager unavailable."};
-    }
-    if (!motorActionExecutor_) {
-        return {false, "Motor action executor unavailable."};
     }
 
     const auto targets = targetsSnapshot();
@@ -216,6 +227,20 @@ LifecycleDriverOps::Result LifecycleDriverOps::initializeDevice(const std::strin
 
     if (!deviceManager_->initDevice(device, motors, loopback)) {
         return {false, "Failed to initialize " + device};
+    }
+    return {true, ""};
+}
+
+LifecycleDriverOps::Result LifecycleDriverOps::enableDevice(const std::string &device) const
+{
+    if (!motorActionExecutor_) {
+        return {false, "Motor action executor unavailable."};
+    }
+
+    const auto targets = targetsSnapshot();
+    const auto deviceTargets = filterTargetsByDevice(targets, device);
+    if (deviceTargets.empty()) {
+        return {false, "No joints available for device " + device};
     }
 
     const auto batch = motorActionExecutor_->executeBatch(
@@ -243,8 +268,7 @@ LifecycleDriverOps::Result LifecycleDriverOps::initializeDevice(const std::strin
                                             "Enable command rejected.",
                                             "Protocol not available.");
     }
-
-    return {true, "initialized (armed)"};
+    return {true, "enabled (armed)"};
 }
 
 LifecycleDriverOps::Result LifecycleDriverOps::enableAll() const

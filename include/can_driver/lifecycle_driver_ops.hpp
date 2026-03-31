@@ -26,6 +26,8 @@ public:
                    const MotorActionExecutor *motorActionExecutor);
     void setTargets(std::vector<MotorActionExecutor::Target> targets);
 
+    Result prepareDevice(const std::string &device, bool loopback) const;
+    Result enableDevice(const std::string &device) const;
     Result initializeDevice(const std::string &device, bool loopback) const;
     Result enableAll() const;
     Result disableAll() const;
