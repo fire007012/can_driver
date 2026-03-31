@@ -21,6 +21,19 @@ std::string axisReadinessMapKey(const SharedDriverState::AxisKey &key)
            std::to_string(key.motorId);
 }
 
+std::vector<MotorActionExecutor::Target> filterTargetsByDevice(
+    const std::vector<MotorActionExecutor::Target> &targets,
+    const std::string &device)
+{
+    std::vector<MotorActionExecutor::Target> filtered;
+    for (const auto &target : targets) {
+        if (target.canDevice == device) {
+            filtered.push_back(target);
+        }
+    }
+    return filtered;
+}
+
 } // namespace
 
 LifecycleDriverOps::LifecycleDriverOps(std::shared_ptr<IDeviceManager> deviceManager,
@@ -186,18 +199,51 @@ LifecycleDriverOps::Result LifecycleDriverOps::initializeDevice(const std::strin
     if (!deviceManager_) {
         return {false, "Device manager unavailable."};
     }
+    if (!motorActionExecutor_) {
+        return {false, "Motor action executor unavailable."};
+    }
+
+    const auto targets = targetsSnapshot();
+    const auto deviceTargets = filterTargetsByDevice(targets, device);
+    if (deviceTargets.empty()) {
+        return {false, "No joints available for device " + device};
+    }
 
     std::vector<std::pair<CanType, MotorID>> motors;
-    for (const auto &target : targetsSnapshot()) {
-        if (target.canDevice != device) {
-            continue;
-        }
+    for (const auto &target : deviceTargets) {
         motors.emplace_back(target.protocol, target.motorId);
     }
 
     if (!deviceManager_->initDevice(device, motors, loopback)) {
         return {false, "Failed to initialize " + device};
     }
+
+    const auto batch = motorActionExecutor_->executeBatch(
+        deviceTargets,
+        [](const std::shared_ptr<CanProtocol> &proto, MotorID id) {
+            return proto->Enable(id);
+        },
+        "Init enable");
+    if (batch.anyFailure) {
+        if (!batch.succeededTargets.empty()) {
+            const auto rollback = motorActionExecutor_->executeBatch(
+                batch.succeededTargets,
+                [](const std::shared_ptr<CanProtocol> &proto, MotorID id) {
+                    return proto->Disable(id);
+                },
+                "Init enable rollback");
+            if (rollback.anyFailure) {
+                return makeMotorActionFailureResult(
+                    rollback.firstFailure,
+                    "Init enable rollback failed after partial success.",
+                    "Protocol not available during init enable rollback.");
+            }
+        }
+        return makeMotorActionFailureResult(batch.firstFailure,
+                                            "Enable command rejected.",
+                                            "Protocol not available.");
+    }
+
     return {true, "initialized (armed)"};
 }
 

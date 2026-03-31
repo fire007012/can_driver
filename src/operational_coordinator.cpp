@@ -135,6 +135,9 @@ OperationalCoordinator::Result OperationalCoordinator::RequestInit(const std::st
                 }
                 return false;
             }
+            if (driverOps_.hold_commands) {
+                driverOps_.hold_commands();
+            }
             if (driverOps_.arm_fresh_command_latch) {
                 driverOps_.arm_fresh_command_latch();
             }

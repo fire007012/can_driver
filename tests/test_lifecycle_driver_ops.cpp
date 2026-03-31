@@ -111,6 +111,12 @@ public:
         disableResult_[motorId] = result;
     }
 
+    int enableCalls(uint16_t motorId) const
+    {
+        std::lock_guard<std::mutex> lock(mutex_);
+        return lookupOr(enableCalls_, motorId, 0);
+    }
+
     int disableCalls(uint16_t motorId) const
     {
         std::lock_guard<std::mutex> lock(mutex_);
@@ -443,6 +449,28 @@ TEST(LifecycleDriverOpsTest, InitializeDeviceFiltersTargetsByRequestedBus)
     EXPECT_EQ(deviceManager->lastInitMotors().front().first, CanType::PP);
     EXPECT_EQ(static_cast<uint16_t>(deviceManager->lastInitMotors().front().second), 0x201u);
     EXPECT_TRUE(deviceManager->lastInitLoopback());
+    EXPECT_EQ(deviceManager->protocol()->enableCalls(0x201), 1);
+    EXPECT_EQ(deviceManager->protocol()->enableCalls(0x141), 0);
+    EXPECT_EQ(deviceManager->protocol()->enableCalls(0x142), 0);
+}
+
+TEST(LifecycleDriverOpsTest, InitializeDeviceRollsBackPartialEnableFailure)
+{
+    auto deviceManager = std::make_shared<FakeDeviceManager>();
+    MotorActionExecutor executor(deviceManager);
+    can_driver::LifecycleDriverOps ops(deviceManager, &executor);
+    ops.setTargets(makeTargets());
+
+    deviceManager->protocol()->setEnableResult(0x141, true);
+    deviceManager->protocol()->setEnableResult(0x142, false);
+
+    const auto result = ops.initializeDevice("fake0", false);
+    EXPECT_FALSE(result.ok);
+    EXPECT_EQ(result.message, "Enable command rejected.");
+    EXPECT_EQ(deviceManager->protocol()->enableCalls(0x141), 1);
+    EXPECT_EQ(deviceManager->protocol()->enableCalls(0x142), 1);
+    EXPECT_EQ(deviceManager->protocol()->disableCalls(0x141), 1);
+    EXPECT_FALSE(deviceManager->protocol()->isEnabled(static_cast<MotorID>(0x141)));
 }
 
 TEST(LifecycleDriverOpsTest, RecoverAllResetsFaultsBeforeReturningSuccess)

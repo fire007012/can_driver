@@ -115,4 +115,28 @@ TEST(OperationalCoordinatorTest, RecoverDoesNotImplicitlyEnterFaultedFromArmed)
     EXPECT_EQ(coordinator.mode(), can_driver::SystemOpMode::Armed);
 }
 
+TEST(OperationalCoordinatorTest, InitHoldsCommandsBeforeArmingFreshLatch)
+{
+    int callOrder = 0;
+    int holdOrder = 0;
+    int armOrder = 0;
+
+    auto ops = makeHappyOps();
+    ops.hold_commands = [&]() {
+        holdOrder = ++callOrder;
+    };
+    ops.arm_fresh_command_latch = [&]() {
+        armOrder = ++callOrder;
+    };
+
+    can_driver::OperationalCoordinator coordinator(ops);
+    coordinator.SetConfigured();
+
+    const auto result = coordinator.RequestInit("fake0", false);
+    ASSERT_TRUE(result.ok);
+    EXPECT_EQ(coordinator.mode(), can_driver::SystemOpMode::Armed);
+    EXPECT_EQ(holdOrder, 1);
+    EXPECT_EQ(armOrder, 2);
+}
+
 } // namespace
