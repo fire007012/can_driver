@@ -21,6 +21,10 @@ constexpr uint8_t kWriteAck = 0x02;
 constexpr uint8_t kReadResponse = 0x04;
 constexpr uint16_t kEyouIdFrameBase = 0x0000;
 constexpr std::size_t kQueriesPerMotorPerCycle = 6;
+constexpr int64_t kBaseReadTimeoutCycles = 3;
+constexpr int64_t kMaxReadTimeoutCycles = 8;
+constexpr auto kMinReadRequestTimeout = std::chrono::milliseconds(30);
+constexpr auto kMaxReadRequestTimeout = std::chrono::milliseconds(1500);
 
 uint32_t readUInt32BE(const CanTransport::Frame &frame, std::size_t index)
 {
@@ -623,12 +627,31 @@ bool EyouCan::tryIssueReadCommand(uint8_t motorId, uint8_t subCommand)
 
 void EyouCan::markReadResponseReceived(uint8_t motorId, uint8_t subCommand)
 {
-    std::lock_guard<std::mutex> lock(pendingReadMutex_);
-    auto it = pendingReadRequests_.find(pendingReadKey(motorId, subCommand));
-    if (it != pendingReadRequests_.end()) {
-        it->second.inFlight = false;
-        it->second.nextEligibleSend = std::chrono::steady_clock::time_point {};
-        it->second.consecutiveTimeouts = 0;
+    std::size_t recoveredTimeouts = 0;
+    long long responseAgeMs = -1;
+    {
+        std::lock_guard<std::mutex> lock(pendingReadMutex_);
+        auto it = pendingReadRequests_.find(pendingReadKey(motorId, subCommand));
+        if (it != pendingReadRequests_.end()) {
+            recoveredTimeouts = it->second.consecutiveTimeouts;
+            if (it->second.lastSent != std::chrono::steady_clock::time_point {}) {
+                responseAgeMs = std::chrono::duration_cast<std::chrono::milliseconds>(
+                                    std::chrono::steady_clock::now() - it->second.lastSent)
+                                    .count();
+            }
+            it->second.inFlight = false;
+            it->second.nextEligibleSend = std::chrono::steady_clock::time_point {};
+            it->second.consecutiveTimeouts = 0;
+        }
+    }
+
+    if (recoveredTimeouts > 0) {
+        ROS_WARN_STREAM_THROTTLE(
+            1.0,
+            "[EyouCan] Read response recovered on motor " << static_cast<unsigned>(motorId)
+            << " subcmd=0x" << std::hex << static_cast<unsigned>(subCommand) << std::dec
+            << " after " << recoveredTimeouts << " consecutive timeout(s)"
+            << " (response_age_ms=" << responseAgeMs << ")");
     }
 }
 
@@ -746,8 +769,13 @@ std::chrono::milliseconds EyouCan::computeReadRequestTimeout() const
         motorCount = std::max<std::size_t>(1, refreshMotorIds.size());
     }
     const auto refreshSleep = computeRefreshSleep(motorCount);
-    const auto timeout = refreshSleep * 3;
-    return std::max(std::chrono::milliseconds(20), std::min(timeout, std::chrono::milliseconds(200)));
+    // 读超时需要覆盖“当前刷新周期 + 多轴串行轮转 + 调度抖动”。
+    // 慢速启动探测（例如 5Hz）下，固定 200ms 会把真实回包误判成超时。
+    const auto timeoutCycles = std::min<int64_t>(
+        kMaxReadTimeoutCycles,
+        kBaseReadTimeoutCycles + static_cast<int64_t>(motorCount));
+    const auto timeout = refreshSleep * timeoutCycles;
+    return std::max(kMinReadRequestTimeout, std::min(timeout, kMaxReadRequestTimeout));
 }
 
 std::chrono::milliseconds EyouCan::computeTimeoutBackoff(std::size_t consecutiveTimeouts,

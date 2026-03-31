@@ -275,7 +275,7 @@ TEST_F(EyouCanTest, IssueRefreshQueryBacksOffAfterRepeatedReadTimeouts)
     eyou.issueRefreshQuery(static_cast<MotorID>(0x05), EyouCan::RefreshQuery::Position);
     ASSERT_EQ(transport->sentFrames.size(), 1u);
 
-    EyouCanTestAccessor::ageAllPendingRequests(eyou, std::chrono::milliseconds(25));
+    EyouCanTestAccessor::ageAllPendingRequests(eyou, std::chrono::milliseconds(40));
     eyou.issueRefreshQuery(static_cast<MotorID>(0x05), EyouCan::RefreshQuery::Position);
     EXPECT_EQ(transport->sentFrames.size(), 1u);
     EXPECT_EQ(EyouCanTestAccessor::consecutiveTimeouts(eyou, 0x05, 0x07), 1u);
@@ -290,6 +290,25 @@ TEST_F(EyouCanTest, IssueRefreshQueryBacksOffAfterRepeatedReadTimeouts)
                                      &feedback));
     EXPECT_EQ(feedback.consecutiveTimeoutCount, 1u);
     EXPECT_TRUE(feedback.degraded);
+}
+
+TEST_F(EyouCanTest, SlowRefreshRateDoesNotPrematurelyTimeoutReadRequests)
+{
+    eyou.setRefreshRateHz(5.0);
+    eyou.initializeMotorRefresh({static_cast<MotorID>(0x05), static_cast<MotorID>(0x06), static_cast<MotorID>(0x07)});
+
+    eyou.issueRefreshQuery(static_cast<MotorID>(0x05), EyouCan::RefreshQuery::Position);
+    ASSERT_EQ(transport->sentFrames.size(), 1u);
+
+    EyouCanTestAccessor::ageAllPendingRequests(eyou, std::chrono::milliseconds(700));
+    eyou.issueRefreshQuery(static_cast<MotorID>(0x05), EyouCan::RefreshQuery::Position);
+    EXPECT_EQ(transport->sentFrames.size(), 1u);
+    EXPECT_EQ(EyouCanTestAccessor::consecutiveTimeouts(eyou, 0x05, 0x07), 0u);
+
+    EyouCanTestAccessor::ageAllPendingRequests(eyou, std::chrono::milliseconds(1300));
+    eyou.issueRefreshQuery(static_cast<MotorID>(0x05), EyouCan::RefreshQuery::Position);
+    EXPECT_EQ(transport->sentFrames.size(), 1u);
+    EXPECT_EQ(EyouCanTestAccessor::consecutiveTimeouts(eyou, 0x05, 0x07), 1u);
 }
 
 TEST_F(EyouCanTest, HandleReadResponseUpdatesPositionCache)

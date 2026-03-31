@@ -16,6 +16,10 @@ constexpr uint16_t kSendBaseId = 0x140;
 constexpr uint16_t kResponseBaseId = 0x240;
 constexpr int32_t kDefaultPositionSpeedDps = 100;
 constexpr std::size_t kQueriesPerMotorPerCycle = 3;
+constexpr int64_t kBaseReadTimeoutCycles = 3;
+constexpr int64_t kMaxReadTimeoutCycles = 8;
+constexpr auto kMinReadRequestTimeout = std::chrono::milliseconds(30);
+constexpr auto kMaxReadRequestTimeout = std::chrono::milliseconds(1500);
 
 int16_t readInt16LE(const CanTransport::Frame &frame, std::size_t index)
 {
@@ -652,12 +656,31 @@ bool MtCan::tryIssueReadCommand(uint8_t motorId, uint8_t command)
 
 void MtCan::markReadResponseReceived(uint8_t motorId, uint8_t command)
 {
-    std::lock_guard<std::mutex> lock(pendingReadMutex_);
-    auto it = pendingReadRequests_.find(pendingReadKey(motorId, command));
-    if (it != pendingReadRequests_.end()) {
-        it->second.inFlight = false;
-        it->second.nextEligibleSend = std::chrono::steady_clock::time_point {};
-        it->second.consecutiveTimeouts = 0;
+    std::size_t recoveredTimeouts = 0;
+    long long responseAgeMs = -1;
+    {
+        std::lock_guard<std::mutex> lock(pendingReadMutex_);
+        auto it = pendingReadRequests_.find(pendingReadKey(motorId, command));
+        if (it != pendingReadRequests_.end()) {
+            recoveredTimeouts = it->second.consecutiveTimeouts;
+            if (it->second.lastSent != std::chrono::steady_clock::time_point {}) {
+                responseAgeMs = std::chrono::duration_cast<std::chrono::milliseconds>(
+                                    std::chrono::steady_clock::now() - it->second.lastSent)
+                                    .count();
+            }
+            it->second.inFlight = false;
+            it->second.nextEligibleSend = std::chrono::steady_clock::time_point {};
+            it->second.consecutiveTimeouts = 0;
+        }
+    }
+
+    if (recoveredTimeouts > 0) {
+        ROS_WARN_STREAM_THROTTLE(
+            1.0,
+            "[MtCan] Read response recovered on motor " << static_cast<unsigned>(motorId)
+            << " cmd=0x" << std::hex << static_cast<unsigned>(command) << std::dec
+            << " after " << recoveredTimeouts << " consecutive timeout(s)"
+            << " (response_age_ms=" << responseAgeMs << ")");
     }
 }
 
@@ -775,8 +798,11 @@ std::chrono::milliseconds MtCan::computeReadRequestTimeout() const
         motorCount = std::max<std::size_t>(1, refreshMotorIds.size());
     }
     const auto refreshSleep = computeRefreshSleep(motorCount);
-    const auto timeout = refreshSleep * 3;
-    return std::max(std::chrono::milliseconds(20), std::min(timeout, std::chrono::milliseconds(200)));
+    const auto timeoutCycles = std::min<int64_t>(
+        kMaxReadTimeoutCycles,
+        kBaseReadTimeoutCycles + static_cast<int64_t>(motorCount));
+    const auto timeout = refreshSleep * timeoutCycles;
+    return std::max(kMinReadRequestTimeout, std::min(timeout, kMaxReadRequestTimeout));
 }
 
 std::chrono::milliseconds MtCan::computeTimeoutBackoff(std::size_t consecutiveTimeouts,

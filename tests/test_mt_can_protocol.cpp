@@ -361,7 +361,7 @@ TEST_F(MtCanTest, IssueRefreshQueryBacksOffAfterRepeatedReadTimeouts)
     mt.issueRefreshQuery(static_cast<MotorID>(0x01), MtCan::RefreshQuery::State);
     ASSERT_EQ(transport->sentFrames.size(), 1u);
 
-    MtCanTestAccessor::ageAllPendingRequests(mt, std::chrono::milliseconds(25));
+    MtCanTestAccessor::ageAllPendingRequests(mt, std::chrono::milliseconds(40));
     mt.issueRefreshQuery(static_cast<MotorID>(0x01), MtCan::RefreshQuery::State);
     EXPECT_EQ(transport->sentFrames.size(), 1u);
     EXPECT_EQ(MtCanTestAccessor::consecutiveTimeouts(mt, 0x01, 0x9C), 1u);
@@ -376,6 +376,26 @@ TEST_F(MtCanTest, IssueRefreshQueryBacksOffAfterRepeatedReadTimeouts)
                                      &feedback));
     EXPECT_EQ(feedback.consecutiveTimeoutCount, 1u);
     EXPECT_TRUE(feedback.degraded);
+}
+
+TEST_F(MtCanTest, SlowRefreshRateDoesNotPrematurelyTimeoutReadRequests)
+{
+    mt.setRefreshRateHz(5.0);
+    mt.initializeMotorRefresh({static_cast<MotorID>(0x01), static_cast<MotorID>(0x02), static_cast<MotorID>(0x03)});
+    transport->clearSent();
+
+    mt.issueRefreshQuery(static_cast<MotorID>(0x01), MtCan::RefreshQuery::State);
+    ASSERT_EQ(transport->sentFrames.size(), 1u);
+
+    MtCanTestAccessor::ageAllPendingRequests(mt, std::chrono::milliseconds(700));
+    mt.issueRefreshQuery(static_cast<MotorID>(0x01), MtCan::RefreshQuery::State);
+    EXPECT_EQ(transport->sentFrames.size(), 1u);
+    EXPECT_EQ(MtCanTestAccessor::consecutiveTimeouts(mt, 0x01, 0x9C), 0u);
+
+    MtCanTestAccessor::ageAllPendingRequests(mt, std::chrono::milliseconds(1300));
+    mt.issueRefreshQuery(static_cast<MotorID>(0x01), MtCan::RefreshQuery::State);
+    EXPECT_EQ(transport->sentFrames.size(), 1u);
+    EXPECT_EQ(MtCanTestAccessor::consecutiveTimeouts(mt, 0x01, 0x9C), 1u);
 }
 
 TEST_F(MtCanTest, EnableDisableAndFaultStateAreObservable)
