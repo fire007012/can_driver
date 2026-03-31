@@ -353,7 +353,11 @@ private:
             if (command.valid && feedback.feedbackSeen && feedback.mode == command.desiredMode &&
                 nowNs > 0) {
                 feedback.lastModeMatchSteadyNs = nowNs;
+            } else {
+                feedback.lastModeMatchSteadyNs = 0;
             }
+        } else {
+            feedback.lastModeMatchSteadyNs = 0;
         }
 
         const auto intentIt = axisIntents_.find(mapKey);

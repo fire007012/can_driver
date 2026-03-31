@@ -510,6 +510,53 @@ TEST(LifecycleDriverOpsTest, MotionHealthyUsesAxisRuntimeForPpModeMismatch)
     EXPECT_EQ(detail, "Mode not ready.");
 }
 
+TEST(LifecycleDriverOpsTest, MotionHealthyRejectsStaleModeMatchTimestampAfterCommandModeChange)
+{
+    auto deviceManager = std::make_shared<FakeDeviceManager>();
+    MotorActionExecutor executor(deviceManager);
+    can_driver::LifecycleDriverOps ops(deviceManager, &executor);
+    ops.setTargets({
+        MotorActionExecutor::Target{"joint_c", "fake1", CanType::PP, static_cast<MotorID>(0x201)},
+    });
+
+    const auto key = can_driver::MakeAxisKey("fake1", CanType::PP, static_cast<MotorID>(0x201));
+    const auto nowNs = can_driver::SharedDriverSteadyNowNs();
+    deviceManager->sharedState()->mutateDeviceHealth(
+        "fake1",
+        [](can_driver::SharedDriverState::DeviceHealthState *health) {
+            health->transportReady = true;
+        });
+    deviceManager->sharedState()->mutateAxisFeedback(
+        key,
+        [nowNs](can_driver::SharedDriverState::AxisFeedbackState *feedback) {
+            feedback->feedbackSeen = true;
+            feedback->enabled = true;
+            feedback->mode = CanProtocol::MotorMode::Position;
+            feedback->lastRxSteadyNs = nowNs;
+        });
+    deviceManager->sharedState()->mutateAxisCommand(
+        key,
+        [](can_driver::SharedDriverState::AxisCommandState *command) {
+            command->valid = true;
+            command->desiredMode = CanProtocol::MotorMode::Position;
+        });
+    deviceManager->sharedState()->setAxisIntent(key, can_driver::AxisIntent::Enable);
+
+    std::string detail;
+    EXPECT_TRUE(ops.motionHealthy(&detail));
+    EXPECT_TRUE(detail.empty());
+
+    deviceManager->sharedState()->mutateAxisCommand(
+        key,
+        [](can_driver::SharedDriverState::AxisCommandState *command) {
+            command->valid = true;
+            command->desiredMode = CanProtocol::MotorMode::Velocity;
+        });
+
+    EXPECT_FALSE(ops.motionHealthy(&detail));
+    EXPECT_EQ(detail, "Mode not ready.");
+}
+
 TEST(LifecycleDriverOpsTest, MotionHealthyAcceptsFreshPpAxisBeforeFirstMotionCommand)
 {
     auto deviceManager = std::make_shared<FakeDeviceManager>();
