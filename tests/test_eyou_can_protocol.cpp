@@ -102,6 +102,8 @@ public:
             eyou.managedMotorIds.insert(motorId);
         }
         eyou.refreshCycleCount_ = 0;
+        eyou.lastObservedTxBackpressure_ = 0;
+        eyou.queryPressureUntilCycle_ = 0;
         std::lock_guard<std::mutex> pendingLock(eyou.pendingReadMutex_);
         eyou.pendingReadRequests_.clear();
     }
@@ -127,6 +129,17 @@ public:
         for (auto &entry : eyou.pendingReadRequests_) {
             entry.second.nextEligibleSend = std::chrono::steady_clock::time_point {};
         }
+    }
+
+    static void clearPendingRequests(EyouCan &eyou)
+    {
+        std::lock_guard<std::mutex> lock(eyou.pendingReadMutex_);
+        eyou.pendingReadRequests_.clear();
+    }
+
+    static void setRefreshCycleCount(EyouCan &eyou, std::uint64_t value)
+    {
+        eyou.refreshCycleCount_ = value;
     }
 
     static std::size_t consecutiveTimeouts(EyouCan &eyou, uint8_t motorId, uint8_t subCommand)
@@ -291,7 +304,7 @@ TEST_F(EyouCanTest, RefreshBacksOffAfterRepeatedReadTimeouts)
 
     EyouCanTestAccessor::expireAllPendingBackoff(eyou);
     EyouCanTestAccessor::refresh(eyou);
-    EXPECT_EQ(transport->sentFrames.size(), 8u);
+    EXPECT_EQ(transport->sentFrames.size(), 11u);
 
     can_driver::SharedDriverState::AxisFeedbackState feedback;
     ASSERT_TRUE(
@@ -299,6 +312,91 @@ TEST_F(EyouCanTest, RefreshBacksOffAfterRepeatedReadTimeouts)
                                      &feedback));
     EXPECT_EQ(feedback.consecutiveTimeoutCount, 1u);
     EXPECT_TRUE(feedback.degraded);
+}
+
+TEST_F(EyouCanTest, SteadyRefreshRotatesLifecycleQueriesWithoutWaitingForLegacySlowDivider)
+{
+    constexpr MotorID kMotorId = static_cast<MotorID>(0x05);
+    const auto axisKey = can_driver::MakeAxisKey("can0", CanType::PP, kMotorId);
+    const auto nowNs = can_driver::SharedDriverSteadyNowNs();
+
+    sharedState->mutateAxisFeedback(
+        axisKey,
+        [nowNs](can_driver::SharedDriverState::AxisFeedbackState *feedback) {
+            feedback->feedbackSeen = true;
+            feedback->enabled = true;
+            feedback->mode = CanProtocol::MotorMode::Position;
+            feedback->lastRxSteadyNs = nowNs;
+        });
+    sharedState->mutateAxisCommand(
+        axisKey,
+        [](can_driver::SharedDriverState::AxisCommandState *command) {
+            command->desiredMode = CanProtocol::MotorMode::Position;
+            command->desiredModeValid = true;
+            command->valid = true;
+        });
+    sharedState->setAxisIntent(axisKey, can_driver::AxisIntent::Run);
+
+    EyouCanTestAccessor::setRefreshState(eyou, {0x05}, true);
+
+    EyouCanTestAccessor::refresh(eyou);
+    ASSERT_EQ(transport->sentFrames.size(), 3u);
+    EXPECT_EQ(transport->sentFrames[2].data[1], 0x0Fu);
+
+    transport->clearSent();
+    EyouCanTestAccessor::clearPendingRequests(eyou);
+    EyouCanTestAccessor::refresh(eyou);
+    ASSERT_EQ(transport->sentFrames.size(), 3u);
+    EXPECT_EQ(transport->sentFrames[2].data[1], 0x10u);
+
+    transport->clearSent();
+    EyouCanTestAccessor::clearPendingRequests(eyou);
+    EyouCanTestAccessor::refresh(eyou);
+    ASSERT_EQ(transport->sentFrames.size(), 3u);
+    EXPECT_EQ(transport->sentFrames[2].data[1], 0x15u);
+
+    transport->clearSent();
+    EyouCanTestAccessor::clearPendingRequests(eyou);
+    EyouCanTestAccessor::refresh(eyou);
+    ASSERT_EQ(transport->sentFrames.size(), 3u);
+    EXPECT_EQ(transport->sentFrames[2].data[1], 0x05u);
+}
+
+TEST_F(EyouCanTest, BackpressurePrefersCriticalLifecycleQueriesOverCurrentSampling)
+{
+    constexpr MotorID kMotorId = static_cast<MotorID>(0x05);
+    const auto axisKey = can_driver::MakeAxisKey("can0", CanType::PP, kMotorId);
+    const auto nowNs = can_driver::SharedDriverSteadyNowNs();
+
+    sharedState->mutateAxisFeedback(
+        axisKey,
+        [nowNs](can_driver::SharedDriverState::AxisFeedbackState *feedback) {
+            feedback->feedbackSeen = true;
+            feedback->enabled = true;
+            feedback->mode = CanProtocol::MotorMode::Position;
+            feedback->lastRxSteadyNs = nowNs;
+        });
+    sharedState->mutateAxisCommand(
+        axisKey,
+        [](can_driver::SharedDriverState::AxisCommandState *command) {
+            command->desiredMode = CanProtocol::MotorMode::Position;
+            command->desiredModeValid = true;
+            command->valid = true;
+        });
+    sharedState->setAxisIntent(axisKey, can_driver::AxisIntent::Run);
+    sharedState->mutateDeviceHealth(
+        "can0",
+        [](can_driver::SharedDriverState::DeviceHealthState *health) {
+            health->transportReady = true;
+            health->txBackpressure = 1;
+        });
+
+    EyouCanTestAccessor::setRefreshState(eyou, {0x05}, true);
+    EyouCanTestAccessor::setRefreshCycleCount(eyou, 3);
+
+    EyouCanTestAccessor::refresh(eyou);
+    ASSERT_EQ(transport->sentFrames.size(), 3u);
+    EXPECT_EQ(transport->sentFrames[2].data[1], 0x0Fu);
 }
 
 TEST_F(EyouCanTest, HandleReadResponseUpdatesPositionCache)

@@ -209,8 +209,14 @@ private:
 
     /// refresh 轮询周期计数，用于 slow 项分频
     uint64_t refreshCycleCount_{0};
-    /// slow 项分频系数（每 N 个 refresh 周期查一次 mode/enable/fault/current）
-    static constexpr uint64_t kSlowDivider = 50;
+    /// 最近一次观测到的设备 TX backpressure 计数。
+    uint64_t lastObservedTxBackpressure_{0};
+    /// 当检测到背压后，在若干 refresh 周期内压缩可选查询。
+    uint64_t queryPressureUntilCycle_{0};
+    /// 高优先级状态下电流查询的分频。
+    static constexpr uint64_t kPriorityCurrentDivider = 4;
+    /// 背压出现后保持 query 降载的周期数。
+    static constexpr uint64_t kQueryPressureHoldCycles = 20;
 };
 
 #endif // EyouCan_H

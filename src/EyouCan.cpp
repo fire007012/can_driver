@@ -22,6 +22,19 @@ constexpr uint8_t kReadResponse = 0x04;
 constexpr uint16_t kEyouIdFrameBase = 0x0000;
 constexpr std::size_t kQueriesPerMotorPerCycle = 5;
 
+struct AxisRefreshSnapshot {
+    bool feedbackSeen{false};
+    bool enabled{false};
+    bool fault{false};
+    bool degraded{false};
+    bool desiredModeValid{false};
+    CanProtocol::MotorMode feedbackMode{CanProtocol::MotorMode::Position};
+    CanProtocol::MotorMode desiredMode{CanProtocol::MotorMode::Position};
+    can_driver::AxisIntent intent{can_driver::AxisIntent::None};
+    bool deviceHealthSeen{false};
+    std::uint64_t txBackpressure{0};
+};
+
 uint32_t readUInt32BE(const CanTransport::Frame &frame, std::size_t index)
 {
     if (index + 3 >= frame.dlc) {
@@ -62,6 +75,57 @@ int16_t clampInt32ToInt16WithWarn(int32_t value, uint8_t motorId, const char *fi
     }
     const int32_t clamped = std::max(kMin, std::min(kMax, value));
     return static_cast<int16_t>(clamped);
+}
+
+AxisRefreshSnapshot makeAxisRefreshSnapshot(
+    const std::shared_ptr<can_driver::SharedDriverState> &sharedState,
+    const std::string &deviceName,
+    const can_driver::SharedDriverState::AxisKey &axisKey)
+{
+    AxisRefreshSnapshot snapshot;
+    if (!sharedState || deviceName.empty()) {
+        return snapshot;
+    }
+
+    can_driver::SharedDriverState::AxisFeedbackState feedback;
+    if (sharedState->getAxisFeedback(axisKey, &feedback)) {
+        snapshot.feedbackSeen = feedback.feedbackSeen;
+        snapshot.enabled = feedback.enabled;
+        snapshot.fault = feedback.fault;
+        snapshot.degraded = feedback.degraded || feedback.consecutiveTimeoutCount > 0;
+        snapshot.feedbackMode = feedback.mode;
+    }
+
+    can_driver::SharedDriverState::AxisCommandState command;
+    if (sharedState->getAxisCommand(axisKey, &command)) {
+        snapshot.desiredModeValid = command.desiredModeValid;
+        snapshot.desiredMode = command.desiredMode;
+    }
+
+    snapshot.intent = sharedState->getAxisIntent(axisKey);
+
+    can_driver::SharedDriverState::DeviceHealthState deviceHealth;
+    if (sharedState->getDeviceHealth(deviceName, &deviceHealth)) {
+        snapshot.deviceHealthSeen = true;
+        snapshot.txBackpressure = deviceHealth.txBackpressure;
+    }
+
+    return snapshot;
+}
+
+bool needsPriorityLifecycleQueries(const AxisRefreshSnapshot &snapshot)
+{
+    if (!snapshot.feedbackSeen || snapshot.degraded || snapshot.fault || !snapshot.enabled) {
+        return true;
+    }
+    if (snapshot.intent == can_driver::AxisIntent::Enable ||
+        snapshot.intent == can_driver::AxisIntent::Recover) {
+        return true;
+    }
+    if (snapshot.desiredModeValid && snapshot.feedbackMode != snapshot.desiredMode) {
+        return true;
+    }
+    return false;
 }
 } // namespace
 
@@ -124,6 +188,8 @@ void EyouCan::initializeMotorRefresh(const std::vector<MotorID> &motorIds)
     }
     resetReadTracking();
     refreshCycleCount_ = 0;
+    lastObservedTxBackpressure_ = 0;
+    queryPressureUntilCycle_ = 0;
 
     if (motorIds.empty()) {
         stopRefreshLoop();
@@ -945,20 +1011,70 @@ void EyouCan::refreshMotorStates()
         return;
     }
 
-    const bool slowCycle = (refreshCycleCount_ % kSlowDivider == 0);
-    ++refreshCycleCount_;
+    const std::uint64_t cycle = refreshCycleCount_++;
 
-    for (uint8_t motorId : motorIds) {
+    for (std::size_t motorIndex = 0; motorIndex < motorIds.size(); ++motorIndex) {
+        const uint8_t motorId = motorIds[motorIndex];
         // 位置 + 速度：每周期都查（控制闭环需要）
         requestPosition(motorId);
         requestVelocity(motorId);
 
-        // mode / enable / fault / current：每 kSlowDivider 个周期查一次
-        if (slowCycle) {
+        const auto axisKey = makeAxisKey(motorId);
+        const auto snapshot = makeAxisRefreshSnapshot(sharedState_, deviceName_, axisKey);
+        if (snapshot.deviceHealthSeen &&
+            snapshot.txBackpressure > lastObservedTxBackpressure_) {
+            queryPressureUntilCycle_ = std::max(
+                queryPressureUntilCycle_, cycle + kQueryPressureHoldCycles);
+        }
+        if (snapshot.deviceHealthSeen) {
+            lastObservedTxBackpressure_ = snapshot.txBackpressure;
+        }
+
+        const bool queryPressureActive = cycle < queryPressureUntilCycle_;
+        const bool priorityLifecycleQueries = needsPriorityLifecycleQueries(snapshot);
+
+        if (priorityLifecycleQueries && !queryPressureActive) {
             requestMode(motorId);
             requestEnable(motorId);
             requestFault(motorId);
+            if (((cycle + motorIndex) % kPriorityCurrentDivider) == 0) {
+                requestCurrent(motorId);
+            }
+            continue;
+        }
+
+        const std::size_t criticalPhase = static_cast<std::size_t>((cycle + motorIndex) % 3);
+        const std::size_t steadyPhase = static_cast<std::size_t>((cycle + motorIndex) % 4);
+        if (queryPressureActive) {
+            switch (criticalPhase) {
+            case 0:
+                requestMode(motorId);
+                break;
+            case 1:
+                requestEnable(motorId);
+                break;
+            case 2:
+            default:
+                requestFault(motorId);
+                break;
+            }
+            continue;
+        }
+
+        switch (steadyPhase) {
+        case 0:
+            requestMode(motorId);
+            break;
+        case 1:
+            requestEnable(motorId);
+            break;
+        case 2:
+            requestFault(motorId);
+            break;
+        case 3:
+        default:
             requestCurrent(motorId);
+            break;
         }
     }
 }
@@ -966,5 +1082,7 @@ void EyouCan::refreshMotorStates()
 void EyouCan::stopRefreshLoop()
 {
     refreshCycleCount_ = 0;
+    lastObservedTxBackpressure_ = 0;
+    queryPressureUntilCycle_ = 0;
     resetReadTracking();
 }
