@@ -338,13 +338,6 @@ TEST_F(EyouCanTest, IssueRefreshQueryBacksOffAfterRepeatedReadTimeouts)
     EyouCanTestAccessor::expireAllPendingBackoff(eyou);
     eyou.issueRefreshQuery(static_cast<MotorID>(0x05), EyouCan::RefreshQuery::Position);
     EXPECT_EQ(transport->sentFrames.size(), 2u);
-
-    can_driver::SharedDriverState::AxisFeedbackState feedback;
-    ASSERT_TRUE(
-        sharedState->getAxisFeedback(can_driver::MakeAxisKey("can0", CanType::PP, static_cast<MotorID>(0x05)),
-                                     &feedback));
-    EXPECT_EQ(feedback.consecutiveTimeoutCount, 1u);
-    EXPECT_TRUE(feedback.degraded);
 }
 
 TEST_F(EyouCanTest, SlowRefreshRateDoesNotPrematurelyTimeoutReadRequests)

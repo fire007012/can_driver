@@ -660,10 +660,9 @@ bool EyouCan::tryIssueReadCommand(uint8_t motorId, uint8_t subCommand)
     }
 
     const auto now = std::chrono::steady_clock::now();
+    maybeWarnStaleFeedback(motorId, subCommand, now);
     const auto timeout = computeReadRequestTimeout();
     bool delayRetry = false;
-    std::size_t consecutiveTimeouts = 0;
-    std::chrono::milliseconds retryBackoff(0);
     {
         std::lock_guard<std::mutex> lock(pendingReadMutex_);
         auto &request = pendingReadRequests_[pendingReadKey(motorId, subCommand)];
@@ -681,9 +680,6 @@ bool EyouCan::tryIssueReadCommand(uint8_t motorId, uint8_t subCommand)
             request.inFlight = false;
             request.consecutiveTimeouts = std::min<std::size_t>(request.consecutiveTimeouts + 1, 8);
             request.nextEligibleSend = now + computeTimeoutBackoff(request.consecutiveTimeouts, timeout);
-            consecutiveTimeouts = request.consecutiveTimeouts;
-            retryBackoff = std::chrono::duration_cast<std::chrono::milliseconds>(
-                request.nextEligibleSend - now);
             delayRetry = true;
         } else {
             request.queued = true;
@@ -692,14 +688,6 @@ bool EyouCan::tryIssueReadCommand(uint8_t motorId, uint8_t subCommand)
     }
 
     if (delayRetry) {
-        noteSharedTimeout(motorId, consecutiveTimeouts);
-        ROS_WARN_STREAM_THROTTLE(
-            1.0,
-            "[EyouCan] Read timeout on motor " << static_cast<unsigned>(motorId)
-            << " subcmd=0x" << std::hex << static_cast<unsigned>(subCommand) << std::dec
-            << ", backing off for " << retryBackoff.count()
-            << " ms before retry"
-            << " (consecutive_timeouts=" << consecutiveTimeouts << ")");
         return false;
     }
 
@@ -728,34 +716,58 @@ void EyouCan::onReadDispatchResult(uint8_t motorId,
     }
 }
 
+void EyouCan::maybeWarnStaleFeedback(uint8_t motorId,
+                                     uint8_t subCommand,
+                                     std::chrono::steady_clock::time_point now)
+{
+    const auto threshold = feedbackStaleWarnThreshold(subCommand);
+    if (threshold <= std::chrono::milliseconds::zero()) {
+        return;
+    }
+
+    bool shouldWarn = false;
+    long long ageMs = -1;
+    {
+        std::lock_guard<std::mutex> lock(pendingReadMutex_);
+        auto &request = pendingReadRequests_[pendingReadKey(motorId, subCommand)];
+        if (request.lastResponse == std::chrono::steady_clock::time_point {}) {
+            return;
+        }
+        if ((now - request.lastResponse) < threshold) {
+            return;
+        }
+        if (request.lastStaleWarn != std::chrono::steady_clock::time_point {} &&
+            (now - request.lastStaleWarn) < threshold) {
+            return;
+        }
+        request.lastStaleWarn = now;
+        ageMs = std::chrono::duration_cast<std::chrono::milliseconds>(now - request.lastResponse).count();
+        shouldWarn = true;
+    }
+
+    if (!shouldWarn) {
+        return;
+    }
+
+    ROS_WARN_STREAM(
+        "[EyouCan] Feedback stale on motor " << static_cast<unsigned>(motorId)
+        << " subcmd=0x" << std::hex << static_cast<unsigned>(subCommand) << std::dec
+        << ", no new response for " << ageMs << " ms");
+}
+
 void EyouCan::markReadResponseReceived(uint8_t motorId, uint8_t subCommand)
 {
-    std::size_t recoveredTimeouts = 0;
-    long long responseAgeMs = -1;
     {
         std::lock_guard<std::mutex> lock(pendingReadMutex_);
         auto it = pendingReadRequests_.find(pendingReadKey(motorId, subCommand));
         if (it != pendingReadRequests_.end()) {
-            recoveredTimeouts = it->second.consecutiveTimeouts;
-            if (it->second.lastSent != std::chrono::steady_clock::time_point {}) {
-                responseAgeMs = std::chrono::duration_cast<std::chrono::milliseconds>(
-                                    std::chrono::steady_clock::now() - it->second.lastSent)
-                                    .count();
-            }
+            it->second.lastResponse = std::chrono::steady_clock::now();
+            it->second.lastStaleWarn = std::chrono::steady_clock::time_point {};
             it->second.queued = false;
             it->second.inFlight = false;
             it->second.nextEligibleSend = std::chrono::steady_clock::time_point {};
             it->second.consecutiveTimeouts = 0;
         }
-    }
-
-    if (recoveredTimeouts > 0) {
-        ROS_WARN_STREAM_THROTTLE(
-            1.0,
-            "[EyouCan] Read response recovered on motor " << static_cast<unsigned>(motorId)
-            << " subcmd=0x" << std::hex << static_cast<unsigned>(subCommand) << std::dec
-            << " after " << recoveredTimeouts << " consecutive timeout(s)"
-            << " (response_age_ms=" << responseAgeMs << ")");
     }
 }
 
@@ -840,20 +852,6 @@ void EyouCan::syncSharedIntent(uint8_t motorId, can_driver::AxisIntent intent) c
     sharedState_->setAxisIntent(makeAxisKey(motorId), intent);
 }
 
-void EyouCan::noteSharedTimeout(uint8_t motorId, std::size_t consecutiveTimeouts) const
-{
-    if (!sharedState_ || deviceName_.empty()) {
-        return;
-    }
-
-    sharedState_->mutateAxisFeedback(
-        makeAxisKey(motorId),
-        [consecutiveTimeouts](can_driver::SharedDriverState::AxisFeedbackState *feedback) {
-            feedback->consecutiveTimeoutCount =
-                static_cast<std::uint32_t>(consecutiveTimeouts);
-        });
-}
-
 void EyouCan::resetReadTracking()
 {
     std::lock_guard<std::mutex> lock(pendingReadMutex_);
@@ -863,6 +861,23 @@ void EyouCan::resetReadTracking()
 uint16_t EyouCan::pendingReadKey(uint8_t motorId, uint8_t subCommand)
 {
     return static_cast<uint16_t>((static_cast<uint16_t>(motorId) << 8) | subCommand);
+}
+
+std::chrono::milliseconds EyouCan::feedbackStaleWarnThreshold(uint8_t subCommand)
+{
+    switch (subCommand) {
+    case 0x07:
+        return std::chrono::milliseconds(500);
+    case 0x06:
+        return std::chrono::milliseconds(1000);
+    case 0x05:
+    case 0x0F:
+    case 0x10:
+    case 0x15:
+        return std::chrono::milliseconds(2000);
+    default:
+        return std::chrono::milliseconds::zero();
+    }
 }
 
 std::chrono::milliseconds EyouCan::computeReadRequestTimeout() const
