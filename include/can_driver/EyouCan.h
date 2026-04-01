@@ -112,8 +112,10 @@ public:
     std::chrono::milliseconds refreshSleepInterval() const;
     /// 设置是否启用 PP 快写命令（CMD=0x05）。
     void setFastWriteEnabled(bool enabled);
-    /// 设置位置/CSP 命令默认预配置速度（0x09，协议原始单位）。
+    /// 设置位置模式命令默认预配置速度（0x09，协议原始单位）。
     void setDefaultPositionVelocityRaw(int32_t velocityRaw);
+    /// 设置 CSP 模式命令默认预配置速度（0x09，协议原始单位）。
+    void setDefaultCspVelocityRaw(int32_t velocityRaw);
     uint64_t fastWriteSentCount() const;
     uint64_t normalWriteSentCount() const;
     using RefreshQuery = can_driver::PpRefreshQuery;
@@ -162,6 +164,7 @@ private:
     std::atomic<double> refreshRateHz_{0.0};
     std::atomic<bool> fastWriteEnabled_{false};
     std::atomic<int32_t> defaultPositionVelocityRaw_{kDefaultPositionVelocityRaw};
+    std::atomic<int32_t> defaultCspVelocityRaw_{kDefaultPositionVelocityRaw};
     std::atomic<uint64_t> fastWriteSentCount_{0};
     std::atomic<uint64_t> normalWriteSentCount_{0};
     mutable std::mutex pendingReadMutex_;

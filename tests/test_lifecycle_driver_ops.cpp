@@ -177,6 +177,8 @@ public:
     void setDeviceRefreshRateHz(const std::string &, double) override {}
     void setPpFastWriteEnabled(bool) override {}
     void setPpDefaultPositionVelocityRaw(int32_t) override {}
+    void setPpPositionDefaultVelocityRaw(int32_t) override {}
+    void setPpCspDefaultVelocityRaw(int32_t) override {}
     void shutdownDevice(const std::string &device) override
     {
         ++shutdownDeviceCalls_;

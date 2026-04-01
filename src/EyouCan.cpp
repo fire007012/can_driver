@@ -166,6 +166,17 @@ void EyouCan::setDefaultPositionVelocityRaw(int32_t velocityRaw)
     defaultPositionVelocityRaw_.store(velocityRaw, std::memory_order_relaxed);
 }
 
+void EyouCan::setDefaultCspVelocityRaw(int32_t velocityRaw)
+{
+    if (velocityRaw <= 0) {
+        ROS_WARN("[EyouCan] Ignore invalid default CSP velocity raw=%d, keep %d.",
+                 velocityRaw,
+                 defaultCspVelocityRaw_.load(std::memory_order_relaxed));
+        return;
+    }
+    defaultCspVelocityRaw_.store(velocityRaw, std::memory_order_relaxed);
+}
+
 uint64_t EyouCan::fastWriteSentCount() const
 {
     return fastWriteSentCount_.load(std::memory_order_relaxed);
@@ -360,7 +371,7 @@ bool EyouCan::quickSetPosition(MotorID Id, int32_t position)
     }
     syncSharedCommand(motorId, position, 0, MotorMode::CSP, true);
     const int32_t positionVelocityRaw =
-        defaultPositionVelocityRaw_.load(std::memory_order_relaxed);
+        defaultCspVelocityRaw_.load(std::memory_order_relaxed);
     if (!ensurePositionVelocityConfigured(motorId, positionVelocityRaw, false)) {
         return false;
     }

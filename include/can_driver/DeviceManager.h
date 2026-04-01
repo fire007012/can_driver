@@ -49,8 +49,12 @@ public:
     void setDeviceRefreshRateHz(const std::string &device, double hz) override;
     /// 设置 PP 协议是否使用快写命令（CMD=0x05）。
     void setPpFastWriteEnabled(bool enabled) override;
-    /// 设置 PP 位置/CSP 命令默认预配置速度（0x09，协议原始单位）。
+    /// 兼容旧接口：同时设置 PP 位置/CSP 命令默认预配置速度（0x09，协议原始单位）。
     void setPpDefaultPositionVelocityRaw(int32_t velocityRaw) override;
+    /// 设置 PP 位置模式命令默认预配置速度（0x09，协议原始单位）。
+    void setPpPositionDefaultVelocityRaw(int32_t velocityRaw) override;
+    /// 设置 PP CSP 模式命令默认预配置速度（0x09，协议原始单位）。
+    void setPpCspDefaultVelocityRaw(int32_t velocityRaw) override;
     /// 停止并释放单个设备资源，不影响其他 device。
     void shutdownDevice(const std::string &device) override;
     /// 停止并释放所有设备资源。
@@ -111,7 +115,8 @@ private:
     std::shared_ptr<can_driver::SharedDriverState> sharedState_{
         std::make_shared<can_driver::SharedDriverState>()};
     bool ppFastWriteEnabled_{false};
-    int32_t ppDefaultPositionVelocityRaw_{EyouCan::kDefaultPositionVelocityRaw};
+    int32_t ppPositionDefaultVelocityRaw_{EyouCan::kDefaultPositionVelocityRaw};
+    int32_t ppCspDefaultVelocityRaw_{EyouCan::kDefaultPositionVelocityRaw};
     double refreshRateHz_{0.0};
     std::unordered_map<std::string, double> deviceRefreshRateOverrides_;
     // 每个设备一把命令互斥锁，避免多个控制线程并发下发命令时互相打断。

@@ -31,6 +31,8 @@ public:
     virtual void setDeviceRefreshRateHz(const std::string &device, double hz) = 0;
     virtual void setPpFastWriteEnabled(bool enabled) = 0;
     virtual void setPpDefaultPositionVelocityRaw(int32_t velocityRaw) = 0;
+    virtual void setPpPositionDefaultVelocityRaw(int32_t velocityRaw) = 0;
+    virtual void setPpCspDefaultVelocityRaw(int32_t velocityRaw) = 0;
     virtual void shutdownDevice(const std::string &device) = 0;
     virtual void shutdownAll() = 0;
 

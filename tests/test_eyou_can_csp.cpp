@@ -166,7 +166,7 @@ TEST_F(EyouCanCSPTest, QuickSetPositionResendsVelocityWhenDefaultVelocityChanges
     transport->clearSent();
     txDispatcher->requests.clear();
 
-    eyou.setDefaultPositionVelocityRaw(0x00001234);
+    eyou.setDefaultCspVelocityRaw(0x00001234);
 
     ASSERT_TRUE(eyou.quickSetPosition(kMotorId, 2000));
     ASSERT_EQ(transport->sentFrames.size(), 2u);

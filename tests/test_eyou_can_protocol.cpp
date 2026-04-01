@@ -260,6 +260,30 @@ TEST_F(EyouCanTest, PositionVelocityDefaultCanBeOverridden)
     EXPECT_EQ(transport->sentFrames[1].data[1], 0x0A);
 }
 
+TEST_F(EyouCanTest, PositionAndCspVelocityDefaultsCanDiffer)
+{
+    constexpr MotorID kMotorId = static_cast<MotorID>(0x05);
+
+    eyou.setDefaultPositionVelocityRaw(0x00001234);
+    eyou.setDefaultCspVelocityRaw(0x00005678);
+
+    ASSERT_TRUE(eyou.setPosition(kMotorId, 456));
+    ASSERT_EQ(transport->sentFrames.size(), 2u);
+    EXPECT_EQ(transport->sentFrames[0].data[1], 0x09);
+    EXPECT_EQ(transport->sentFrames[0].data[4], 0x12);
+    EXPECT_EQ(transport->sentFrames[0].data[5], 0x34);
+
+    transport->clearSent();
+    txDispatcher->requests.clear();
+
+    ASSERT_TRUE(eyou.quickSetPosition(kMotorId, 789));
+    ASSERT_EQ(transport->sentFrames.size(), 2u);
+    EXPECT_EQ(transport->sentFrames[0].data[1], 0x09);
+    EXPECT_EQ(transport->sentFrames[0].data[4], 0x56);
+    EXPECT_EQ(transport->sentFrames[0].data[5], 0x78);
+    EXPECT_EQ(transport->sentFrames[1].data[1], 0x0A);
+}
+
 TEST_F(EyouCanTest, WritesRouteThroughUnifiedTxDispatcher)
 {
     ASSERT_TRUE(eyou.setPosition(static_cast<MotorID>(0x05), 123));
