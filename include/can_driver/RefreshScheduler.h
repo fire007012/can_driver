@@ -4,6 +4,7 @@
 #include "can_driver/CanProtocol.h"
 #include "can_driver/SharedDriverState.h"
 
+#include <chrono>
 #include <array>
 #include <cstddef>
 #include <cstdint>
@@ -41,6 +42,8 @@ struct RefreshPlan {
 using PpRefreshPlan = RefreshPlan<PpRefreshQuery, 6>;
 using MtRefreshPlan = RefreshPlan<MtRefreshQuery, 3>;
 
+constexpr std::size_t kPpRefreshQueryCount = 6;
+
 struct PpAxisRefreshSnapshot {
     bool feedbackSeen{false};
     bool enabled{false};
@@ -50,6 +53,10 @@ struct PpAxisRefreshSnapshot {
     CanProtocol::MotorMode feedbackMode{CanProtocol::MotorMode::Position};
     CanProtocol::MotorMode desiredMode{CanProtocol::MotorMode::Position};
     AxisIntent intent{AxisIntent::None};
+};
+
+struct PpAxisRefreshScheduleState {
+    std::array<std::chrono::steady_clock::time_point, kPpRefreshQueryCount> lastScheduled {};
 };
 
 inline bool NeedsPpPriorityLifecycleQueries(const PpAxisRefreshSnapshot &snapshot)
@@ -66,69 +73,81 @@ inline bool NeedsPpPriorityLifecycleQueries(const PpAxisRefreshSnapshot &snapsho
     return false;
 }
 
-inline PpRefreshPlan BuildPpRefreshPlan(std::uint64_t cycle,
-                                        std::size_t motorIndex,
+inline constexpr std::array<PpRefreshQuery, kPpRefreshQueryCount> PpRefreshQueryOrder()
+{
+    return {PpRefreshQuery::Position,
+            PpRefreshQuery::Velocity,
+            PpRefreshQuery::Mode,
+            PpRefreshQuery::Enable,
+            PpRefreshQuery::Fault,
+            PpRefreshQuery::Current};
+}
+
+inline constexpr std::size_t PpRefreshQueryIndex(PpRefreshQuery query)
+{
+    switch (query) {
+    case PpRefreshQuery::Position:
+        return 0;
+    case PpRefreshQuery::Velocity:
+        return 1;
+    case PpRefreshQuery::Mode:
+        return 2;
+    case PpRefreshQuery::Enable:
+        return 3;
+    case PpRefreshQuery::Fault:
+        return 4;
+    case PpRefreshQuery::Current:
+        return 5;
+    }
+    return 0;
+}
+
+inline std::chrono::milliseconds PpRefreshPeriod(PpRefreshQuery query,
+                                                 bool queryPressureActive,
+                                                 const PpAxisRefreshSnapshot &snapshot)
+{
+    const bool priority = NeedsPpPriorityLifecycleQueries(snapshot);
+    switch (query) {
+    case PpRefreshQuery::Position:
+        return std::chrono::milliseconds(50);
+    case PpRefreshQuery::Velocity:
+        return priority ? std::chrono::milliseconds(50) : std::chrono::milliseconds(100);
+    case PpRefreshQuery::Mode:
+    case PpRefreshQuery::Enable:
+    case PpRefreshQuery::Fault:
+        return priority ? std::chrono::milliseconds(50) : std::chrono::milliseconds(100);
+    case PpRefreshQuery::Current:
+        // 压力模式后续改成“限预算不饿死字段”。当前先保证 freshness 上限。
+        (void)queryPressureActive;
+        return std::chrono::milliseconds(100);
+    }
+    return std::chrono::milliseconds(100);
+}
+
+inline PpRefreshPlan BuildPpRefreshPlan(std::chrono::steady_clock::time_point now,
                                         bool queryPressureActive,
-                                        const PpAxisRefreshSnapshot &snapshot)
+                                        const PpAxisRefreshSnapshot &snapshot,
+                                        PpAxisRefreshScheduleState *state)
 {
     PpRefreshPlan plan;
-    if (queryPressureActive) {
-        if (((cycle + motorIndex) % 2) == 0) {
-            plan.push(PpRefreshQuery::Position);
-        } else {
-            plan.push(PpRefreshQuery::Velocity);
-        }
-
-        switch (static_cast<std::size_t>((cycle + motorIndex) % 3)) {
-        case 0:
-            plan.push(PpRefreshQuery::Mode);
-            break;
-        case 1:
-            plan.push(PpRefreshQuery::Enable);
-            break;
-        case 2:
-        default:
-            plan.push(PpRefreshQuery::Fault);
-            break;
-        }
+    if (!state) {
         return plan;
     }
 
-    plan.push(PpRefreshQuery::Position);
-    if (NeedsPpPriorityLifecycleQueries(snapshot)) {
-        plan.push(PpRefreshQuery::Velocity);
-        plan.push(PpRefreshQuery::Mode);
-        plan.push(PpRefreshQuery::Enable);
-        plan.push(PpRefreshQuery::Fault);
-        if (((cycle + motorIndex) % 4) == 0) {
-            plan.push(PpRefreshQuery::Current);
+    for (const auto query : PpRefreshQueryOrder()) {
+        const auto period = PpRefreshPeriod(query, queryPressureActive, snapshot);
+        if (period <= std::chrono::milliseconds::zero()) {
+            continue;
         }
-        return plan;
-    }
-
-    if (((cycle + motorIndex) % 2) == 0) {
-        plan.push(PpRefreshQuery::Velocity);
-    }
-
-    switch (static_cast<std::size_t>((cycle + motorIndex) % 8)) {
-    case 0:
-        plan.push(PpRefreshQuery::Mode);
-        break;
-    case 2:
-        plan.push(PpRefreshQuery::Enable);
-        break;
-    case 4:
-        plan.push(PpRefreshQuery::Fault);
-        break;
-    case 6:
-    default:
-        plan.push(PpRefreshQuery::Current);
-        break;
-    case 1:
-    case 3:
-    case 5:
-    case 7:
-        break;
+        const auto index = PpRefreshQueryIndex(query);
+        const auto lastScheduled = state->lastScheduled[index];
+        if (lastScheduled != std::chrono::steady_clock::time_point {} &&
+            now >= lastScheduled &&
+            (now - lastScheduled) < period) {
+            continue;
+        }
+        plan.push(query);
+        state->lastScheduled[index] = now;
     }
     return plan;
 }

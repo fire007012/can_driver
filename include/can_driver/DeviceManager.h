@@ -19,6 +19,7 @@
 #include <mutex>
 #include <shared_mutex>
 #include <string>
+#include <unordered_map>
 #include <vector>
 
 /**
@@ -76,6 +77,7 @@ private:
         std::atomic<bool> ppActive{false};
         std::vector<std::uint8_t> mtMotorIds;
         std::vector<std::uint8_t> ppMotorIds;
+        std::unordered_map<std::uint8_t, can_driver::PpAxisRefreshScheduleState> ppScheduleStates;
         std::uint64_t refreshCycleCount{0};
         std::uint64_t mtScheduleCycleCount{0};
         std::uint64_t ppScheduleCycleCount{0};
