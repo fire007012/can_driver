@@ -929,6 +929,112 @@ TEST_F(CanDriverHWSmokeTest, WriteAutoStopOnFaultAndBlockMotion)
     spinner.stop();
 }
 
+TEST_F(CanDriverHWSmokeTest, WriteUsesFreshSharedFeedbackInsteadOfProtocolCacheForSafetyGates)
+{
+    auto fakeDm = std::make_shared<FakeDeviceManager>();
+    CanDriverHW hw(fakeDm);
+
+    ros::NodeHandle nh;
+    ros::NodeHandle pnh(uniqueNs("can_driver_hw_smoke_shared_write_gate"));
+
+    pnh.setParam("joints", makeSingleVelocityJoint());
+    pnh.setParam("debug_bypass_ros_control", true);
+    pnh.setParam("motor_state_period_sec", 0.2);
+    pnh.setParam("safety_stop_on_fault", true);
+    pnh.setParam("safety_require_enabled_for_motion", true);
+
+    ASSERT_TRUE(hw.init(nh, pnh));
+    enterRunning(hw);
+    fakeDm->setSyncSharedFeedbackFromProtocol(false);
+
+    ros::AsyncSpinner spinner(1);
+    spinner.start();
+
+    const std::string cmdTopic = pnh.resolveName("motor/test_wheel/cmd_velocity");
+    ros::Publisher pub = nh.advertise<std_msgs::Float64>(cmdTopic, 1);
+    for (int i = 0; i < 20 && pub.getNumSubscribers() == 0; ++i) {
+        ros::Duration(0.01).sleep();
+    }
+
+    fakeDm->protocol()->setEnabledState(false);
+    fakeDm->protocol()->setFault(true);
+    fakeDm->sharedState()->mutateAxisFeedback(
+        can_driver::MakeAxisKey("fake0", CanType::MT, static_cast<MotorID>(0x141)),
+        [](can_driver::SharedDriverState::AxisFeedbackState *feedback) {
+            feedback->feedbackSeen = true;
+            feedback->enabled = true;
+            feedback->fault = false;
+            feedback->lastRxSteadyNs = can_driver::SharedDriverSteadyNowNs();
+            feedback->lastValidStateSteadyNs = feedback->lastRxSteadyNs;
+        });
+
+    std_msgs::Float64 msg;
+    msg.data = 2.0;
+    pub.publish(msg);
+    ros::Duration(0.05).sleep();
+
+    hw.write(ros::Time::now(), ros::Duration(0.01));
+
+    EXPECT_EQ(fakeDm->protocol()->stopCalls(), 0);
+    EXPECT_EQ(fakeDm->protocol()->velocityCalls(), 1);
+    EXPECT_EQ(fakeDm->protocol()->lastVelocityMotor(), 0x141u);
+    EXPECT_EQ(fakeDm->protocol()->lastVelocity(), 20);
+
+    spinner.stop();
+}
+
+TEST_F(CanDriverHWSmokeTest, WriteFallsBackToProtocolSafetyStateWhenSharedFeedbackStale)
+{
+    auto fakeDm = std::make_shared<FakeDeviceManager>();
+    CanDriverHW hw(fakeDm);
+
+    ros::NodeHandle nh;
+    ros::NodeHandle pnh(uniqueNs("can_driver_hw_smoke_stale_shared_write_gate"));
+
+    pnh.setParam("joints", makeSingleVelocityJoint());
+    pnh.setParam("debug_bypass_ros_control", true);
+    pnh.setParam("motor_state_period_sec", 0.2);
+    pnh.setParam("safety_stop_on_fault", true);
+    pnh.setParam("safety_require_enabled_for_motion", true);
+
+    ASSERT_TRUE(hw.init(nh, pnh));
+    enterRunning(hw);
+    fakeDm->setSyncSharedFeedbackFromProtocol(false);
+
+    ros::AsyncSpinner spinner(1);
+    spinner.start();
+
+    const std::string cmdTopic = pnh.resolveName("motor/test_wheel/cmd_velocity");
+    ros::Publisher pub = nh.advertise<std_msgs::Float64>(cmdTopic, 1);
+    for (int i = 0; i < 20 && pub.getNumSubscribers() == 0; ++i) {
+        ros::Duration(0.01).sleep();
+    }
+
+    fakeDm->protocol()->setEnabledState(false);
+    fakeDm->protocol()->setFault(true);
+    fakeDm->sharedState()->mutateAxisFeedback(
+        can_driver::MakeAxisKey("fake0", CanType::MT, static_cast<MotorID>(0x141)),
+        [](can_driver::SharedDriverState::AxisFeedbackState *feedback) {
+            feedback->feedbackSeen = true;
+            feedback->enabled = true;
+            feedback->fault = false;
+            feedback->lastRxSteadyNs = can_driver::SharedDriverSteadyNowNs() - 2000000000LL;
+            feedback->lastValidStateSteadyNs = feedback->lastRxSteadyNs;
+        });
+
+    std_msgs::Float64 msg;
+    msg.data = 2.0;
+    pub.publish(msg);
+    ros::Duration(0.05).sleep();
+
+    hw.write(ros::Time::now(), ros::Duration(0.01));
+
+    EXPECT_EQ(fakeDm->protocol()->stopCalls(), 1);
+    EXPECT_EQ(fakeDm->protocol()->velocityCalls(), 0);
+
+    spinner.stop();
+}
+
 TEST_F(CanDriverHWSmokeTest, WriteHoldAfterDeviceRecoverClearsStaleDirectCommand)
 {
     auto fakeDm = std::make_shared<FakeDeviceManager>();

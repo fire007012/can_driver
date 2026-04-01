@@ -1,6 +1,7 @@
 #ifndef CAN_DRIVER_CAN_DRIVER_IO_RUNTIME_H
 #define CAN_DRIVER_CAN_DRIVER_IO_RUNTIME_H
 
+#include "can_driver/AxisReadinessEvaluator.h"
 #include "can_driver/CanDriverHwTypes.h"
 #include "can_driver/IDeviceManager.h"
 #include "can_driver/SafeCommand.h"
@@ -199,6 +200,14 @@ public:
             return;
         }
 
+        struct MotionStatusSnapshot {
+            bool enabled{false};
+            bool fault{false};
+            bool valid{false};
+        };
+
+        const auto sharedState = deviceManager.getSharedDriverState();
+
         for (const auto &group : groups) {
             const bool isReady = deviceManager.isDeviceReady(group.canDevice);
             const auto deviceEvent = commandGate->observeDeviceReady(group.canDevice, isReady);
@@ -231,6 +240,25 @@ public:
                 continue;
             }
 
+            std::vector<MotionStatusSnapshot> motionStatusSnapshots(joints->size());
+            if (sharedState) {
+                const auto nowNs = SharedDriverSteadyNowNs();
+                for (const std::size_t index : group.jointIndices) {
+                    const auto &joint = (*joints)[index];
+                    SharedDriverState::AxisFeedbackState feedback;
+                    if (!sharedState->getAxisFeedback(
+                            MakeAxisKey(group.canDevice, group.protocol, joint.motorId),
+                            &feedback) ||
+                        !sharedFeedbackFresh(feedback, nowNs)) {
+                        continue;
+                    }
+
+                    motionStatusSnapshots[index].enabled = feedback.enabled;
+                    motionStatusSnapshots[index].fault = feedback.fault;
+                    motionStatusSnapshots[index].valid = true;
+                }
+            }
+
             auto proto = deviceManager.getProtocol(group.canDevice, group.protocol);
             auto devMutex = deviceManager.getDeviceMutex(group.canDevice);
             if (!proto || !devMutex) {
@@ -245,8 +273,12 @@ public:
 
                 const auto &joint = (*joints)[index];
                 try {
+                    const bool hasSharedMotionStatus = motionStatusSnapshots[index].valid;
+                    const bool hasFault = hasSharedMotionStatus
+                                              ? motionStatusSnapshots[index].fault
+                                              : proto->hasFault(joint.motorId);
+
                     if (config.safetyStopOnFault) {
-                        const bool hasFault = proto->hasFault(joint.motorId);
                         bool needIssueStop = false;
                         {
                             std::lock_guard<std::mutex> lock(*jointStateMutex);
@@ -282,7 +314,10 @@ public:
                         }
                     }
 
-                    if (config.safetyRequireEnabledForMotion && !proto->isEnabled(joint.motorId)) {
+                    const bool enabled = hasSharedMotionStatus
+                                             ? motionStatusSnapshots[index].enabled
+                                             : proto->isEnabled(joint.motorId);
+                    if (config.safetyRequireEnabledForMotion && !enabled) {
                         ROS_WARN_THROTTLE(
                             1.0,
                             "[CanDriverHW] Joint '%s' is not enabled, motion command blocked.",
@@ -436,6 +471,20 @@ private:
             return can_driver::MotorState::MODE_CSP;
         }
         return can_driver::MotorState::MODE_POSITION;
+    }
+
+    static bool sharedFeedbackFresh(const SharedDriverState::AxisFeedbackState &feedback,
+                                    std::int64_t nowNs)
+    {
+        if (!feedback.feedbackSeen || feedback.lastRxSteadyNs <= 0) {
+            return false;
+        }
+
+        const AxisReadinessEvaluator::Config config;
+        if (config.feedbackFreshnessTimeoutNs <= 0 || nowNs <= feedback.lastRxSteadyNs) {
+            return true;
+        }
+        return (nowNs - feedback.lastRxSteadyNs) <= config.feedbackFreshnessTimeoutNs;
     }
 
     static double clampWithJointLimits(const CanDriverJointConfig &joint, double cmdValue)
