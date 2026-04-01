@@ -14,6 +14,11 @@
 
 namespace {
 
+struct ModeSelection {
+    CanProtocol::MotorMode mode{CanProtocol::MotorMode::Position};
+    const char *controlMode{"position"};
+};
+
 long long steadyAgeMs(std::int64_t stampNs)
 {
     if (stampNs <= 0) {
@@ -21,6 +26,26 @@ long long steadyAgeMs(std::int64_t stampNs)
     }
     const auto nowNs = can_driver::SharedDriverSteadyNowNs();
     return (nowNs > stampNs) ? static_cast<long long>((nowNs - stampNs) / 1000000) : 0;
+}
+
+bool decodeModeSelection(double value, ModeSelection *selection)
+{
+    if (selection == nullptr) {
+        return false;
+    }
+    if (value == 0.0) {
+        *selection = ModeSelection{CanProtocol::MotorMode::Position, "position"};
+        return true;
+    }
+    if (value == 1.0) {
+        *selection = ModeSelection{CanProtocol::MotorMode::Velocity, "velocity"};
+        return true;
+    }
+    if (value == 2.0) {
+        *selection = ModeSelection{CanProtocol::MotorMode::CSP, "csp"};
+        return true;
+    }
+    return false;
 }
 
 } // namespace
@@ -761,6 +786,7 @@ void CanDriverHW::holdCommandsForLifecycleTransition()
         } else {
             jc.posCmd = jc.pos;
         }
+        jc.requireCommandAlignment = false;
         commandValidBuffer_[i] = 0;
     }
 }
@@ -1070,50 +1096,79 @@ bool CanDriverHW::onMotorCommand(can_driver::MotorCommand::Request &req,
     };
 
     if (req.command == can_driver::MotorCommand::Request::CMD_SET_MODE) {
-        CanProtocol::MotorMode mode;
-        const char *controlMode = "position";
-        if (req.value == 0.0) {
-            mode = CanProtocol::MotorMode::Position;
-        } else if (req.value == 1.0) {
-            mode = CanProtocol::MotorMode::Velocity;
-            controlMode = "velocity";
-        } else if (req.value == 2.0) {
-            mode = CanProtocol::MotorMode::CSP;
-            controlMode = "csp";
-        } else {
+        ModeSelection selection;
+        if (!decodeModeSelection(req.value, &selection)) {
             res.success = false;
             res.message = "CMD_SET_MODE value must be 0 (position), 1 (velocity) or 2 (csp).";
             return true;
         }
         const auto status = motorActionExecutor_.execute(
             makeMotorTarget(*target),
-            [&mode](const std::shared_ptr<CanProtocol> &proto, MotorID id) {
-                return proto->setMode(id, mode);
+            [&selection](const std::shared_ptr<CanProtocol> &proto, MotorID id) {
+                return proto->setMode(id, selection.mode);
             },
             "Set mode");
         if (status != MotorActionExecutor::Status::Ok) {
             handleFailure(status, "Set mode command rejected.");
             return true;
         }
+
+        JointConfig targetSnapshot;
+        std::size_t targetIndex = joints_.size();
         {
             std::lock_guard<std::mutex> stateLock(jointStateMutex_);
             for (std::size_t index = 0; index < joints_.size(); ++index) {
-                auto &joint = joints_[index];
-                if (joint.motorId != target->motorId) {
+                if (joints_[index].motorId != target->motorId) {
                     continue;
                 }
-
-                joint.controlMode = controlMode;
-                joint.hasDirectPosCmd = false;
-                joint.hasDirectVelCmd = false;
-                if (joint.controlMode == "velocity") {
-                    joint.velCmd = 0.0;
-                } else {
-                    joint.posCmd = joint.pos;
-                }
-                commandValidBuffer_[index] = 0;
+                targetSnapshot = joints_[index];
+                targetIndex = index;
                 break;
             }
+        }
+        if (targetIndex == joints_.size()) {
+            res.success = false;
+            res.message = "Motor ID not found.";
+            return true;
+        }
+
+        int32_t preloadRaw = 0;
+        if (selection.mode != CanProtocol::MotorMode::Velocity &&
+            !can_driver::safe_command::scaleAndClampToInt32(
+                targetSnapshot.pos, targetSnapshot.positionScale, targetSnapshot.name, preloadRaw)) {
+            res.success = false;
+            res.message = "Failed to convert current position for mode preload.";
+            return true;
+        }
+        const auto preloadStatus = motorActionExecutor_.execute(
+            makeMotorTarget(targetSnapshot),
+            [selection, preloadRaw](const std::shared_ptr<CanProtocol> &proto, MotorID id) {
+                switch (selection.mode) {
+                case CanProtocol::MotorMode::Position:
+                    return proto->setPosition(id, preloadRaw);
+                case CanProtocol::MotorMode::Velocity:
+                    return proto->setVelocity(id, 0);
+                case CanProtocol::MotorMode::CSP:
+                    return proto->quickSetPosition(id, preloadRaw);
+                }
+                return false;
+            },
+            "Preload mode command");
+        if (preloadStatus != MotorActionExecutor::Status::Ok) {
+            handleFailure(preloadStatus, "Set mode preload command rejected.");
+            return true;
+        }
+
+        {
+            std::lock_guard<std::mutex> stateLock(jointStateMutex_);
+            auto &joint = joints_[targetIndex];
+            joint.controlMode = selection.controlMode;
+            joint.hasDirectPosCmd = false;
+            joint.hasDirectVelCmd = false;
+            joint.posCmd = joint.pos;
+            joint.velCmd = 0.0;
+            joint.requireCommandAlignment = true;
+            commandValidBuffer_[targetIndex] = 0;
         }
         res.success = true;
         res.message = "OK";

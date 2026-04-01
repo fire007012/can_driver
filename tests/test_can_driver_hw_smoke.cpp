@@ -156,6 +156,18 @@ public:
         return setPositionCalls_;
     }
 
+    int32_t lastPosition() const
+    {
+        std::lock_guard<std::mutex> lock(mutex_);
+        return lastPosition_;
+    }
+
+    uint16_t lastPositionMotor() const
+    {
+        std::lock_guard<std::mutex> lock(mutex_);
+        return static_cast<uint16_t>(lastPositionMotor_);
+    }
+
     int quickPositionCalls() const
     {
         std::lock_guard<std::mutex> lock(mutex_);
@@ -1129,7 +1141,7 @@ TEST_F(CanDriverHWSmokeTest, InitCspJointSetsModeAndPublishesRawFeedbackFromPprC
 
     const auto initResult = hw.operationalCoordinator().RequestInit("fake0", false);
     ASSERT_TRUE(initResult.ok) << initResult.message;
-    EXPECT_EQ(fakeDm->protocol()->setModeCalls(), 1);
+    EXPECT_EQ(fakeDm->protocol()->setModeCalls(), 2);
     EXPECT_EQ(fakeDm->protocol()->lastModeMotor(), 0x05u);
     EXPECT_EQ(fakeDm->protocol()->lastMode(), CanProtocol::MotorMode::CSP);
 
@@ -1245,6 +1257,7 @@ TEST_F(CanDriverHWSmokeTest, RunningCspJointUsesQuickSetPositionWithPprScale)
     pnh.setParam("joints", makeSingleCspJoint());
     pnh.setParam("debug_bypass_ros_control", true);
     pnh.setParam("motor_state_period_sec", 0.05);
+    pnh.setParam("safety_require_enabled_for_motion", false);
 
     ASSERT_TRUE(hw.init(nh, pnh));
     enterRunning(hw);
@@ -1287,6 +1300,7 @@ TEST_F(CanDriverHWSmokeTest, SetModeServiceUpdatesRuntimeRoutingToVelocity)
     pnh.setParam("joints", makeSingleCspJoint());
     pnh.setParam("debug_bypass_ros_control", true);
     pnh.setParam("motor_state_period_sec", 0.05);
+    pnh.setParam("safety_require_enabled_for_motion", false);
 
     ASSERT_TRUE(hw.init(nh, pnh));
     enterRunning(hw);
@@ -1312,16 +1326,121 @@ TEST_F(CanDriverHWSmokeTest, SetModeServiceUpdatesRuntimeRoutingToVelocity)
     ASSERT_TRUE(setModeSrv.response.success) << setModeSrv.response.message;
 
     std_msgs::Float64 msg;
+    msg.data = 0.0;
+    velPub.publish(msg);
+    ros::Duration(0.05).sleep();
+    hw.write(ros::Time::now(), ros::Duration(0.01));
+    EXPECT_EQ(fakeDm->protocol()->velocityCalls(), 2);
+    EXPECT_EQ(fakeDm->protocol()->lastVelocityMotor(), 0x05u);
+    EXPECT_EQ(fakeDm->protocol()->lastVelocity(), 0);
+
     msg.data = 1.25;
     velPub.publish(msg);
     ros::Duration(0.05).sleep();
-
     hw.write(ros::Time::now(), ros::Duration(0.01));
 
-    EXPECT_EQ(fakeDm->protocol()->velocityCalls(), 1);
+    EXPECT_EQ(fakeDm->protocol()->velocityCalls(), 3);
     EXPECT_EQ(fakeDm->protocol()->lastVelocityMotor(), 0x05u);
     EXPECT_EQ(fakeDm->protocol()->lastVelocity(), 13038);
     EXPECT_EQ(fakeDm->protocol()->quickPositionCalls(), 0);
+
+    spinner.stop();
+}
+
+TEST_F(CanDriverHWSmokeTest, SetModeServicePreloadsCurrentPositionWhenSwitchingToPosition)
+{
+    auto fakeDm = std::make_shared<FakeDeviceManager>();
+    fakeDm->protocol()->setFeedbackPosition(1024);
+    CanDriverHW hw(fakeDm);
+
+    ros::NodeHandle nh;
+    ros::NodeHandle pnh(uniqueNs("can_driver_hw_smoke_set_mode_position_preload"));
+
+    pnh.setParam("joints", makeSingleCspJoint());
+    pnh.setParam("motor_state_period_sec", 0.05);
+
+    ASSERT_TRUE(hw.init(nh, pnh));
+    enterRunning(hw);
+    hw.read(ros::Time::now(), ros::Duration(0.01));
+
+    ros::AsyncSpinner spinner(1);
+    spinner.start();
+
+    ros::ServiceClient client = nh.serviceClient<can_driver::MotorCommand>(
+        pnh.resolveName("motor_command"));
+    ASSERT_TRUE(client.waitForExistence(ros::Duration(1.0)));
+
+    can_driver::MotorCommand setModeSrv;
+    setModeSrv.request.motor_id = 0x05u;
+    setModeSrv.request.command = can_driver::MotorCommand::Request::CMD_SET_MODE;
+    setModeSrv.request.value = 0.0;
+    ASSERT_TRUE(client.call(setModeSrv));
+    ASSERT_TRUE(setModeSrv.response.success) << setModeSrv.response.message;
+
+    EXPECT_EQ(fakeDm->protocol()->positionCalls(), 1);
+    EXPECT_EQ(fakeDm->protocol()->lastPositionMotor(), 0x05u);
+    EXPECT_EQ(fakeDm->protocol()->lastPosition(), 1024);
+
+    spinner.stop();
+}
+
+TEST_F(CanDriverHWSmokeTest, VelocityModeRequiresAlignedCommandOnceAfterModeSwitch)
+{
+    auto fakeDm = std::make_shared<FakeDeviceManager>();
+    CanDriverHW hw(fakeDm);
+
+    ros::NodeHandle nh;
+    ros::NodeHandle pnh(uniqueNs("can_driver_hw_smoke_set_mode_velocity_alignment"));
+
+    pnh.setParam("joints", makeSingleCspJoint());
+    pnh.setParam("debug_bypass_ros_control", true);
+    pnh.setParam("motor_state_period_sec", 0.05);
+
+    ASSERT_TRUE(hw.init(nh, pnh));
+    enterRunning(hw);
+
+    ros::AsyncSpinner spinner(1);
+    spinner.start();
+
+    ros::ServiceClient client = nh.serviceClient<can_driver::MotorCommand>(
+        pnh.resolveName("motor_command"));
+    ASSERT_TRUE(client.waitForExistence(ros::Duration(1.0)));
+
+    ros::Publisher velPub = nh.advertise<std_msgs::Float64>(
+        pnh.resolveName("motor/test_arm/cmd_velocity"), 1);
+    for (int i = 0; i < 20 && velPub.getNumSubscribers() == 0; ++i) {
+        ros::Duration(0.01).sleep();
+    }
+
+    can_driver::MotorCommand setModeSrv;
+    setModeSrv.request.motor_id = 0x05u;
+    setModeSrv.request.command = can_driver::MotorCommand::Request::CMD_SET_MODE;
+    setModeSrv.request.value = 1.0;
+    ASSERT_TRUE(client.call(setModeSrv));
+    ASSERT_TRUE(setModeSrv.response.success) << setModeSrv.response.message;
+    EXPECT_EQ(fakeDm->protocol()->velocityCalls(), 1);
+    EXPECT_EQ(fakeDm->protocol()->lastVelocity(), 0);
+
+    std_msgs::Float64 msg;
+    msg.data = 1.25;
+    velPub.publish(msg);
+    ros::Duration(0.05).sleep();
+    hw.write(ros::Time::now(), ros::Duration(0.01));
+    EXPECT_EQ(fakeDm->protocol()->velocityCalls(), 1);
+
+    msg.data = 0.0;
+    velPub.publish(msg);
+    ros::Duration(0.05).sleep();
+    hw.write(ros::Time::now(), ros::Duration(0.01));
+    EXPECT_EQ(fakeDm->protocol()->velocityCalls(), 2);
+    EXPECT_EQ(fakeDm->protocol()->lastVelocity(), 0);
+
+    msg.data = 1.25;
+    velPub.publish(msg);
+    ros::Duration(0.05).sleep();
+    hw.write(ros::Time::now(), ros::Duration(0.01));
+    EXPECT_EQ(fakeDm->protocol()->velocityCalls(), 3);
+    EXPECT_EQ(fakeDm->protocol()->lastVelocity(), 13038);
 
     spinner.stop();
 }

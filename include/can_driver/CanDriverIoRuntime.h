@@ -158,6 +158,27 @@ public:
             }
 
             cmdValue = clampWithJointLimits(joint, cmdValue);
+            if (joint.requireCommandAlignment) {
+                const double actualValue =
+                    (joint.controlMode == "velocity") ? joint.vel : joint.pos;
+                const double tolerance = std::max(
+                    (joint.controlMode == "velocity") ? joint.velocityScale : joint.positionScale,
+                    1e-9);
+                if (!std::isfinite(cmdValue) || !std::isfinite(actualValue) ||
+                    std::fabs(cmdValue - actualValue) > tolerance) {
+                    (*commandValidBuffer)[index] = 0;
+                    ROS_WARN_THROTTLE(
+                        1.0,
+                        "[CanDriverHW] Joint '%s' waiting for an aligned %s command after mode switch: actual=%.6f target=%.6f tolerance=%.6f.",
+                        joint.name.c_str(),
+                        (joint.controlMode == "velocity") ? "velocity" : "position",
+                        actualValue,
+                        cmdValue,
+                        tolerance);
+                    continue;
+                }
+                joint.requireCommandAlignment = false;
+            }
             if (joint.controlMode == "position" && config.maxPositionStepRad > 0.0 &&
                 std::isfinite(cmdValue) && std::isfinite(joint.pos)) {
                 const double delta = cmdValue - joint.pos;
