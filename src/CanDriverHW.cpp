@@ -1046,12 +1046,15 @@ bool CanDriverHW::onMotorCommand(can_driver::MotorCommand::Request &req,
 
     if (req.command == can_driver::MotorCommand::Request::CMD_SET_MODE) {
         CanProtocol::MotorMode mode;
+        const char *controlMode = "position";
         if (req.value == 0.0) {
             mode = CanProtocol::MotorMode::Position;
         } else if (req.value == 1.0) {
             mode = CanProtocol::MotorMode::Velocity;
+            controlMode = "velocity";
         } else if (req.value == 2.0) {
             mode = CanProtocol::MotorMode::CSP;
+            controlMode = "csp";
         } else {
             res.success = false;
             res.message = "CMD_SET_MODE value must be 0 (position), 1 (velocity) or 2 (csp).";
@@ -1066,6 +1069,26 @@ bool CanDriverHW::onMotorCommand(can_driver::MotorCommand::Request &req,
         if (status != MotorActionExecutor::Status::Ok) {
             handleFailure(status, "Set mode command rejected.");
             return true;
+        }
+        {
+            std::lock_guard<std::mutex> stateLock(jointStateMutex_);
+            for (std::size_t index = 0; index < joints_.size(); ++index) {
+                auto &joint = joints_[index];
+                if (joint.motorId != target->motorId) {
+                    continue;
+                }
+
+                joint.controlMode = controlMode;
+                joint.hasDirectPosCmd = false;
+                joint.hasDirectVelCmd = false;
+                if (joint.controlMode == "velocity") {
+                    joint.velCmd = 0.0;
+                } else {
+                    joint.posCmd = joint.pos;
+                }
+                commandValidBuffer_[index] = 0;
+                break;
+            }
         }
         res.success = true;
         res.message = "OK";

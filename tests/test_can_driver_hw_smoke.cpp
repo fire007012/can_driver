@@ -204,6 +204,12 @@ public:
         setModeResult_ = value;
     }
 
+    void setEnabledState(bool value)
+    {
+        std::lock_guard<std::mutex> lock(mutex_);
+        enabled_ = value;
+    }
+
     void setFeedbackPosition(int64_t value)
     {
         std::lock_guard<std::mutex> lock(mutex_);
@@ -366,7 +372,8 @@ public:
     bool isDeviceReady(const std::string &) const override
     {
         std::lock_guard<std::mutex> lock(readyMutex_);
-        if (!ready_ || !exposeSharedState_ || !seedFeedbackOnInit_) {
+        if (!ready_ || !exposeSharedState_ || !seedFeedbackOnInit_ ||
+            !syncSharedFeedbackFromProtocol_) {
             return ready_;
         }
 
@@ -392,6 +399,7 @@ public:
                         feedback->position = protocol_->getPosition(motorEntry.second);
                         feedback->velocity = protocol_->getVelocity(motorEntry.second);
                         feedback->current = protocol_->getCurrent(motorEntry.second);
+                        feedback->mode = protocol_->lastMode();
                         feedback->enabled = protocol_->isEnabled(motorEntry.second);
                         feedback->fault = protocol_->hasFault(motorEntry.second);
                         feedback->lastRxSteadyNs = nowNs;
@@ -455,6 +463,12 @@ public:
         seedFeedbackOnInit_ = seed;
     }
 
+    void setSyncSharedFeedbackFromProtocol(bool sync)
+    {
+        std::lock_guard<std::mutex> lock(readyMutex_);
+        syncSharedFeedbackFromProtocol_ = sync;
+    }
+
     std::vector<double> refreshRateHzCalls() const
     {
         std::lock_guard<std::mutex> lock(lifecycleMutex_);
@@ -475,6 +489,7 @@ private:
     mutable std::mutex readyMutex_;
     mutable std::mutex lifecycleMutex_;
     bool ready_{true};
+    bool syncSharedFeedbackFromProtocol_{true};
     int shutdownDeviceCalls_{0};
     std::string lastShutdownDevice_;
     int ensureTransportCalls_{0};
@@ -1023,6 +1038,64 @@ TEST_F(CanDriverHWSmokeTest, InitCspJointSetsModeAndPublishesRawFeedbackFromPprC
     spinner.stop();
 }
 
+TEST_F(CanDriverHWSmokeTest, MotorStatesPreferSharedFeedbackOverConfiguredModeAndProtocolCache)
+{
+    auto fakeDm = std::make_shared<FakeDeviceManager>();
+    fakeDm->protocol()->setEnabledState(true);
+    fakeDm->protocol()->setFault(false);
+
+    CanDriverHW hw(fakeDm);
+
+    ros::NodeHandle nh;
+    ros::NodeHandle pnh(uniqueNs("can_driver_hw_smoke_shared_motor_state"));
+
+    pnh.setParam("joints", makeSingleCspJoint());
+    pnh.setParam("motor_state_period_sec", 0.05);
+
+    ASSERT_TRUE(hw.init(nh, pnh));
+
+    std::mutex stateMutex;
+    can_driver::MotorState latestState;
+    bool sawSharedState = false;
+    ros::Subscriber stateSub = nh.subscribe<can_driver::MotorState>(
+        pnh.resolveName("motor_states"), 1,
+        [&stateMutex, &latestState, &sawSharedState](const can_driver::MotorState::ConstPtr &msg) {
+            std::lock_guard<std::mutex> lock(stateMutex);
+            latestState = *msg;
+            sawSharedState =
+                msg->mode == can_driver::MotorState::MODE_POSITION && !msg->enabled && msg->fault;
+        });
+
+    ros::AsyncSpinner spinner(1);
+    spinner.start();
+
+    const auto initResult = hw.operationalCoordinator().RequestInit("fake0", false);
+    ASSERT_TRUE(initResult.ok) << initResult.message;
+
+    const auto axisKey = can_driver::MakeAxisKey("fake0", CanType::PP, static_cast<MotorID>(0x05));
+    fakeDm->sharedState()->mutateAxisFeedback(
+        axisKey,
+        [](can_driver::SharedDriverState::AxisFeedbackState *feedback) {
+            feedback->feedbackSeen = true;
+            feedback->enabled = false;
+            feedback->fault = true;
+            feedback->mode = CanProtocol::MotorMode::Position;
+            feedback->lastRxSteadyNs = can_driver::SharedDriverSteadyNowNs();
+            feedback->lastValidStateSteadyNs = feedback->lastRxSteadyNs;
+        });
+
+    for (int i = 0; i < 20 && !sawSharedState; ++i) {
+        ros::Duration(0.02).sleep();
+    }
+
+    ASSERT_TRUE(sawSharedState);
+    EXPECT_EQ(latestState.mode, can_driver::MotorState::MODE_POSITION);
+    EXPECT_FALSE(latestState.enabled);
+    EXPECT_TRUE(latestState.fault);
+
+    spinner.stop();
+}
+
 TEST_F(CanDriverHWSmokeTest, InitFailureRollsBackPreparedDevice)
 {
     auto fakeDm = std::make_shared<FakeDeviceManager>();
@@ -1095,6 +1168,56 @@ TEST_F(CanDriverHWSmokeTest, RunningCspJointUsesQuickSetPositionWithPprScale)
     spinner.stop();
 }
 
+TEST_F(CanDriverHWSmokeTest, SetModeServiceUpdatesRuntimeRoutingToVelocity)
+{
+    auto fakeDm = std::make_shared<FakeDeviceManager>();
+    CanDriverHW hw(fakeDm);
+
+    ros::NodeHandle nh;
+    ros::NodeHandle pnh(uniqueNs("can_driver_hw_smoke_set_mode_routing"));
+
+    pnh.setParam("joints", makeSingleCspJoint());
+    pnh.setParam("debug_bypass_ros_control", true);
+    pnh.setParam("motor_state_period_sec", 0.05);
+
+    ASSERT_TRUE(hw.init(nh, pnh));
+    enterRunning(hw);
+
+    ros::AsyncSpinner spinner(1);
+    spinner.start();
+
+    ros::ServiceClient client = nh.serviceClient<can_driver::MotorCommand>(
+        pnh.resolveName("motor_command"));
+    ASSERT_TRUE(client.waitForExistence(ros::Duration(1.0)));
+
+    ros::Publisher velPub = nh.advertise<std_msgs::Float64>(
+        pnh.resolveName("motor/test_arm/cmd_velocity"), 1);
+    for (int i = 0; i < 20 && velPub.getNumSubscribers() == 0; ++i) {
+        ros::Duration(0.01).sleep();
+    }
+
+    can_driver::MotorCommand setModeSrv;
+    setModeSrv.request.motor_id = 0x05u;
+    setModeSrv.request.command = can_driver::MotorCommand::Request::CMD_SET_MODE;
+    setModeSrv.request.value = 1.0;
+    ASSERT_TRUE(client.call(setModeSrv));
+    ASSERT_TRUE(setModeSrv.response.success) << setModeSrv.response.message;
+
+    std_msgs::Float64 msg;
+    msg.data = 1.25;
+    velPub.publish(msg);
+    ros::Duration(0.05).sleep();
+
+    hw.write(ros::Time::now(), ros::Duration(0.01));
+
+    EXPECT_EQ(fakeDm->protocol()->velocityCalls(), 1);
+    EXPECT_EQ(fakeDm->protocol()->lastVelocityMotor(), 0x05u);
+    EXPECT_EQ(fakeDm->protocol()->lastVelocity(), 13038);
+    EXPECT_EQ(fakeDm->protocol()->quickPositionCalls(), 0);
+
+    spinner.stop();
+}
+
 TEST_F(CanDriverHWSmokeTest, ResumeAllowsAlignedCspTargetWithoutCommandChange)
 {
     auto fakeDm = std::make_shared<FakeDeviceManager>();
@@ -1133,6 +1256,7 @@ TEST_F(CanDriverHWSmokeTest, ResumeAllowsAlignedCspTargetWithoutCommandChange)
 TEST_F(CanDriverHWSmokeTest, CspReleaseRequiresSharedStateModeMatchBeforeRunning)
 {
     auto fakeDm = std::make_shared<FakeDeviceManager>(true);
+    fakeDm->setSyncSharedFeedbackFromProtocol(false);
     CanDriverHW hw(fakeDm);
 
     ros::NodeHandle nh;
