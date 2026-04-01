@@ -421,7 +421,8 @@ if(CATKIN_ENABLE_TESTING)
     endif()
   endif()
 
-  catkin_add_gtest(test_can_driver_hw_smoke
+  add_rostest_gtest(test_can_driver_hw_smoke
+    tests/test_can_driver_hw_smoke.test
     tests/test_can_driver_hw_smoke.cpp
   )
   if(TARGET test_can_driver_hw_smoke)
