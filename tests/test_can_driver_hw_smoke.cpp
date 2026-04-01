@@ -1,4 +1,5 @@
 #include <gtest/gtest.h>
+#include <ros/master.h>
 #include <ros/ros.h>
 #include <ros/time.h>
 #include <std_srvs/Trigger.h>
@@ -326,6 +327,11 @@ public:
         std::lock_guard<std::mutex> lock(lifecycleMutex_);
         refreshRateHzCalls_.push_back(hz);
     }
+    void setDeviceRefreshRateHz(const std::string &device, double hz) override
+    {
+        std::lock_guard<std::mutex> lock(lifecycleMutex_);
+        deviceRefreshRateHzCalls_.emplace_back(device, hz);
+    }
     void setPpFastWriteEnabled(bool) override {}
     void setPpDefaultPositionVelocityRaw(int32_t) override {}
     void shutdownDevice(const std::string &device) override
@@ -455,6 +461,12 @@ public:
         return refreshRateHzCalls_;
     }
 
+    std::vector<std::pair<std::string, double>> deviceRefreshRateHzCalls() const
+    {
+        std::lock_guard<std::mutex> lock(lifecycleMutex_);
+        return deviceRefreshRateHzCalls_;
+    }
+
 private:
     std::shared_ptr<FakeProtocol> protocol_;
     std::shared_ptr<std::mutex> mutex_;
@@ -470,6 +482,7 @@ private:
     int initDeviceCalls_{0};
     bool seedFeedbackOnInit_{true};
     std::vector<double> refreshRateHzCalls_;
+    std::vector<std::pair<std::string, double>> deviceRefreshRateHzCalls_;
     std::set<std::string> ensuredDevices_;
     std::set<std::pair<std::string, CanType>> ensuredProtocols_;
     std::set<std::string> initializedDevices_;
@@ -487,6 +500,8 @@ protected:
                       ros::init_options::AnonymousName | ros::init_options::NoSigintHandler);
         }
         ros::Time::init();
+        ASSERT_TRUE(ros::master::check())
+            << "test_can_driver_hw_smoke requires a running ROS master; run it via rostest.";
     }
 
     static XmlRpc::XmlRpcValue makeSingleVelocityJoint()
@@ -583,6 +598,8 @@ TEST_F(CanDriverHWSmokeTest, InitDefersDeviceActivationUntilLifecycleInit)
 
     pnh.setParam("joints", makeSingleVelocityJoint());
     pnh.setParam("motor_state_period_sec", 0.2);
+    pnh.setParam("startup_probe_query_hz", 2.0);
+    pnh.setParam("motor_query_hz", 20.0);
 
     ASSERT_TRUE(hw.init(nh, pnh));
     EXPECT_EQ(fakeDm->ensureTransportCalls(), 0);
@@ -596,6 +613,17 @@ TEST_F(CanDriverHWSmokeTest, InitDefersDeviceActivationUntilLifecycleInit)
     EXPECT_EQ(fakeDm->ensureProtocolCalls(), 0);
     EXPECT_EQ(fakeDm->initDeviceCalls(), 1);
     EXPECT_EQ(fakeDm->deviceCount(), 1u);
+
+    const auto deviceRefreshCalls = fakeDm->deviceRefreshRateHzCalls();
+    ASSERT_GE(deviceRefreshCalls.size(), 2u);
+    EXPECT_EQ(deviceRefreshCalls.front().first, "fake0");
+    EXPECT_DOUBLE_EQ(deviceRefreshCalls.front().second, 2.0);
+    EXPECT_EQ(deviceRefreshCalls.back().first, "fake0");
+    EXPECT_DOUBLE_EQ(deviceRefreshCalls.back().second, 0.0);
+
+    const auto refreshCalls = fakeDm->refreshRateHzCalls();
+    ASSERT_FALSE(refreshCalls.empty());
+    EXPECT_DOUBLE_EQ(refreshCalls.back(), 20.0);
 }
 
 TEST_F(CanDriverHWSmokeTest, InitFailsFastWhenStartupFeedbackNeverArrives)
@@ -620,9 +648,10 @@ TEST_F(CanDriverHWSmokeTest, InitFailsFastWhenStartupFeedbackNeverArrives)
     EXPECT_EQ(fakeDm->shutdownDeviceCalls(), 1);
     EXPECT_EQ(fakeDm->lastShutdownDevice(), "fake0");
 
-    const auto refreshCalls = fakeDm->refreshRateHzCalls();
-    ASSERT_FALSE(refreshCalls.empty());
-    EXPECT_DOUBLE_EQ(refreshCalls.front(), 2.0);
+    const auto deviceRefreshCalls = fakeDm->deviceRefreshRateHzCalls();
+    ASSERT_FALSE(deviceRefreshCalls.empty());
+    EXPECT_EQ(deviceRefreshCalls.front().first, "fake0");
+    EXPECT_DOUBLE_EQ(deviceRefreshCalls.front().second, 2.0);
 }
 
 TEST_F(CanDriverHWSmokeTest, MotorCommandServiceEnable)

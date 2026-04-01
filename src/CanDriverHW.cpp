@@ -201,6 +201,7 @@ bool CanDriverHW::loadRuntimeParams(const ros::NodeHandle &pnh)
 
     deviceManager_->setPpFastWriteEnabled(ppFastWriteEnabled_);
     deviceManager_->setPpDefaultPositionVelocityRaw(ppDefaultPositionVelocityRaw_);
+    deviceManager_->setRefreshRateHz(motorQueryHz_);
 
     if (motorQueryHz_ > 0.0) {
         ROS_INFO("[CanDriverHW] motor_query_hz=%.3f Hz.", motorQueryHz_);
@@ -831,26 +832,33 @@ can_driver::OperationalCoordinator::Result CanDriverHW::initializeLifecycleDevic
         (motorQueryHz_ > 0.0)
             ? std::min(startupProbeQueryHz_, motorQueryHz_)
             : startupProbeQueryHz_;
-    deviceManager_->setRefreshRateHz(startupQueryHz);
+    const auto restoreSteadyRefresh = [this, &device]() {
+        deviceManager_->setDeviceRefreshRateHz(device, 0.0);
+    };
+    deviceManager_->setDeviceRefreshRateHz(device, startupQueryHz);
 
     const auto prepareResult = lifecycleDriverOps_.prepareDevice(device, loopback);
     if (!prepareResult.ok) {
+        restoreSteadyRefresh();
         return prepareResult;
     }
 
     if (!syncStartupPositionAndCommands(device)) {
+        restoreSteadyRefresh();
         return rollbackPreparedDevice(
             {false, "Failed to synchronize startup position on " + device});
     }
     if (!applyInitialModes(device)) {
+        restoreSteadyRefresh();
         return rollbackPreparedDevice({false, "Failed to apply initial modes on " + device});
     }
 
     const auto enableResult = lifecycleDriverOps_.enableDevice(device);
     if (!enableResult.ok) {
+        restoreSteadyRefresh();
         return rollbackPreparedDevice(enableResult);
     }
-    deviceManager_->setRefreshRateHz(motorQueryHz_);
+    restoreSteadyRefresh();
     active_.store(true, std::memory_order_release);
     stateTimer_.start();
     return {true, "initialized (armed)"};

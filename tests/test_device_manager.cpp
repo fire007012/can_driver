@@ -40,6 +40,19 @@ public:
     {
         return dm.deviceRefreshRuntimes_.size();
     }
+
+    static double effectiveRefreshRateHz(const DeviceManager &dm, const std::string &device)
+    {
+        return dm.effectiveRefreshRateHzLocked(device);
+    }
+};
+
+class EyouCanTestAccessor {
+public:
+    static double refreshRateHz(const EyouCan &protocol)
+    {
+        return protocol.refreshRateHz_.load(std::memory_order_relaxed);
+    }
 };
 
 namespace {
@@ -292,4 +305,37 @@ TEST_F(RosTimeFixture, IsDeviceReadyRecoversAfterRxNewerThanLinkDown)
     EXPECT_EQ(health.txLinkUnavailable, 1u);
     EXPECT_EQ(health.lastTxLinkUnavailableSteadyNs, 100);
     EXPECT_EQ(health.lastRxSteadyNs, 200);
+}
+
+TEST_F(RosTimeFixture, DeviceRefreshOverrideDoesNotLeakAcrossDevices)
+{
+    DeviceManager dm;
+    auto fake0 = std::make_shared<SocketCanController>();
+    auto fake1 = std::make_shared<SocketCanController>();
+
+    DeviceManagerTestAccessor::injectTransport(dm, "fake0", fake0);
+    DeviceManagerTestAccessor::injectTransport(dm, "fake1", fake1);
+
+    dm.setRefreshRateHz(20.0);
+    dm.setDeviceRefreshRateHz("fake0", 5.0);
+
+    ASSERT_TRUE(dm.ensureProtocol("fake0", CanType::PP));
+    ASSERT_TRUE(dm.ensureProtocol("fake1", CanType::PP));
+
+    auto fake0Protocol = std::dynamic_pointer_cast<EyouCan>(dm.getProtocol("fake0", CanType::PP));
+    auto fake1Protocol = std::dynamic_pointer_cast<EyouCan>(dm.getProtocol("fake1", CanType::PP));
+    ASSERT_NE(fake0Protocol, nullptr);
+    ASSERT_NE(fake1Protocol, nullptr);
+    EXPECT_DOUBLE_EQ(EyouCanTestAccessor::refreshRateHz(*fake0Protocol), 5.0);
+    EXPECT_DOUBLE_EQ(EyouCanTestAccessor::refreshRateHz(*fake1Protocol), 20.0);
+
+    dm.setRefreshRateHz(50.0);
+    EXPECT_DOUBLE_EQ(DeviceManagerTestAccessor::effectiveRefreshRateHz(dm, "fake0"), 5.0);
+    EXPECT_DOUBLE_EQ(DeviceManagerTestAccessor::effectiveRefreshRateHz(dm, "fake1"), 50.0);
+    EXPECT_DOUBLE_EQ(EyouCanTestAccessor::refreshRateHz(*fake0Protocol), 5.0);
+    EXPECT_DOUBLE_EQ(EyouCanTestAccessor::refreshRateHz(*fake1Protocol), 50.0);
+
+    dm.setDeviceRefreshRateHz("fake0", 0.0);
+    EXPECT_DOUBLE_EQ(DeviceManagerTestAccessor::effectiveRefreshRateHz(dm, "fake0"), 50.0);
+    EXPECT_DOUBLE_EQ(EyouCanTestAccessor::refreshRateHz(*fake0Protocol), 50.0);
 }

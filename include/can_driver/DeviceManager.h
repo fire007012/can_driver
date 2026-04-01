@@ -45,6 +45,8 @@ public:
                       const std::vector<MotorID> &ids) override;
     /// 设置所有协议实例的状态轮询频率（Hz）；<=0 恢复协议默认策略。
     void setRefreshRateHz(double hz) override;
+    /// 设置指定 device 的状态轮询频率（Hz）；<=0 回退到全局默认策略。
+    void setDeviceRefreshRateHz(const std::string &device, double hz) override;
     /// 设置 PP 协议是否使用快写命令（CMD=0x05）。
     void setPpFastWriteEnabled(bool enabled) override;
     /// 设置 PP 位置/CSP 命令默认预配置速度（0x09，协议原始单位）。
@@ -94,6 +96,9 @@ private:
     void stopAllDeviceRefreshWorkersLocked();
     void resetDeviceRuntimeLocked(const std::string &device);
     void shutdownDeviceLocked(const std::string &device);
+    double effectiveRefreshRateHzLocked(const std::string &device) const;
+    void applyRefreshRateLocked(const std::string &device, double hz);
+    static double normalizeRefreshRateHz(double hz);
 
     // 读多写少：读取协议/transport 时使用 shared_lock，创建/销毁时 unique_lock。
     mutable std::shared_mutex mutex_;
@@ -108,6 +113,7 @@ private:
     bool ppFastWriteEnabled_{false};
     int32_t ppDefaultPositionVelocityRaw_{EyouCan::kDefaultPositionVelocityRaw};
     double refreshRateHz_{0.0};
+    std::unordered_map<std::string, double> deviceRefreshRateOverrides_;
     // 每个设备一把命令互斥锁，避免多个控制线程并发下发命令时互相打断。
     std::map<std::string, std::shared_ptr<std::mutex>> deviceCmdMutexes_;
 };

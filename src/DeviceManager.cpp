@@ -4,6 +4,7 @@
 
 #include <algorithm>
 #include <chrono>
+#include <cmath>
 
 #include <ros/ros.h>
 
@@ -249,6 +250,44 @@ void DeviceManager::startDeviceRefreshWorkerLocked(const std::string &device)
     runtime->worker->notify();
 }
 
+double DeviceManager::normalizeRefreshRateHz(double hz)
+{
+    return (std::isfinite(hz) && hz > 0.0) ? hz : 0.0;
+}
+
+double DeviceManager::effectiveRefreshRateHzLocked(const std::string &device) const
+{
+    const auto overrideIt = deviceRefreshRateOverrides_.find(device);
+    if (overrideIt != deviceRefreshRateOverrides_.end()) {
+        return overrideIt->second;
+    }
+    return refreshRateHz_;
+}
+
+void DeviceManager::applyRefreshRateLocked(const std::string &device, double hz)
+{
+    if (const auto mtIt = mtProtocols_.find(device); mtIt != mtProtocols_.end() && mtIt->second) {
+        mtIt->second->setRefreshRateHz(hz);
+    }
+    if (const auto ppIt = eyouProtocols_.find(device);
+        ppIt != eyouProtocols_.end() && ppIt->second) {
+        ppIt->second->setRefreshRateHz(hz);
+    }
+    const auto runtimeIt = deviceRefreshRuntimes_.find(device);
+    if (runtimeIt == deviceRefreshRuntimes_.end() || !runtimeIt->second) {
+        return;
+    }
+
+    {
+        std::lock_guard<std::mutex> scheduleLock(runtimeIt->second->scheduleMutex);
+        runtimeIt->second->nextMtTick = std::chrono::steady_clock::time_point {};
+        runtimeIt->second->nextPpTick = std::chrono::steady_clock::time_point {};
+    }
+    if (runtimeIt->second->worker) {
+        runtimeIt->second->worker->notify();
+    }
+}
+
 void DeviceManager::stopDeviceRefreshWorkerLocked(const std::string &device)
 {
     const auto it = deviceRefreshRuntimes_.find(device);
@@ -368,14 +407,14 @@ bool DeviceManager::ensureProtocol(const std::string &device, CanType type)
     if (type == CanType::MT) {
         if (mtProtocols_.find(device) == mtProtocols_.end()) {
             auto mt = std::make_shared<MtCan>(transport, txDispatcher, sharedState_, device);
-            mt->setRefreshRateHz(refreshRateHz_);
+            mt->setRefreshRateHz(effectiveRefreshRateHzLocked(device));
             mtProtocols_[device] = std::move(mt);
         }
     } else {
         if (eyouProtocols_.find(device) == eyouProtocols_.end()) {
             auto eyou =
                 std::make_shared<EyouCan>(transport, txDispatcher, sharedState_, device);
-            eyou->setRefreshRateHz(refreshRateHz_);
+            eyou->setRefreshRateHz(effectiveRefreshRateHzLocked(device));
             eyou->setFastWriteEnabled(ppFastWriteEnabled_);
             eyou->setDefaultPositionVelocityRaw(ppDefaultPositionVelocityRaw_);
             eyouProtocols_[device] = std::move(eyou);
@@ -451,13 +490,13 @@ bool DeviceManager::initDevice(const std::string &device,
     if (!mtIds.empty() && mtProtocols_.find(device) == mtProtocols_.end()) {
         auto mt = std::make_shared<MtCan>(
             transportIt->second, txDispatchers_[device], sharedState_, device);
-        mt->setRefreshRateHz(refreshRateHz_);
+        mt->setRefreshRateHz(effectiveRefreshRateHzLocked(device));
         mtProtocols_[device] = std::move(mt);
     }
     if (!ppIds.empty() && eyouProtocols_.find(device) == eyouProtocols_.end()) {
         auto eyou = std::make_shared<EyouCan>(
             transportIt->second, txDispatchers_[device], sharedState_, device);
-        eyou->setRefreshRateHz(refreshRateHz_);
+        eyou->setRefreshRateHz(effectiveRefreshRateHzLocked(device));
         eyou->setFastWriteEnabled(ppFastWriteEnabled_);
         eyou->setDefaultPositionVelocityRaw(ppDefaultPositionVelocityRaw_);
         eyouProtocols_[device] = std::move(eyou);
@@ -560,29 +599,26 @@ void DeviceManager::startRefresh(const std::string &device,
 void DeviceManager::setRefreshRateHz(double hz)
 {
     std::unique_lock<std::shared_mutex> lock(mutex_);
-    refreshRateHz_ = hz;
-    for (auto &kv : mtProtocols_) {
-        if (kv.second) {
-            kv.second->setRefreshRateHz(hz);
-        }
+    refreshRateHz_ = normalizeRefreshRateHz(hz);
+    for (const auto &kv : deviceCmdMutexes_) {
+        applyRefreshRateLocked(kv.first, effectiveRefreshRateHzLocked(kv.first));
     }
-    for (auto &kv : eyouProtocols_) {
-        if (kv.second) {
-            kv.second->setRefreshRateHz(hz);
-        }
+}
+
+void DeviceManager::setDeviceRefreshRateHz(const std::string &device, double hz)
+{
+    std::unique_lock<std::shared_mutex> lock(mutex_);
+    const double normalizedHz = normalizeRefreshRateHz(hz);
+    if (normalizedHz > 0.0) {
+        deviceRefreshRateOverrides_[device] = normalizedHz;
+    } else {
+        deviceRefreshRateOverrides_.erase(device);
     }
-    for (auto &kv : deviceRefreshRuntimes_) {
-        if (kv.second) {
-            {
-                std::lock_guard<std::mutex> scheduleLock(kv.second->scheduleMutex);
-                kv.second->nextMtTick = std::chrono::steady_clock::time_point {};
-                kv.second->nextPpTick = std::chrono::steady_clock::time_point {};
-            }
-            if (kv.second->worker) {
-                kv.second->worker->notify();
-            }
-        }
+
+    if (deviceCmdMutexes_.find(device) == deviceCmdMutexes_.end()) {
+        return;
     }
+    applyRefreshRateLocked(device, effectiveRefreshRateHzLocked(device));
 }
 
 void DeviceManager::setPpFastWriteEnabled(bool enabled)

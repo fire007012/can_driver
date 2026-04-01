@@ -174,6 +174,7 @@ public:
 
     void startRefresh(const std::string &, CanType, const std::vector<MotorID> &) override {}
     void setRefreshRateHz(double) override {}
+    void setDeviceRefreshRateHz(const std::string &, double) override {}
     void setPpFastWriteEnabled(bool) override {}
     void setPpDefaultPositionVelocityRaw(int32_t) override {}
     void shutdownDevice(const std::string &device) override
