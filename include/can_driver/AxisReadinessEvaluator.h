@@ -47,50 +47,16 @@ public:
                            const SharedDriverState::AxisCommandState *command,
                            AxisIntent intent,
                            const SharedDriverState::DeviceHealthState *deviceHealth,
-                           std::int64_t nowNs = SharedDriverSteadyNowNs())
+                           std::int64_t nowNs = SharedDriverSteadyNowNs()) const
     {
-        AxisReadiness readiness =
-            EvaluateBase(feedback, command, intent, deviceHealth, nowNs);
-        const bool healthyRecoverSample = readiness.axisReadyForEnable;
-        if (intent == AxisIntent::Recover) {
-            if (healthyRecoverSample) {
-                if (feedback.lastRxSteadyNs != lastRecoverSampleNs_) {
-                    lastRecoverSampleNs_ = feedback.lastRxSteadyNs;
-                    if (lastReadiness_.intent == AxisIntent::Recover &&
-                        lastReadiness_.axisReadyForEnable) {
-                        ++recoverHealthyCycles_;
-                    } else {
-                        recoverHealthyCycles_ = 1;
-                    }
-                } else {
-                    recoverHealthyCycles_ = std::max<std::uint32_t>(recoverHealthyCycles_, 1u);
-                }
-                if (recoverHealthyCycles_ >= config_.recoverConfirmCycles) {
-                    readiness.recoverConfirmed = true;
-                }
-            } else {
-                recoverHealthyCycles_ = 0;
-                lastRecoverSampleNs_ = 0;
-                readiness.recoverConfirmed = false;
-            }
-        } else {
-            recoverHealthyCycles_ = 0;
-            lastRecoverSampleNs_ = 0;
-            readiness.recoverConfirmed = readiness.axisReadyForEnable;
-        }
-
-        lastReadiness_ = readiness;
+        AxisReadiness readiness = EvaluateBase(feedback, command, intent, deviceHealth, nowNs);
+        readiness.recoverConfirmed = intent != AxisIntent::Recover && readiness.axisReadyForEnable;
         return readiness;
     }
 
-    const AxisReadiness &lastReadiness() const
+    std::uint32_t recoverConfirmCycles() const
     {
-        return lastReadiness_;
-    }
-
-    const AxisReadiness &lastStatus() const
-    {
-        return lastReadiness_;
+        return std::max<std::uint32_t>(1u, config_.recoverConfirmCycles);
     }
 
     static bool ReadyForEnable(const AxisReadiness &readiness)
@@ -194,9 +160,6 @@ private:
     }
 
     Config config_{};
-    AxisReadiness lastReadiness_{};
-    std::uint32_t recoverHealthyCycles_{0};
-    std::int64_t lastRecoverSampleNs_{0};
 };
 
 } // namespace can_driver

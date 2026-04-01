@@ -52,7 +52,7 @@ void LifecycleDriverOps::configure(std::shared_ptr<IDeviceManager> deviceManager
         motorActionExecutor_ = motorActionExecutor;
     }
     std::lock_guard<std::mutex> readinessLock(axisReadinessMutex_);
-    axisReadinessEvaluators_.clear();
+    axisRecoverTrackers_.clear();
 }
 
 void LifecycleDriverOps::setTargets(std::vector<MotorActionExecutor::Target> targets)
@@ -62,7 +62,7 @@ void LifecycleDriverOps::setTargets(std::vector<MotorActionExecutor::Target> tar
         targets_ = std::move(targets);
     }
     std::lock_guard<std::mutex> readinessLock(axisReadinessMutex_);
-    axisReadinessEvaluators_.clear();
+    axisRecoverTrackers_.clear();
 }
 
 std::vector<MotorActionExecutor::Target> LifecycleDriverOps::targetsSnapshot() const
@@ -160,8 +160,35 @@ AxisReadiness LifecycleDriverOps::evaluateAxisReadiness(
     const SharedDriverState::DeviceHealthState *deviceHealth) const
 {
     std::lock_guard<std::mutex> readinessLock(axisReadinessMutex_);
-    return axisReadinessEvaluators_[axisReadinessMapKey(axisKey)].Evaluate(
-        feedback, command, intent, deviceHealth);
+    AxisReadiness readiness =
+        axisReadinessEvaluator_.Evaluate(feedback, command, intent, deviceHealth);
+
+    const auto mapKey = axisReadinessMapKey(axisKey);
+    if (intent != AxisIntent::Recover) {
+        axisRecoverTrackers_.erase(mapKey);
+        readiness.recoverConfirmed = readiness.axisReadyForEnable;
+        return readiness;
+    }
+
+    if (!readiness.axisReadyForEnable) {
+        axisRecoverTrackers_.erase(mapKey);
+        readiness.recoverConfirmed = false;
+        return readiness;
+    }
+
+    auto &tracker = axisRecoverTrackers_[mapKey];
+    if (feedback.lastRxSteadyNs > 0 && feedback.lastRxSteadyNs != tracker.lastSampleNs) {
+        tracker.lastSampleNs = feedback.lastRxSteadyNs;
+        tracker.healthyCycles = std::min<std::uint32_t>(
+            static_cast<std::uint32_t>(tracker.healthyCycles + 1),
+            axisReadinessEvaluator_.recoverConfirmCycles());
+    } else {
+        tracker.healthyCycles = std::max<std::uint32_t>(tracker.healthyCycles, 1u);
+    }
+
+    readiness.recoverConfirmed =
+        tracker.healthyCycles >= axisReadinessEvaluator_.recoverConfirmCycles();
+    return readiness;
 }
 
 bool LifecycleDriverOps::queryMotorFault(const MotorActionExecutor::Target &target,

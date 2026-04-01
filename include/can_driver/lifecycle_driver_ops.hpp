@@ -10,6 +10,7 @@
 #include <memory>
 #include <mutex>
 #include <string>
+#include <cstdint>
 #include <vector>
 
 namespace can_driver {
@@ -40,6 +41,11 @@ public:
     bool motionHealthy(std::string *detail) const;
 
 private:
+    struct AxisRecoverTracker {
+        std::uint32_t healthyCycles{0};
+        std::int64_t lastSampleNs{0};
+    };
+
     std::vector<MotorActionExecutor::Target> targetsSnapshot() const;
     Result makeMotorActionFailureResult(MotorActionExecutor::Status status,
                                         const char *rejectedMessage,
@@ -66,7 +72,8 @@ private:
     const MotorActionExecutor *motorActionExecutor_{nullptr};
     mutable std::mutex targetsMutex_;
     mutable std::mutex axisReadinessMutex_;
-    mutable std::map<std::string, AxisReadinessEvaluator> axisReadinessEvaluators_;
+    AxisReadinessEvaluator axisReadinessEvaluator_{};
+    mutable std::map<std::string, AxisRecoverTracker> axisRecoverTrackers_;
     std::vector<MotorActionExecutor::Target> targets_;
 };
 

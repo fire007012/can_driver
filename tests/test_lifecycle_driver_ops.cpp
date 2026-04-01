@@ -175,6 +175,7 @@ public:
     void startRefresh(const std::string &, CanType, const std::vector<MotorID> &) override {}
     void setRefreshRateHz(double) override {}
     void setPpFastWriteEnabled(bool) override {}
+    void setPpDefaultPositionVelocityRaw(int32_t) override {}
     void shutdownDevice(const std::string &device) override
     {
         ++shutdownDeviceCalls_;
@@ -321,7 +322,7 @@ TEST(AxisReadinessEvaluatorTest, PpAxisReportsDegradedAndFaultFactsOnUnhealthyPa
               "Fault still active.");
 }
 
-TEST(AxisReadinessEvaluatorTest, RecoveringRequiresTwoFreshHealthyFeedbackSamples)
+TEST(AxisReadinessEvaluatorTest, RecoverIntentRemainsPredicateOnlyWithoutLifecycleTracking)
 {
     const auto nowNs = can_driver::SharedDriverSteadyNowNs();
     const auto key = can_driver::MakeAxisKey("fake1", CanType::PP, static_cast<MotorID>(0x201));
@@ -356,16 +357,16 @@ TEST(AxisReadinessEvaluatorTest, RecoveringRequiresTwoFreshHealthyFeedbackSample
 
     feedback.lastRxSteadyNs = nowNs + 20000000LL;
     feedback.fault = false;
-    const auto recovered = evaluator.Evaluate(
+    const auto nextRecovering = evaluator.Evaluate(
         feedback,
         &command,
         can_driver::AxisIntent::Recover,
         &deviceHealth,
         feedback.lastRxSteadyNs);
-    EXPECT_TRUE(recovered.axisReadyForEnable);
-    EXPECT_TRUE(can_driver::AxisReadinessEvaluator::RecoverConfirmed(recovered));
-    EXPECT_TRUE(can_driver::AxisReadinessEvaluator::ReadyForEnable(recovered));
-    EXPECT_FALSE(can_driver::AxisReadinessEvaluator::RecoverPending(recovered));
+    EXPECT_TRUE(nextRecovering.axisReadyForEnable);
+    EXPECT_FALSE(can_driver::AxisReadinessEvaluator::RecoverConfirmed(nextRecovering));
+    EXPECT_TRUE(can_driver::AxisReadinessEvaluator::ReadyForEnable(nextRecovering));
+    EXPECT_TRUE(can_driver::AxisReadinessEvaluator::RecoverPending(nextRecovering));
 }
 
 TEST(AxisReadinessEvaluatorTest, EnabledAxisStillRequiresSelectedModeToMatchBeforeRelease)
