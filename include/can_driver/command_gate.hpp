@@ -17,6 +17,8 @@ public:
         double directVelCmd{0.0};
         bool hasDirectPosCmd{false};
         bool hasDirectVelCmd{false};
+        bool positionTargetNearActual{false};
+        bool velocityTargetNearActual{false};
     };
 
     enum class DeviceEvent {

@@ -754,6 +754,18 @@ std::vector<CommandGate::Snapshot> CanDriverHW::captureCommandSnapshots() const
         snapshot.directVelCmd = jc.directVelCmd;
         snapshot.hasDirectPosCmd = jc.hasDirectPosCmd;
         snapshot.hasDirectVelCmd = jc.hasDirectVelCmd;
+
+        const double positionTarget = jc.hasDirectPosCmd ? jc.directPosCmd : jc.posCmd;
+        const double velocityTarget = jc.hasDirectVelCmd ? jc.directVelCmd : jc.velCmd;
+        const double positionTolerance = std::max(jc.positionScale, 1e-9);
+        const double velocityTolerance = std::max(jc.velocityScale, 1e-9);
+
+        snapshot.positionTargetNearActual =
+            std::isfinite(positionTarget) && std::isfinite(jc.pos) &&
+            std::fabs(positionTarget - jc.pos) <= positionTolerance;
+        snapshot.velocityTargetNearActual =
+            std::isfinite(velocityTarget) && std::isfinite(jc.vel) &&
+            std::fabs(velocityTarget - jc.vel) <= velocityTolerance;
     }
     return snapshots;
 }

@@ -2,6 +2,42 @@
 
 #include <cmath>
 
+namespace {
+
+bool snapshotCommandChanged(const CommandGate::Snapshot &current,
+                            const CommandGate::Snapshot &baseline)
+{
+    constexpr double kEps = 1e-12;
+
+    if (current.controlMode == "velocity") {
+        if (current.hasDirectVelCmd != baseline.hasDirectVelCmd) {
+            return true;
+        }
+        if (current.hasDirectVelCmd &&
+            std::fabs(current.directVelCmd - baseline.directVelCmd) > kEps) {
+            return true;
+        }
+        return std::fabs(current.velCmd - baseline.velCmd) > kEps;
+    }
+
+    if (current.hasDirectPosCmd != baseline.hasDirectPosCmd) {
+        return true;
+    }
+    if (current.hasDirectPosCmd &&
+        std::fabs(current.directPosCmd - baseline.directPosCmd) > kEps) {
+        return true;
+    }
+    return std::fabs(current.posCmd - baseline.posCmd) > kEps;
+}
+
+bool snapshotTargetAlreadyAligned(const CommandGate::Snapshot &snapshot)
+{
+    return (snapshot.controlMode == "velocity") ? snapshot.velocityTargetNearActual
+                                                : snapshot.positionTargetNearActual;
+}
+
+} // namespace
+
 void CommandGate::configure(std::function<std::vector<Snapshot>()> snapshotProvider,
                             std::function<void()> holdCallback)
 {
@@ -73,39 +109,14 @@ bool CommandGate::consumeFreshCommandLatchIfSatisfied()
         return true;
     }
 
-    constexpr double kEps = 1e-12;
     bool satisfied = false;
     for (std::size_t i = 0; i < snapshots.size(); ++i) {
         const auto &current = snapshots[i];
         const auto &baseline = baselines_[i];
-        if (current.controlMode == "velocity") {
-            if (current.hasDirectVelCmd != baseline.hasDirectVelCmd) {
-                satisfied = true;
-                break;
-            }
-            if (current.hasDirectVelCmd &&
-                std::fabs(current.directVelCmd - baseline.directVelCmd) > kEps) {
-                satisfied = true;
-                break;
-            }
-            if (std::fabs(current.velCmd - baseline.velCmd) > kEps) {
-                satisfied = true;
-                break;
-            }
-        } else {
-            if (current.hasDirectPosCmd != baseline.hasDirectPosCmd) {
-                satisfied = true;
-                break;
-            }
-            if (current.hasDirectPosCmd &&
-                std::fabs(current.directPosCmd - baseline.directPosCmd) > kEps) {
-                satisfied = true;
-                break;
-            }
-            if (std::fabs(current.posCmd - baseline.posCmd) > kEps) {
-                satisfied = true;
-                break;
-            }
+        if (snapshotCommandChanged(current, baseline) ||
+            snapshotTargetAlreadyAligned(current)) {
+            satisfied = true;
+            break;
         }
     }
 
