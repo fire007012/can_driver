@@ -147,6 +147,45 @@ TEST(RefreshSchedulerTest, PpPriorityQueryDetectionCoversRecoverAndModeMismatch)
     EXPECT_TRUE(can_driver::NeedsPpPriorityLifecycleQueries(mismatchSnapshot));
 }
 
+TEST(RefreshSchedulerTest, PpPressureSchedulingStateStaysIndependentPerAxis)
+{
+    can_driver::PpAxisRefreshSnapshot snapshot;
+    snapshot.feedbackSeen = true;
+    snapshot.enabled = true;
+    snapshot.desiredModeValid = true;
+    snapshot.feedbackMode = CanProtocol::MotorMode::Position;
+    snapshot.desiredMode = CanProtocol::MotorMode::Position;
+    snapshot.intent = can_driver::AxisIntent::Run;
+
+    can_driver::PpAxisRefreshScheduleState axisA;
+    can_driver::PpAxisRefreshScheduleState axisB;
+    const auto t0 = steady_tp {} + std::chrono::milliseconds(1);
+
+    const auto planA0 = can_driver::BuildPpRefreshPlan(t0, true, snapshot, &axisA);
+    const auto planB0 = can_driver::BuildPpRefreshPlan(t0, true, snapshot, &axisB);
+    noteIssued(t0, &axisA, planA0);
+    noteIssued(t0, &axisB, planB0);
+
+    const auto planA1 =
+        can_driver::BuildPpRefreshPlan(t0 + std::chrono::milliseconds(50), true, snapshot, &axisA);
+    noteIssued(t0 + std::chrono::milliseconds(50), &axisA, planA1);
+
+    const auto planA2 =
+        can_driver::BuildPpRefreshPlan(t0 + std::chrono::milliseconds(100), true, snapshot, &axisA);
+    const auto planB2 =
+        can_driver::BuildPpRefreshPlan(t0 + std::chrono::milliseconds(100), true, snapshot, &axisB);
+
+    EXPECT_TRUE(planContains(planA2, can_driver::PpRefreshQuery::Mode));
+    EXPECT_TRUE(planContains(planA2, can_driver::PpRefreshQuery::Enable));
+    EXPECT_FALSE(planContains(planA2, can_driver::PpRefreshQuery::Fault));
+    EXPECT_FALSE(planContains(planA2, can_driver::PpRefreshQuery::Current));
+
+    EXPECT_TRUE(planContains(planB2, can_driver::PpRefreshQuery::Fault));
+    EXPECT_TRUE(planContains(planB2, can_driver::PpRefreshQuery::Current));
+    EXPECT_FALSE(planContains(planB2, can_driver::PpRefreshQuery::Mode));
+    EXPECT_FALSE(planContains(planB2, can_driver::PpRefreshQuery::Enable));
+}
+
 TEST(RefreshSchedulerTest, MtPressurePlanKeepsErrorSamplingWhileAlternatingFeedback)
 {
     const auto plan0 = can_driver::BuildMtRefreshPlan(0, 0, true);
