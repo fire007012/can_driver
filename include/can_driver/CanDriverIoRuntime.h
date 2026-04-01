@@ -179,7 +179,8 @@ public:
                 }
                 joint.requireCommandAlignment = false;
             }
-            if (joint.controlMode == "position" && config.maxPositionStepRad > 0.0 &&
+            if (can_driver::controlModeUsesPositionSemantics(joint.controlMode) &&
+                config.maxPositionStepRad > 0.0 &&
                 std::isfinite(cmdValue) && std::isfinite(joint.pos)) {
                 const double delta = cmdValue - joint.pos;
                 if (std::fabs(delta) > config.maxPositionStepRad) {
@@ -513,12 +514,14 @@ private:
         if (!joint.hasLimits || !std::isfinite(cmdValue)) {
             return cmdValue;
         }
-        if (joint.controlMode == "velocity" && joint.limits.has_velocity_limits) {
+        if (can_driver::controlModeUsesVelocitySemantics(joint.controlMode) &&
+            joint.limits.has_velocity_limits) {
             return std::clamp(cmdValue,
                               -joint.limits.max_velocity,
                               joint.limits.max_velocity);
         }
-        if (joint.controlMode == "position" && joint.limits.has_position_limits) {
+        if (can_driver::controlModeUsesPositionSemantics(joint.controlMode) &&
+            joint.limits.has_position_limits) {
             return std::clamp(cmdValue,
                               joint.limits.min_position,
                               joint.limits.max_position);

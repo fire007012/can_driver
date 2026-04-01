@@ -483,12 +483,11 @@ bool CanDriverHW::syncStartupPositionAndCommands(const std::string &deviceFilter
                 jc.eff = snapshots[i].eff;
             }
 
-            if (jc.controlMode == "position" || jc.controlMode == "csp") {
+            if (can_driver::controlModeUsesPositionSemantics(jc.controlMode)) {
                 // 上电后将位置命令对齐到当前反馈，避免控制循环首拍跳变。
                 // CSP 模式与 position 模式共用 posCmd，同样需要对齐。
                 jc.posCmd = jc.pos;
-                if (jc.controlMode == "position" &&
-                    jc.hasLimits && jc.limits.has_position_limits) {
+                if (jc.hasLimits && jc.limits.has_position_limits) {
                     if (jc.pos < jc.limits.min_position || jc.pos > jc.limits.max_position) {
                         startupOutOfRange = true;
                         ROS_ERROR("[CanDriverHW] Joint '%s' startup position %.6f rad out of limits [%.6f, %.6f].",
@@ -1236,9 +1235,9 @@ bool CanDriverHW::onSetZeroLimit(can_driver::SetZeroLimit::Request &req,
         res.message = "Motor ID not found.";
         return true;
     }
-    if (target->controlMode != "position") {
+    if (!can_driver::controlModeUsesPositionSemantics(target->controlMode)) {
         res.success = false;
-        res.message = "Only position-control joints support zero/position limits.";
+        res.message = "Only position-semantic joints support zero/position limits.";
         return true;
     }
 

@@ -11,6 +11,7 @@
 #include "can_driver/lifecycle_service_gateway.hpp"
 #include "can_driver/MotorCommand.h"
 #include "can_driver/Recover.h"
+#include "can_driver/SetZeroLimit.h"
 
 #include <atomic>
 #include <cmath>
@@ -559,6 +560,22 @@ protected:
         joints[0]["position_scale"] = 65536;
         joints[0]["velocity_scale"] = 65536;
         return joints;
+    }
+
+    static void setPositionLimits(ros::NodeHandle &pnh,
+                                  const std::string &jointName,
+                                  double minPosition,
+                                  double maxPosition)
+    {
+        const std::string prefix = "joint_limits/" + jointName + "/";
+        pnh.setParam(prefix + "has_position_limits", true);
+        pnh.setParam(prefix + "min_position", minPosition);
+        pnh.setParam(prefix + "max_position", maxPosition);
+    }
+
+    static int32_t rawFromPprRadians(double valueRad)
+    {
+        return static_cast<int32_t>(std::llround(valueRad / (2.0 * M_PI / 65536.0)));
     }
 
     static std::string uniqueNs(const std::string &base)
@@ -1141,7 +1158,7 @@ TEST_F(CanDriverHWSmokeTest, InitCspJointSetsModeAndPublishesRawFeedbackFromPprC
 
     const auto initResult = hw.operationalCoordinator().RequestInit("fake0", false);
     ASSERT_TRUE(initResult.ok) << initResult.message;
-    EXPECT_EQ(fakeDm->protocol()->setModeCalls(), 2);
+    EXPECT_EQ(fakeDm->protocol()->setModeCalls(), 1);
     EXPECT_EQ(fakeDm->protocol()->lastModeMotor(), 0x05u);
     EXPECT_EQ(fakeDm->protocol()->lastMode(), CanProtocol::MotorMode::CSP);
 
@@ -1246,6 +1263,28 @@ TEST_F(CanDriverHWSmokeTest, InitFailureRollsBackPreparedDevice)
     EXPECT_EQ(fakeDm->shutdownDeviceCalls(), 1);
 }
 
+TEST_F(CanDriverHWSmokeTest, CspInitRejectsStartupPositionOutsideConfiguredLimits)
+{
+    auto fakeDm = std::make_shared<FakeDeviceManager>();
+    fakeDm->protocol()->setFeedbackPosition(rawFromPprRadians(1.2));
+
+    CanDriverHW hw(fakeDm);
+
+    ros::NodeHandle nh;
+    ros::NodeHandle pnh(uniqueNs("can_driver_hw_smoke_csp_startup_limits"));
+
+    pnh.setParam("joints", makeSingleCspJoint());
+    setPositionLimits(pnh, "test_arm", -1.0, 1.0);
+
+    ASSERT_TRUE(hw.init(nh, pnh));
+
+    auto &coordinator = hw.operationalCoordinator();
+    const auto initResult = coordinator.RequestInit("fake0", false);
+    EXPECT_FALSE(initResult.ok);
+    EXPECT_EQ(coordinator.mode(), can_driver::SystemOpMode::Configured);
+    EXPECT_EQ(fakeDm->protocol()->setModeCalls(), 0);
+}
+
 TEST_F(CanDriverHWSmokeTest, RunningCspJointUsesQuickSetPositionWithPprScale)
 {
     auto fakeDm = std::make_shared<FakeDeviceManager>();
@@ -1285,6 +1324,126 @@ TEST_F(CanDriverHWSmokeTest, RunningCspJointUsesQuickSetPositionWithPprScale)
     EXPECT_EQ(fakeDm->protocol()->positionCalls(), 0);
     EXPECT_EQ(fakeDm->protocol()->lastQuickPositionMotor(), 0x05u);
     EXPECT_EQ(fakeDm->protocol()->lastQuickPosition(), expectedRaw);
+
+    spinner.stop();
+}
+
+TEST_F(CanDriverHWSmokeTest, RunningCspJointClampsCommandToConfiguredPositionLimits)
+{
+    auto fakeDm = std::make_shared<FakeDeviceManager>();
+    CanDriverHW hw(fakeDm);
+
+    ros::NodeHandle nh;
+    ros::NodeHandle pnh(uniqueNs("can_driver_hw_smoke_csp_position_limits"));
+
+    pnh.setParam("joints", makeSingleCspJoint());
+    pnh.setParam("debug_bypass_ros_control", true);
+    pnh.setParam("motor_state_period_sec", 0.05);
+    pnh.setParam("safety_require_enabled_for_motion", false);
+    setPositionLimits(pnh, "test_arm", -0.5, 0.5);
+
+    ASSERT_TRUE(hw.init(nh, pnh));
+    enterRunning(hw);
+
+    ros::AsyncSpinner spinner(1);
+    spinner.start();
+
+    const std::string cmdTopic = pnh.resolveName("motor/test_arm/cmd_position");
+    ros::Publisher pub = nh.advertise<std_msgs::Float64>(cmdTopic, 1);
+
+    for (int i = 0; i < 20 && pub.getNumSubscribers() == 0; ++i) {
+        ros::Duration(0.01).sleep();
+    }
+
+    std_msgs::Float64 msg;
+    msg.data = 1.0;
+    pub.publish(msg);
+    ros::Duration(0.05).sleep();
+
+    hw.write(ros::Time::now(), ros::Duration(0.01));
+
+    EXPECT_EQ(fakeDm->protocol()->quickPositionCalls(), 1);
+    EXPECT_EQ(fakeDm->protocol()->lastQuickPositionMotor(), 0x05u);
+    EXPECT_EQ(fakeDm->protocol()->lastQuickPosition(), rawFromPprRadians(0.5));
+
+    spinner.stop();
+}
+
+TEST_F(CanDriverHWSmokeTest, RunningCspJointAppliesMaxPositionStepLimit)
+{
+    auto fakeDm = std::make_shared<FakeDeviceManager>();
+    CanDriverHW hw(fakeDm);
+
+    ros::NodeHandle nh;
+    ros::NodeHandle pnh(uniqueNs("can_driver_hw_smoke_csp_step_limit"));
+
+    pnh.setParam("joints", makeSingleCspJoint());
+    pnh.setParam("debug_bypass_ros_control", true);
+    pnh.setParam("motor_state_period_sec", 0.05);
+    pnh.setParam("safety_require_enabled_for_motion", false);
+    pnh.setParam("max_position_step_rad", 0.2);
+
+    ASSERT_TRUE(hw.init(nh, pnh));
+    enterRunning(hw);
+
+    ros::AsyncSpinner spinner(1);
+    spinner.start();
+
+    const std::string cmdTopic = pnh.resolveName("motor/test_arm/cmd_position");
+    ros::Publisher pub = nh.advertise<std_msgs::Float64>(cmdTopic, 1);
+
+    for (int i = 0; i < 20 && pub.getNumSubscribers() == 0; ++i) {
+        ros::Duration(0.01).sleep();
+    }
+
+    std_msgs::Float64 msg;
+    msg.data = 1.0;
+    pub.publish(msg);
+    ros::Duration(0.05).sleep();
+
+    hw.write(ros::Time::now(), ros::Duration(0.01));
+
+    EXPECT_EQ(fakeDm->protocol()->quickPositionCalls(), 1);
+    EXPECT_EQ(fakeDm->protocol()->lastQuickPositionMotor(), 0x05u);
+    EXPECT_EQ(fakeDm->protocol()->lastQuickPosition(), rawFromPprRadians(0.2));
+
+    spinner.stop();
+}
+
+TEST_F(CanDriverHWSmokeTest, SetZeroLimitServiceAcceptsCspJoint)
+{
+    auto fakeDm = std::make_shared<FakeDeviceManager>();
+    fakeDm->protocol()->setFeedbackPosition(rawFromPprRadians(0.1));
+    CanDriverHW hw(fakeDm);
+
+    ros::NodeHandle nh;
+    ros::NodeHandle pnh(uniqueNs("can_driver_hw_smoke_csp_zero_limit"));
+
+    pnh.setParam("joints", makeSingleCspJoint());
+
+    ASSERT_TRUE(hw.init(nh, pnh));
+    const auto initResult = hw.operationalCoordinator().RequestInit("fake0", false);
+    ASSERT_TRUE(initResult.ok) << initResult.message;
+
+    ros::AsyncSpinner spinner(1);
+    spinner.start();
+
+    ros::ServiceClient client = nh.serviceClient<can_driver::SetZeroLimit>(
+        pnh.resolveName("set_zero_limit"));
+    ASSERT_TRUE(client.waitForExistence(ros::Duration(1.0)));
+
+    can_driver::SetZeroLimit srv;
+    srv.request.motor_id = 0x05u;
+    srv.request.zero_offset_rad = 0.0;
+    srv.request.min_position_rad = -0.4;
+    srv.request.max_position_rad = 0.4;
+    srv.request.use_urdf_limits = false;
+    srv.request.apply_to_motor = false;
+    ASSERT_TRUE(client.call(srv));
+    ASSERT_TRUE(srv.response.success) << srv.response.message;
+    EXPECT_NEAR(srv.response.current_position_rad, 0.1, 1e-4);
+    EXPECT_DOUBLE_EQ(srv.response.applied_min_rad, -0.4);
+    EXPECT_DOUBLE_EQ(srv.response.applied_max_rad, 0.4);
 
     spinner.stop();
 }

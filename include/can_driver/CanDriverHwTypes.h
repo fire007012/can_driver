@@ -13,6 +13,16 @@
 
 namespace can_driver {
 
+inline bool controlModeUsesVelocitySemantics(const std::string &controlMode)
+{
+    return controlMode == "velocity";
+}
+
+inline bool controlModeUsesPositionSemantics(const std::string &controlMode)
+{
+    return !controlModeUsesVelocitySemantics(controlMode);
+}
+
 struct CanDriverJointConfig {
     std::string name;
     MotorID motorId{MotorID::LeftWheel};
