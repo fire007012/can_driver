@@ -21,10 +21,6 @@ constexpr uint8_t kWriteAck = 0x02;
 constexpr uint8_t kReadResponse = 0x04;
 constexpr uint16_t kEyouIdFrameBase = 0x0000;
 constexpr std::size_t kQueriesPerMotorPerCycle = 6;
-constexpr int64_t kBaseReadTimeoutCycles = 3;
-constexpr int64_t kMaxReadTimeoutCycles = 8;
-constexpr auto kMinReadRequestTimeout = std::chrono::milliseconds(30);
-constexpr auto kMaxReadRequestTimeout = std::chrono::milliseconds(1500);
 
 uint32_t readUInt32BE(const CanTransport::Frame &frame, std::size_t index)
 {
@@ -656,34 +652,13 @@ bool EyouCan::tryIssueReadCommand(uint8_t motorId, uint8_t subCommand)
 
     const auto now = std::chrono::steady_clock::now();
     maybeWarnStaleFeedback(motorId, subCommand, now);
-    const auto timeout = computeReadRequestTimeout();
-    bool delayRetry = false;
     {
         std::lock_guard<std::mutex> lock(pendingReadMutex_);
         auto &request = pendingReadRequests_[pendingReadKey(motorId, subCommand)];
-        if (request.nextEligibleSend != std::chrono::steady_clock::time_point {} &&
-            now < request.nextEligibleSend) {
-            return false;
-        }
         if (request.queued) {
             return false;
         }
-        if (request.inFlight && (now - request.lastSent) < timeout) {
-            return false;
-        }
-        if (request.inFlight) {
-            request.inFlight = false;
-            request.consecutiveTimeouts = std::min<std::size_t>(request.consecutiveTimeouts + 1, 8);
-            request.nextEligibleSend = now + computeTimeoutBackoff(request.consecutiveTimeouts, timeout);
-            delayRetry = true;
-        } else {
-            request.queued = true;
-            request.nextEligibleSend = std::chrono::steady_clock::time_point {};
-        }
-    }
-
-    if (delayRetry) {
-        return false;
+        request.queued = true;
     }
 
     sendReadCommand(motorId, subCommand);
@@ -704,12 +679,13 @@ void EyouCan::onReadDispatchResult(uint8_t motorId,
 
     auto &request = it->second;
     request.queued = false;
-    request.inFlight = false;
     if (attemptedSend && sendResult == CanTransport::SendResult::Ok) {
         request.inFlight = true;
         request.lastSent = eventTime;
         request.missedRefreshWindows =
             std::min<std::size_t>(request.missedRefreshWindows + 1, 1024);
+    } else {
+        request.inFlight = false;
     }
 }
 
@@ -717,27 +693,37 @@ void EyouCan::maybeWarnStaleFeedback(uint8_t motorId,
                                      uint8_t subCommand,
                                      std::chrono::steady_clock::time_point now)
 {
-    (void)now;
-    const auto threshold = feedbackStaleWarnWindowThreshold(subCommand);
-    if (threshold == 0u) {
+    const auto threshold = feedbackStaleWarnThreshold(subCommand);
+    if (threshold <= std::chrono::milliseconds::zero()) {
         return;
     }
 
     bool shouldWarn = false;
     bool hasSeenResponse = false;
+    long long ageMs = 0;
     std::size_t missedWindows = 0;
     std::size_t warnBucket = 0;
     {
         std::lock_guard<std::mutex> lock(pendingReadMutex_);
         auto &request = pendingReadRequests_[pendingReadKey(motorId, subCommand)];
-        if (request.missedRefreshWindows < threshold) {
+        const auto staleSince =
+            (request.lastResponse != std::chrono::steady_clock::time_point {})
+                ? request.lastResponse
+                : request.lastSent;
+        if (staleSince == std::chrono::steady_clock::time_point {} || now < staleSince) {
             return;
         }
-        warnBucket = request.missedRefreshWindows / threshold;
-        if (warnBucket == 0u || warnBucket <= request.warnedMissedRefreshBuckets) {
+        const auto age = std::chrono::duration_cast<std::chrono::milliseconds>(now - staleSince);
+        if (age < threshold) {
             return;
         }
-        request.warnedMissedRefreshBuckets = warnBucket;
+        ageMs = age.count();
+        warnBucket = static_cast<std::size_t>(
+            std::max<long long>(1LL, ageMs / std::max<long long>(1LL, threshold.count())));
+        if (warnBucket <= request.warnedStaleBuckets) {
+            return;
+        }
+        request.warnedStaleBuckets = warnBucket;
         hasSeenResponse = (request.lastResponse != std::chrono::steady_clock::time_point {});
         missedWindows = request.missedRefreshWindows;
         shouldWarn = true;
@@ -750,7 +736,8 @@ void EyouCan::maybeWarnStaleFeedback(uint8_t motorId,
     ROS_WARN_STREAM(
         "[EyouCan] Feedback stale on motor " << static_cast<unsigned>(motorId)
         << " subcmd=0x" << std::hex << static_cast<unsigned>(subCommand) << std::dec
-        << ", missed " << missedWindows << " refresh windows without a new response"
+        << ", no new response for " << ageMs << " ms"
+        << " (issued_refresh_windows=" << missedWindows << ")"
         << (hasSeenResponse ? "" : " (no response received yet)"));
 }
 
@@ -763,10 +750,8 @@ void EyouCan::markReadResponseReceived(uint8_t motorId, uint8_t subCommand)
             it->second.lastResponse = std::chrono::steady_clock::now();
             it->second.queued = false;
             it->second.inFlight = false;
-            it->second.nextEligibleSend = std::chrono::steady_clock::time_point {};
-            it->second.consecutiveTimeouts = 0;
             it->second.missedRefreshWindows = 0;
-            it->second.warnedMissedRefreshBuckets = 0;
+            it->second.warnedStaleBuckets = 0;
         }
     }
 }
@@ -879,30 +864,13 @@ std::size_t EyouCan::feedbackStaleWarnWindowThreshold(uint8_t subCommand)
     }
 }
 
-std::chrono::milliseconds EyouCan::computeReadRequestTimeout() const
+std::chrono::milliseconds EyouCan::feedbackStaleWarnThreshold(uint8_t subCommand)
 {
-    std::size_t motorCount = 1;
-    {
-        std::lock_guard<std::mutex> lock(refreshMutex);
-        motorCount = std::max<std::size_t>(1, refreshMotorIds.size());
+    const auto windows = feedbackStaleWarnWindowThreshold(subCommand);
+    if (windows == 0u) {
+        return std::chrono::milliseconds::zero();
     }
-    const auto refreshSleep = computeRefreshSleep(motorCount);
-    // 读超时需要覆盖“当前刷新周期 + 多轴串行轮转 + 调度抖动”。
-    // 慢速启动探测（例如 5Hz）下，固定 200ms 会把真实回包误判成超时。
-    const auto timeoutCycles = std::min<int64_t>(
-        kMaxReadTimeoutCycles,
-        kBaseReadTimeoutCycles + static_cast<int64_t>(motorCount));
-    const auto timeout = refreshSleep * timeoutCycles;
-    return std::max(kMinReadRequestTimeout, std::min(timeout, kMaxReadRequestTimeout));
-}
-
-std::chrono::milliseconds EyouCan::computeTimeoutBackoff(std::size_t consecutiveTimeouts,
-                                                         std::chrono::milliseconds baseTimeout)
-{
-    const std::size_t cappedTimeouts = std::min<std::size_t>(consecutiveTimeouts, 4);
-    const auto multiplier = static_cast<int64_t>(1ULL << cappedTimeouts);
-    const auto backoff = baseTimeout * multiplier;
-    return std::min(std::chrono::milliseconds(500), std::max(baseTimeout, backoff));
+    return std::chrono::milliseconds(static_cast<int64_t>(windows) * 100);
 }
 
 // [FIX #2, #3, #4] 重写 handleResponse，修正写返回解析和读返回偏移

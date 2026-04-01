@@ -143,12 +143,10 @@ private:
     struct PendingReadRequest {
         std::chrono::steady_clock::time_point lastSent {};
         std::chrono::steady_clock::time_point lastResponse {};
-        std::chrono::steady_clock::time_point nextEligibleSend {};
         bool queued {false};
         bool inFlight {false};
-        std::size_t consecutiveTimeouts {0};
         std::size_t missedRefreshWindows {0};
-        std::size_t warnedMissedRefreshBuckets {0};
+        std::size_t warnedStaleBuckets {0};
     };
 
     std::shared_ptr<CanTransport> canController;
@@ -194,7 +192,6 @@ private:
     bool isManagedMotorId(uint8_t motorId) const;
     void registerManagedMotorId(uint8_t motorId) const;
     std::chrono::milliseconds computeRefreshSleep(std::size_t motorCount) const;
-    std::chrono::milliseconds computeReadRequestTimeout() const;
     void stopRefreshLoop();
     void publishWriteCountersParam() const;
     bool submitTx(const CanTransport::Frame &frame,
@@ -223,8 +220,7 @@ private:
     void syncSharedIntent(uint8_t motorId, can_driver::AxisIntent intent) const;
     static uint16_t pendingReadKey(uint8_t motorId, uint8_t subCommand);
     static std::size_t feedbackStaleWarnWindowThreshold(uint8_t subCommand);
-    static std::chrono::milliseconds computeTimeoutBackoff(std::size_t consecutiveTimeouts,
-                                                           std::chrono::milliseconds baseTimeout);
+    static std::chrono::milliseconds feedbackStaleWarnThreshold(uint8_t subCommand);
 
 };
 
