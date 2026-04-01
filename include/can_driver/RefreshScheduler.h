@@ -58,7 +58,10 @@ struct PpAxisRefreshSnapshot {
 struct PpAxisRefreshScheduleState {
     std::array<std::chrono::steady_clock::time_point, kPpRefreshQueryCount> lastDue {};
     std::array<std::chrono::steady_clock::time_point, kPpRefreshQueryCount> lastIssued {};
+    std::size_t pressureCursor{0};
 };
+
+constexpr std::size_t kPpPressureBudgetPerCycle = 4;
 
 inline bool NeedsPpPriorityLifecycleQueries(const PpAxisRefreshSnapshot &snapshot)
 {
@@ -131,6 +134,7 @@ inline PpRefreshPlan BuildPpRefreshPlan(std::chrono::steady_clock::time_point no
                                         PpAxisRefreshScheduleState *state)
 {
     PpRefreshPlan plan;
+    std::array<bool, kPpRefreshQueryCount> due {};
     for (const auto query : PpRefreshQueryOrder()) {
         const auto period = PpRefreshPeriod(query, queryPressureActive, snapshot);
         if (period <= std::chrono::milliseconds::zero()) {
@@ -144,7 +148,32 @@ inline PpRefreshPlan BuildPpRefreshPlan(std::chrono::steady_clock::time_point no
             (now - lastIssued) < period) {
             continue;
         }
-        plan.push(query);
+        due[index] = true;
+    }
+
+    const auto order = PpRefreshQueryOrder();
+    const std::size_t budget =
+        queryPressureActive ? std::min(kPpPressureBudgetPerCycle, kPpRefreshQueryCount)
+                            : kPpRefreshQueryCount;
+    const std::size_t start =
+        (queryPressureActive && state) ? (state->pressureCursor % kPpRefreshQueryCount) : 0u;
+
+    std::size_t lastSelected = start;
+    for (std::size_t offset = 0; offset < kPpRefreshQueryCount; ++offset) {
+        const std::size_t index = queryPressureActive ? ((start + offset) % kPpRefreshQueryCount)
+                                                      : offset;
+        if (!due[index]) {
+            continue;
+        }
+        plan.push(order[index]);
+        lastSelected = index;
+        if (plan.count >= budget) {
+            break;
+        }
+    }
+
+    if (queryPressureActive && state && plan.count > 0) {
+        state->pressureCursor = (lastSelected + 1) % kPpRefreshQueryCount;
     }
     return plan;
 }

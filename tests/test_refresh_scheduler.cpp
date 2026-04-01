@@ -91,7 +91,7 @@ TEST(RefreshSchedulerTest, PpPriorityPlanAcceleratesLifecycleQueriesTo50Ms)
     noteIssued(t0 + std::chrono::milliseconds(50), &state, plan1);
 }
 
-TEST(RefreshSchedulerTest, PpPressurePlanDoesNotStarveCurrentBeyond100Ms)
+TEST(RefreshSchedulerTest, PpPressurePlanKeepsBudgetAndRotatesDeferredFields)
 {
     can_driver::PpAxisRefreshSnapshot snapshot;
     snapshot.feedbackSeen = true;
@@ -104,19 +104,30 @@ TEST(RefreshSchedulerTest, PpPressurePlanDoesNotStarveCurrentBeyond100Ms)
     const auto t0 = steady_tp {} + std::chrono::milliseconds(1);
 
     const auto plan0 = can_driver::BuildPpRefreshPlan(t0, true, snapshot, &state);
-    ASSERT_EQ(plan0.count, 6u);
-    EXPECT_TRUE(planContains(plan0, can_driver::PpRefreshQuery::Current));
+    ASSERT_EQ(plan0.count, can_driver::kPpPressureBudgetPerCycle);
+    EXPECT_TRUE(planContains(plan0, can_driver::PpRefreshQuery::Position));
+    EXPECT_TRUE(planContains(plan0, can_driver::PpRefreshQuery::Velocity));
+    EXPECT_TRUE(planContains(plan0, can_driver::PpRefreshQuery::Mode));
+    EXPECT_TRUE(planContains(plan0, can_driver::PpRefreshQuery::Enable));
+    EXPECT_FALSE(planContains(plan0, can_driver::PpRefreshQuery::Fault));
+    EXPECT_FALSE(planContains(plan0, can_driver::PpRefreshQuery::Current));
     noteIssued(t0, &state, plan0);
 
     const auto plan1 =
         can_driver::BuildPpRefreshPlan(t0 + std::chrono::milliseconds(50), true, snapshot, &state);
-    ASSERT_EQ(plan1.count, 1u);
-    EXPECT_EQ(plan1.items[0], can_driver::PpRefreshQuery::Position);
+    ASSERT_EQ(plan1.count, 3u);
+    EXPECT_TRUE(planContains(plan1, can_driver::PpRefreshQuery::Fault));
+    EXPECT_TRUE(planContains(plan1, can_driver::PpRefreshQuery::Current));
+    EXPECT_TRUE(planContains(plan1, can_driver::PpRefreshQuery::Position));
     noteIssued(t0 + std::chrono::milliseconds(50), &state, plan1);
 
     const auto plan2 =
         can_driver::BuildPpRefreshPlan(t0 + std::chrono::milliseconds(100), true, snapshot, &state);
-    EXPECT_TRUE(planContains(plan2, can_driver::PpRefreshQuery::Current));
+    ASSERT_EQ(plan2.count, 4u);
+    EXPECT_TRUE(planContains(plan2, can_driver::PpRefreshQuery::Position));
+    EXPECT_TRUE(planContains(plan2, can_driver::PpRefreshQuery::Velocity));
+    EXPECT_TRUE(planContains(plan2, can_driver::PpRefreshQuery::Mode));
+    EXPECT_TRUE(planContains(plan2, can_driver::PpRefreshQuery::Enable));
 }
 
 TEST(RefreshSchedulerTest, PpPriorityQueryDetectionCoversRecoverAndModeMismatch)
