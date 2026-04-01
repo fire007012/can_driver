@@ -135,6 +135,59 @@ public:
         const auto it = eyou.pendingReadRequests_.find(EyouCan::pendingReadKey(motorId, subCommand));
         return (it == eyou.pendingReadRequests_.end()) ? false : it->second.inFlight;
     }
+
+    static void setLastResponseAge(EyouCan &eyou,
+                                   uint8_t motorId,
+                                   uint8_t subCommand,
+                                   std::chrono::milliseconds age)
+    {
+        const auto now = std::chrono::steady_clock::now();
+        std::lock_guard<std::mutex> lock(eyou.pendingReadMutex_);
+        auto &request = eyou.pendingReadRequests_[EyouCan::pendingReadKey(motorId, subCommand)];
+        request.lastResponse = now - age;
+    }
+
+    static void setMissedRefreshWindows(EyouCan &eyou,
+                                        uint8_t motorId,
+                                        uint8_t subCommand,
+                                        std::size_t windows)
+    {
+        std::lock_guard<std::mutex> lock(eyou.pendingReadMutex_);
+        auto &request = eyou.pendingReadRequests_[EyouCan::pendingReadKey(motorId, subCommand)];
+        request.missedRefreshWindows = windows;
+    }
+
+    static std::size_t missedRefreshWindows(EyouCan &eyou, uint8_t motorId, uint8_t subCommand)
+    {
+        std::lock_guard<std::mutex> lock(eyou.pendingReadMutex_);
+        const auto it = eyou.pendingReadRequests_.find(EyouCan::pendingReadKey(motorId, subCommand));
+        return (it == eyou.pendingReadRequests_.end()) ? 0u : it->second.missedRefreshWindows;
+    }
+
+    static void setWarnedMissedRefreshBuckets(EyouCan &eyou,
+                                              uint8_t motorId,
+                                              uint8_t subCommand,
+                                              std::size_t buckets)
+    {
+        std::lock_guard<std::mutex> lock(eyou.pendingReadMutex_);
+        auto &request = eyou.pendingReadRequests_[EyouCan::pendingReadKey(motorId, subCommand)];
+        request.warnedMissedRefreshBuckets = buckets;
+    }
+
+    static std::size_t warnedMissedRefreshBuckets(EyouCan &eyou,
+                                                  uint8_t motorId,
+                                                  uint8_t subCommand)
+    {
+        std::lock_guard<std::mutex> lock(eyou.pendingReadMutex_);
+        const auto it = eyou.pendingReadRequests_.find(EyouCan::pendingReadKey(motorId, subCommand));
+        return (it == eyou.pendingReadRequests_.end()) ? 0u
+                                                       : it->second.warnedMissedRefreshBuckets;
+    }
+
+    static std::size_t staleWarnWindowThreshold(uint8_t subCommand)
+    {
+        return EyouCan::feedbackStaleWarnWindowThreshold(subCommand);
+    }
 };
 
 TEST_F(EyouCanTest, SetPositionEncodesExpectedWriteFrame)
@@ -357,6 +410,63 @@ TEST_F(EyouCanTest, SlowRefreshRateDoesNotPrematurelyTimeoutReadRequests)
     eyou.issueRefreshQuery(static_cast<MotorID>(0x05), EyouCan::RefreshQuery::Position);
     EXPECT_EQ(transport->sentFrames.size(), 1u);
     EXPECT_EQ(EyouCanTestAccessor::consecutiveTimeouts(eyou, 0x05, 0x07), 1u);
+}
+
+TEST_F(EyouCanTest, StaleWarningIgnoresResponseAgeWithoutMissedRefreshWindows)
+{
+    constexpr uint8_t kMotorId = 0x05;
+    constexpr uint8_t kSubCommand = 0x07;
+
+    EyouCanTestAccessor::setLastResponseAge(eyou, kMotorId, kSubCommand, std::chrono::seconds(10));
+    EyouCanTestAccessor::setMissedRefreshWindows(eyou, kMotorId, kSubCommand, 0u);
+
+    ASSERT_TRUE(eyou.issueRefreshQuery(static_cast<MotorID>(kMotorId), EyouCan::RefreshQuery::Position));
+    EXPECT_EQ(EyouCanTestAccessor::warnedMissedRefreshBuckets(eyou, kMotorId, kSubCommand), 0u);
+    EXPECT_EQ(EyouCanTestAccessor::missedRefreshWindows(eyou, kMotorId, kSubCommand), 1u);
+}
+
+TEST_F(EyouCanTest, StaleWarningArmsAfterMissedRefreshWindowThreshold)
+{
+    constexpr uint8_t kMotorId = 0x05;
+    constexpr uint8_t kSubCommand = 0x07;
+    const auto threshold = EyouCanTestAccessor::staleWarnWindowThreshold(kSubCommand);
+    ASSERT_GT(threshold, 0u);
+
+    EyouCanTestAccessor::setLastResponseAge(eyou, kMotorId, kSubCommand, std::chrono::seconds(10));
+    EyouCanTestAccessor::setMissedRefreshWindows(eyou, kMotorId, kSubCommand, threshold);
+
+    ASSERT_TRUE(eyou.issueRefreshQuery(static_cast<MotorID>(kMotorId), EyouCan::RefreshQuery::Position));
+    EXPECT_EQ(EyouCanTestAccessor::warnedMissedRefreshBuckets(eyou, kMotorId, kSubCommand), 1u);
+    EXPECT_EQ(EyouCanTestAccessor::missedRefreshWindows(eyou, kMotorId, kSubCommand), threshold + 1u);
+}
+
+TEST_F(EyouCanTest, ReadResponseResetsMissedRefreshWindowTracking)
+{
+    constexpr uint8_t kMotorId = 0x05;
+    constexpr uint8_t kSubCommand = 0x07;
+    const auto threshold = EyouCanTestAccessor::staleWarnWindowThreshold(kSubCommand);
+    ASSERT_GT(threshold, 0u);
+
+    EyouCanTestAccessor::setLastResponseAge(eyou, kMotorId, kSubCommand, std::chrono::seconds(10));
+    EyouCanTestAccessor::setMissedRefreshWindows(eyou, kMotorId, kSubCommand, threshold);
+    EyouCanTestAccessor::setWarnedMissedRefreshBuckets(eyou, kMotorId, kSubCommand, 1u);
+
+    CanTransport::Frame frame {};
+    frame.id = kMotorId;
+    frame.isExtended = false;
+    frame.isRemoteRequest = false;
+    frame.dlc = 6;
+    frame.data[0] = 0x04;
+    frame.data[1] = kSubCommand;
+    frame.data[2] = 0x00;
+    frame.data[3] = 0x00;
+    frame.data[4] = 0x03;
+    frame.data[5] = 0xE8;
+
+    transport->simulateReceive(frame);
+
+    EXPECT_EQ(EyouCanTestAccessor::missedRefreshWindows(eyou, kMotorId, kSubCommand), 0u);
+    EXPECT_EQ(EyouCanTestAccessor::warnedMissedRefreshBuckets(eyou, kMotorId, kSubCommand), 0u);
 }
 
 TEST_F(EyouCanTest, HandleReadResponseUpdatesPositionCache)

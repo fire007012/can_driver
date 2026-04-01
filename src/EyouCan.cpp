@@ -708,6 +708,8 @@ void EyouCan::onReadDispatchResult(uint8_t motorId,
     if (attemptedSend && sendResult == CanTransport::SendResult::Ok) {
         request.inFlight = true;
         request.lastSent = eventTime;
+        request.missedRefreshWindows =
+            std::min<std::size_t>(request.missedRefreshWindows + 1, 1024);
     }
 }
 
@@ -715,28 +717,29 @@ void EyouCan::maybeWarnStaleFeedback(uint8_t motorId,
                                      uint8_t subCommand,
                                      std::chrono::steady_clock::time_point now)
 {
-    const auto threshold = feedbackStaleWarnThreshold(subCommand);
-    if (threshold <= std::chrono::milliseconds::zero()) {
+    (void)now;
+    const auto threshold = feedbackStaleWarnWindowThreshold(subCommand);
+    if (threshold == 0u) {
         return;
     }
 
     bool shouldWarn = false;
-    long long ageMs = -1;
+    bool hasSeenResponse = false;
+    std::size_t missedWindows = 0;
+    std::size_t warnBucket = 0;
     {
         std::lock_guard<std::mutex> lock(pendingReadMutex_);
         auto &request = pendingReadRequests_[pendingReadKey(motorId, subCommand)];
-        if (request.lastResponse == std::chrono::steady_clock::time_point {}) {
+        if (request.missedRefreshWindows < threshold) {
             return;
         }
-        if ((now - request.lastResponse) < threshold) {
+        warnBucket = request.missedRefreshWindows / threshold;
+        if (warnBucket == 0u || warnBucket <= request.warnedMissedRefreshBuckets) {
             return;
         }
-        if (request.lastStaleWarn != std::chrono::steady_clock::time_point {} &&
-            (now - request.lastStaleWarn) < threshold) {
-            return;
-        }
-        request.lastStaleWarn = now;
-        ageMs = std::chrono::duration_cast<std::chrono::milliseconds>(now - request.lastResponse).count();
+        request.warnedMissedRefreshBuckets = warnBucket;
+        hasSeenResponse = (request.lastResponse != std::chrono::steady_clock::time_point {});
+        missedWindows = request.missedRefreshWindows;
         shouldWarn = true;
     }
 
@@ -747,7 +750,8 @@ void EyouCan::maybeWarnStaleFeedback(uint8_t motorId,
     ROS_WARN_STREAM(
         "[EyouCan] Feedback stale on motor " << static_cast<unsigned>(motorId)
         << " subcmd=0x" << std::hex << static_cast<unsigned>(subCommand) << std::dec
-        << ", no new response for " << ageMs << " ms");
+        << ", missed " << missedWindows << " refresh windows without a new response"
+        << (hasSeenResponse ? "" : " (no response received yet)"));
 }
 
 void EyouCan::markReadResponseReceived(uint8_t motorId, uint8_t subCommand)
@@ -757,11 +761,12 @@ void EyouCan::markReadResponseReceived(uint8_t motorId, uint8_t subCommand)
         auto it = pendingReadRequests_.find(pendingReadKey(motorId, subCommand));
         if (it != pendingReadRequests_.end()) {
             it->second.lastResponse = std::chrono::steady_clock::now();
-            it->second.lastStaleWarn = std::chrono::steady_clock::time_point {};
             it->second.queued = false;
             it->second.inFlight = false;
             it->second.nextEligibleSend = std::chrono::steady_clock::time_point {};
             it->second.consecutiveTimeouts = 0;
+            it->second.missedRefreshWindows = 0;
+            it->second.warnedMissedRefreshBuckets = 0;
         }
     }
 }
@@ -858,20 +863,19 @@ uint16_t EyouCan::pendingReadKey(uint8_t motorId, uint8_t subCommand)
     return static_cast<uint16_t>((static_cast<uint16_t>(motorId) << 8) | subCommand);
 }
 
-std::chrono::milliseconds EyouCan::feedbackStaleWarnThreshold(uint8_t subCommand)
+std::size_t EyouCan::feedbackStaleWarnWindowThreshold(uint8_t subCommand)
 {
     switch (subCommand) {
     case 0x07:
-        return std::chrono::milliseconds(500);
     case 0x06:
-        return std::chrono::milliseconds(1000);
+        return 10u;
     case 0x05:
     case 0x0F:
     case 0x10:
     case 0x15:
-        return std::chrono::milliseconds(2000);
+        return 20u;
     default:
-        return std::chrono::milliseconds::zero();
+        return 0u;
     }
 }
 
