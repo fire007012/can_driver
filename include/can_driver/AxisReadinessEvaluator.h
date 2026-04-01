@@ -139,13 +139,9 @@ private:
         }
 
         if (readiness.modeExpected) {
-            const bool timestampMatched =
-                feedback.feedbackSeen && feedback.lastRxSteadyNs > 0 &&
-                feedback.lastModeMatchSteadyNs >= feedback.lastRxSteadyNs;
-            const bool valueMatched =
+            readiness.modeMatched =
                 feedback.feedbackSeen && command != nullptr &&
                 feedback.mode == command->desiredMode;
-            readiness.modeMatched = timestampMatched || valueMatched;
         }
 
         readiness.feedbackReady = readiness.deviceReady && readiness.feedbackSeen &&

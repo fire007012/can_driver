@@ -271,7 +271,6 @@ TEST(AxisReadinessEvaluatorTest, PpAxisReportsReadyFactsBeforeAndAfterFirstComma
     command.desiredMode = CanProtocol::MotorMode::Position;
     command.desiredModeValid = true;
     feedback.mode = CanProtocol::MotorMode::Position;
-    feedback.lastModeMatchSteadyNs = nowNs;
 
     const auto commanding = evaluator.Evaluate(
         feedback, &command, can_driver::AxisIntent::Enable, &deviceHealth, nowNs);
@@ -403,11 +402,46 @@ TEST(AxisReadinessEvaluatorTest, EnabledAxisStillRequiresSelectedModeToMatchBefo
               "Mode not ready.");
 
     feedback.mode = CanProtocol::MotorMode::Velocity;
-    feedback.lastModeMatchSteadyNs = nowNs;
     const auto enabledReady = evaluator.Evaluate(
         feedback, &command, can_driver::AxisIntent::Enable, &deviceHealth, nowNs);
     EXPECT_TRUE(enabledReady.modeReady);
     EXPECT_TRUE(can_driver::AxisReadinessEvaluator::ReadyForRun(enabledReady));
+}
+
+TEST(SharedDriverStateTest, CommandAndIntentUpdatesDoNotRewriteFeedbackFacts)
+{
+    can_driver::SharedDriverState state;
+    const auto key = can_driver::MakeAxisKey("fake1", CanType::PP, static_cast<MotorID>(0x201));
+    const auto lastRxNs = can_driver::SharedDriverSteadyNowNs();
+
+    state.mutateAxisFeedback(
+        key, [lastRxNs](can_driver::SharedDriverState::AxisFeedbackState *feedback) {
+            feedback->feedbackSeen = true;
+            feedback->enabled = true;
+            feedback->mode = CanProtocol::MotorMode::Position;
+            feedback->lastRxSteadyNs = lastRxNs;
+            feedback->consecutiveTimeoutCount = 0;
+        });
+
+    can_driver::SharedDriverState::AxisFeedbackState before;
+    ASSERT_TRUE(state.getAxisFeedback(key, &before));
+    ASSERT_FALSE(before.degraded);
+
+    state.mutateAxisCommand(
+        key, [](can_driver::SharedDriverState::AxisCommandState *command) {
+            command->valid = true;
+            command->desiredMode = CanProtocol::MotorMode::Velocity;
+            command->desiredModeValid = true;
+            command->lastCommandSteadyNs = can_driver::SharedDriverSteadyNowNs();
+        });
+    state.setAxisIntent(key, can_driver::AxisIntent::Recover);
+
+    can_driver::SharedDriverState::AxisFeedbackState after;
+    ASSERT_TRUE(state.getAxisFeedback(key, &after));
+    EXPECT_EQ(after.mode, CanProtocol::MotorMode::Position);
+    EXPECT_EQ(after.lastRxSteadyNs, lastRxNs);
+    EXPECT_TRUE(after.enabled);
+    EXPECT_FALSE(after.degraded);
 }
 
 TEST(LifecycleDriverOpsTest, EnableAllRollsBackSucceededMotorsOnPartialFailure)
@@ -703,7 +737,7 @@ TEST(LifecycleDriverOpsTest, MotionHealthyUsesAxisReadinessForPpModeMismatch)
     EXPECT_EQ(detail, "Mode not ready.");
 }
 
-TEST(LifecycleDriverOpsTest, MotionHealthyRejectsStaleModeMatchTimestampAfterCommandModeChange)
+TEST(LifecycleDriverOpsTest, MotionHealthyRejectsStaleModeObservationAfterCommandModeChange)
 {
     auto deviceManager = std::make_shared<FakeDeviceManager>();
     MotorActionExecutor executor(deviceManager);

@@ -59,9 +59,6 @@ public:
         bool degraded{false};
         std::int64_t lastRxSteadyNs{0};
         std::int64_t lastValidStateSteadyNs{0};
-        std::int64_t lastModeMatchSteadyNs{0};
-        std::int64_t lastEnableMatchSteadyNs{0};
-        std::int64_t lastFaultSteadyNs{0};
         std::uint32_t consecutiveTimeoutCount{0};
     };
 
@@ -73,7 +70,6 @@ public:
         CanProtocol::MotorMode desiredMode{CanProtocol::MotorMode::Position};
         bool desiredModeValid{false};
         bool valid{false};
-        std::uint64_t epoch{0};
         std::int64_t lastCommandSteadyNs{0};
     };
 
@@ -86,17 +82,6 @@ public:
         std::uint64_t rxError{0};
         std::int64_t lastTxLinkUnavailableSteadyNs{0};
         std::int64_t lastRxSteadyNs{0};
-    };
-
-    struct Snapshot {
-        std::vector<AxisFeedbackState> axisFeedback;
-        std::vector<AxisCommandState> axisCommands;
-        std::vector<std::pair<AxisKey, AxisIntent>> axisIntents;
-        std::vector<DeviceHealthState> deviceHealth;
-        bool globalFault{false};
-        bool degraded{false};
-        std::uint64_t commandEpoch{0};
-        std::uint64_t syncSequence{0};
     };
 
     void registerAxis(const AxisKey &key)
@@ -123,7 +108,7 @@ public:
         const auto mapKey = touchAxisLocked(key);
         auto &state = axisFeedback_[mapKey];
         fn(&state);
-        recomputeAxisDerivedLocked(mapKey, SharedDriverSteadyNowNs());
+        recomputeAxisObservedLocked(&state);
         auto &deviceHealth = deviceHealth_[key.device];
         deviceHealth.device = key.device;
         if (state.lastRxSteadyNs > 0) {
@@ -154,7 +139,6 @@ public:
         const auto mapKey = touchAxisLocked(key);
         auto &state = axisCommands_[mapKey];
         fn(&state);
-        recomputeAxisDerivedLocked(mapKey, SharedDriverSteadyNowNs());
     }
 
     bool getAxisCommand(const AxisKey &key, AxisCommandState *out) const
@@ -177,7 +161,6 @@ public:
         std::lock_guard<std::mutex> lock(mutex_);
         const auto mapKey = touchAxisLocked(key);
         axisIntents_[mapKey] = intent;
-        recomputeAxisDerivedLocked(mapKey, SharedDriverSteadyNowNs());
     }
 
     AxisIntent getAxisIntent(const AxisKey &key) const
@@ -209,74 +192,6 @@ public:
         }
         *out = it->second;
         return true;
-    }
-
-    void setGlobalFault(bool fault)
-    {
-        std::lock_guard<std::mutex> lock(mutex_);
-        globalFault_ = fault;
-    }
-
-    bool globalFault() const
-    {
-        std::lock_guard<std::mutex> lock(mutex_);
-        return globalFault_;
-    }
-
-    void advanceCommandEpoch()
-    {
-        std::lock_guard<std::mutex> lock(mutex_);
-        ++commandEpoch_;
-    }
-
-    std::uint64_t commandEpoch() const
-    {
-        std::lock_guard<std::mutex> lock(mutex_);
-        return commandEpoch_;
-    }
-
-    void advanceSyncSequence()
-    {
-        std::lock_guard<std::mutex> lock(mutex_);
-        ++syncSequence_;
-    }
-
-    std::uint64_t syncSequence() const
-    {
-        std::lock_guard<std::mutex> lock(mutex_);
-        return syncSequence_;
-    }
-
-    Snapshot snapshot() const
-    {
-        std::lock_guard<std::mutex> lock(mutex_);
-        Snapshot snapshot;
-        snapshot.axisFeedback.reserve(axisFeedback_.size());
-        snapshot.axisCommands.reserve(axisCommands_.size());
-        snapshot.axisIntents.reserve(axisIntents_.size());
-        snapshot.deviceHealth.reserve(deviceHealth_.size());
-
-        for (const auto &entry : axisFeedback_) {
-            snapshot.axisFeedback.push_back(entry.second);
-        }
-        for (const auto &entry : axisCommands_) {
-            snapshot.axisCommands.push_back(entry.second);
-        }
-        for (const auto &entry : axisIntents_) {
-            const auto feedbackIt = axisFeedback_.find(entry.first);
-            if (feedbackIt != axisFeedback_.end()) {
-                snapshot.axisIntents.emplace_back(feedbackIt->second.key, entry.second);
-            }
-        }
-        for (const auto &entry : deviceHealth_) {
-            snapshot.deviceHealth.push_back(entry.second);
-        }
-
-        snapshot.globalFault = globalFaultLocked();
-        snapshot.degraded = degradedLocked();
-        snapshot.commandEpoch = commandEpoch_;
-        snapshot.syncSequence = syncSequence_;
-        return snapshot;
     }
 
 private:
@@ -313,92 +228,12 @@ private:
         return mapKey;
     }
 
-    bool intentWantsEnabledLocked(AxisIntent intent, bool *out) const
+    static void recomputeAxisObservedLocked(AxisFeedbackState *feedback)
     {
-        if (!out) {
-            return false;
-        }
-
-        switch (intent) {
-        case AxisIntent::Disable:
-            *out = false;
-            return true;
-        case AxisIntent::Enable:
-        case AxisIntent::Hold:
-        case AxisIntent::Run:
-        case AxisIntent::Recover:
-            *out = true;
-            return true;
-        case AxisIntent::None:
-        default:
-            break;
-        }
-        return false;
-    }
-
-    void recomputeAxisDerivedLocked(const std::string &mapKey, std::int64_t nowNs)
-    {
-        auto feedbackIt = axisFeedback_.find(mapKey);
-        if (feedbackIt == axisFeedback_.end()) {
+        if (!feedback) {
             return;
         }
-
-        AxisFeedbackState &feedback = feedbackIt->second;
-        feedback.degraded = feedback.consecutiveTimeoutCount > 0;
-        if (feedback.fault && nowNs > 0) {
-            feedback.lastFaultSteadyNs = nowNs;
-        }
-
-        const auto commandIt = axisCommands_.find(mapKey);
-        if (commandIt != axisCommands_.end()) {
-            const auto &command = commandIt->second;
-            if (command.desiredModeValid && feedback.feedbackSeen &&
-                feedback.mode == command.desiredMode && nowNs > 0) {
-                feedback.lastModeMatchSteadyNs = nowNs;
-            } else {
-                feedback.lastModeMatchSteadyNs = 0;
-            }
-        } else {
-            feedback.lastModeMatchSteadyNs = 0;
-        }
-
-        const auto intentIt = axisIntents_.find(mapKey);
-        if (intentIt != axisIntents_.end()) {
-            bool wantedEnabled = false;
-            if (feedback.feedbackSeen &&
-                intentWantsEnabledLocked(intentIt->second, &wantedEnabled) &&
-                feedback.enabled == wantedEnabled && nowNs > 0) {
-                feedback.lastEnableMatchSteadyNs = nowNs;
-            }
-        }
-    }
-
-    bool globalFaultLocked() const
-    {
-        if (globalFault_) {
-            return true;
-        }
-        for (const auto &entry : axisFeedback_) {
-            if (entry.second.fault) {
-                return true;
-            }
-        }
-        return false;
-    }
-
-    bool degradedLocked() const
-    {
-        for (const auto &entry : axisFeedback_) {
-            if (entry.second.degraded) {
-                return true;
-            }
-        }
-        for (const auto &entry : deviceHealth_) {
-            if (!entry.second.transportReady) {
-                return true;
-            }
-        }
-        return false;
+        feedback->degraded = feedback->consecutiveTimeoutCount > 0;
     }
 
     mutable std::mutex mutex_;
@@ -406,9 +241,6 @@ private:
     std::map<std::string, AxisCommandState> axisCommands_;
     std::map<std::string, AxisIntent> axisIntents_;
     std::map<std::string, DeviceHealthState> deviceHealth_;
-    bool globalFault_{false};
-    std::uint64_t commandEpoch_{0};
-    std::uint64_t syncSequence_{0};
 };
 
 inline SharedDriverState::AxisKey MakeAxisKey(const std::string &device,
