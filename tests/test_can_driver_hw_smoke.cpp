@@ -6,6 +6,7 @@
 #include <std_msgs/Float64.h>
 
 #include "can_driver/CanDriverHW.h"
+#include "can_driver/CanDriverIoRuntime.h"
 #include "can_driver/IDeviceManager.h"
 #include "can_driver/MotorState.h"
 #include "can_driver/lifecycle_service_gateway.hpp"
@@ -15,6 +16,7 @@
 
 #include <atomic>
 #include <cmath>
+#include <deque>
 #include <memory>
 #include <mutex>
 #include <set>
@@ -1408,6 +1410,64 @@ TEST_F(CanDriverHWSmokeTest, RunningCspJointAppliesMaxPositionStepLimit)
     EXPECT_EQ(fakeDm->protocol()->lastQuickPosition(), rawFromPprRadians(0.2));
 
     spinner.stop();
+}
+
+TEST_F(CanDriverHWSmokeTest, DispatchPreparedCommandsKeepsPrepareTimeRoutingSnapshot)
+{
+    auto fakeDm = std::make_shared<FakeDeviceManager>();
+
+    std::deque<can_driver::CanDriverJointConfig> joints(1);
+    joints[0].name = "test_arm";
+    joints[0].motorId = static_cast<MotorID>(0x05);
+    joints[0].protocol = CanType::PP;
+    joints[0].canDevice = "fake0";
+    joints[0].controlMode = "csp";
+    joints[0].positionScale = 2.0 * M_PI / 65536.0;
+    joints[0].velocityScale = 2.0 * M_PI / 65536.0;
+    joints[0].pos = 0.0;
+    joints[0].posCmd = 1.0;
+
+    std::vector<can_driver::CanDriverDeviceProtocolGroup> groups{
+        {"fake0", CanType::PP, {0}},
+    };
+    std::vector<int32_t> rawCommandBuffer(1, 0);
+    std::vector<uint8_t> commandValidBuffer(1, 0);
+    std::vector<can_driver::CanDriverPreparedCommand> preparedCommandBuffer(
+        1, can_driver::CanDriverPreparedCommand{});
+    std::mutex jointStateMutex;
+    CommandGate commandGate;
+    can_driver::CanDriverIoRuntime::WriteConfig config;
+    config.safetyRequireEnabledForMotion = false;
+
+    can_driver::CanDriverIoRuntime::PrepareCommands(&joints,
+                                                    &rawCommandBuffer,
+                                                    &commandValidBuffer,
+                                                    &preparedCommandBuffer,
+                                                    &jointStateMutex,
+                                                    config);
+
+    {
+        std::lock_guard<std::mutex> lock(jointStateMutex);
+        joints[0].controlMode = "velocity";
+    }
+
+    bool anyFaultObserved = false;
+    can_driver::CanDriverIoRuntime::DispatchPreparedCommands(*fakeDm,
+                                                             groups,
+                                                             &joints,
+                                                             rawCommandBuffer,
+                                                             &commandValidBuffer,
+                                                             preparedCommandBuffer,
+                                                             &jointStateMutex,
+                                                             &commandGate,
+                                                             config,
+                                                             &anyFaultObserved);
+
+    EXPECT_FALSE(anyFaultObserved);
+    EXPECT_EQ(fakeDm->protocol()->quickPositionCalls(), 1);
+    EXPECT_EQ(fakeDm->protocol()->velocityCalls(), 0);
+    EXPECT_EQ(fakeDm->protocol()->lastQuickPositionMotor(), 0x05u);
+    EXPECT_EQ(fakeDm->protocol()->lastQuickPosition(), rawFromPprRadians(1.0));
 }
 
 TEST_F(CanDriverHWSmokeTest, SetZeroLimitServiceAcceptsCspJoint)

@@ -89,6 +89,7 @@ private:
     std::vector<DeviceProtocolGroup> jointGroups_;
     std::vector<int32_t>             rawCommandBuffer_;
     std::vector<uint8_t>             commandValidBuffer_;
+    std::vector<can_driver::CanDriverPreparedCommand> preparedCommandBuffer_;
     std::map<uint16_t, double>       jointZeroOffsetRadByMotorId_;
 
     std::shared_ptr<IDeviceManager> deviceManager_;

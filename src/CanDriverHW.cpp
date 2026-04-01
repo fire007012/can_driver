@@ -131,6 +131,7 @@ void CanDriverHW::resetInternalState()
     jointGroups_.clear();
     rawCommandBuffer_.clear();
     commandValidBuffer_.clear();
+    preparedCommandBuffer_.clear();
     jointZeroOffsetRadByMotorId_.clear();
     commandGate_.reset();
     lifecycleDriverOps_.setTargets({});
@@ -570,6 +571,7 @@ bool CanDriverHW::parseAndSetupJoints(const ros::NodeHandle &pnh)
     rebuildJointGroups();
     rawCommandBuffer_.assign(joints_.size(), 0);
     commandValidBuffer_.assign(joints_.size(), 0);
+    preparedCommandBuffer_.assign(joints_.size(), can_driver::CanDriverPreparedCommand{});
     syncLifecycleTargets();
     return true;
 }
@@ -999,12 +1001,18 @@ void CanDriverHW::write(const ros::Time & /*time*/, const ros::Duration &period)
         safetyHoldAfterDeviceRecover_,
     };
     can_driver::CanDriverIoRuntime::PrepareCommands(
-        &joints_, &rawCommandBuffer_, &commandValidBuffer_, &jointStateMutex_, writeConfig);
+        &joints_,
+        &rawCommandBuffer_,
+        &commandValidBuffer_,
+        &preparedCommandBuffer_,
+        &jointStateMutex_,
+        writeConfig);
     can_driver::CanDriverIoRuntime::DispatchPreparedCommands(*deviceManager_,
                                                              jointGroups_,
                                                              &joints_,
                                                              rawCommandBuffer_,
                                                              &commandValidBuffer_,
+                                                             preparedCommandBuffer_,
                                                              &jointStateMutex_,
                                                              &commandGate_,
                                                              writeConfig,

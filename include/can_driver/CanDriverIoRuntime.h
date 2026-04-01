@@ -90,11 +90,12 @@ public:
     static void PrepareCommands(std::deque<CanDriverJointConfig> *joints,
                                 std::vector<int32_t> *rawCommandBuffer,
                                 std::vector<uint8_t> *commandValidBuffer,
+                                std::vector<CanDriverPreparedCommand> *preparedCommandBuffer,
                                 std::mutex *jointStateMutex,
                                 const WriteConfig &config)
     {
         if (joints == nullptr || rawCommandBuffer == nullptr || commandValidBuffer == nullptr ||
-            jointStateMutex == nullptr) {
+            preparedCommandBuffer == nullptr || jointStateMutex == nullptr) {
             return;
         }
 
@@ -102,6 +103,12 @@ public:
         const ros::Time now = ros::Time::now();
         for (std::size_t index = 0; index < joints->size(); ++index) {
             auto &joint = (*joints)[index];
+            auto &prepared = (*preparedCommandBuffer)[index];
+            prepared.valid = false;
+            prepared.jointIndex = index;
+            prepared.motorId = joint.motorId;
+            prepared.route = can_driver::controlModeDispatchRoute(joint.controlMode);
+            prepared.jointName = joint.name;
 
             bool useDirect = false;
             double cmdValue = 0.0;
@@ -204,6 +211,7 @@ public:
             (*commandValidBuffer)[index] = static_cast<uint8_t>(
                 can_driver::safe_command::scaleAndClampToInt32(
                     cmdValue, scale, joint.name, (*rawCommandBuffer)[index]));
+            prepared.valid = ((*commandValidBuffer)[index] != 0);
         }
     }
 
@@ -212,6 +220,7 @@ public:
                                          std::deque<CanDriverJointConfig> *joints,
                                          const std::vector<int32_t> &rawCommandBuffer,
                                          std::vector<uint8_t> *commandValidBuffer,
+                                         const std::vector<CanDriverPreparedCommand> &preparedCommandBuffer,
                                          std::mutex *jointStateMutex,
                                          CommandGate *commandGate,
                                          const WriteConfig &config,
@@ -266,10 +275,11 @@ public:
             if (sharedState) {
                 const auto nowNs = SharedDriverSteadyNowNs();
                 for (const std::size_t index : group.jointIndices) {
-                    const auto &joint = (*joints)[index];
                     SharedDriverState::AxisFeedbackState feedback;
                     if (!sharedState->getAxisFeedback(
-                            MakeAxisKey(group.canDevice, group.protocol, joint.motorId),
+                            MakeAxisKey(group.canDevice,
+                                        group.protocol,
+                                        preparedCommandBuffer[index].motorId),
                             &feedback) ||
                         !sharedFeedbackFresh(feedback, nowNs)) {
                         continue;
@@ -289,16 +299,16 @@ public:
 
             std::lock_guard<std::mutex> devLock(*devMutex);
             for (const std::size_t index : group.jointIndices) {
-                if (!(*commandValidBuffer)[index]) {
+                const auto &prepared = preparedCommandBuffer[index];
+                if (!prepared.valid || !(*commandValidBuffer)[index]) {
                     continue;
                 }
 
-                const auto &joint = (*joints)[index];
                 try {
                     const bool hasSharedMotionStatus = motionStatusSnapshots[index].valid;
                     const bool hasFault = hasSharedMotionStatus
                                               ? motionStatusSnapshots[index].fault
-                                              : proto->hasFault(joint.motorId);
+                                              : proto->hasFault(prepared.motorId);
 
                     if (config.safetyStopOnFault) {
                         bool needIssueStop = false;
@@ -319,17 +329,17 @@ public:
                                 *anyFaultObserved = true;
                             }
                             if (needIssueStop) {
-                                if (!proto->Stop(joint.motorId)) {
+                                if (!proto->Stop(prepared.motorId)) {
                                     ROS_WARN_THROTTLE(
                                         1.0,
                                         "[CanDriverHW] Joint '%s' has fault, auto Stop rejected on '%s'.",
-                                        joint.name.c_str(),
+                                        prepared.jointName.c_str(),
                                         group.canDevice.c_str());
                                 } else {
                                     ROS_WARN_THROTTLE(
                                         1.0,
                                         "[CanDriverHW] Joint '%s' has fault, auto Stop sent and motion command blocked.",
-                                        joint.name.c_str());
+                                        prepared.jointName.c_str());
                                 }
                             }
                             continue;
@@ -338,31 +348,31 @@ public:
 
                     const bool enabled = hasSharedMotionStatus
                                              ? motionStatusSnapshots[index].enabled
-                                             : proto->isEnabled(joint.motorId);
+                                             : proto->isEnabled(prepared.motorId);
                     if (config.safetyRequireEnabledForMotion && !enabled) {
                         ROS_WARN_THROTTLE(
                             1.0,
                             "[CanDriverHW] Joint '%s' is not enabled, motion command blocked.",
-                            joint.name.c_str());
+                            prepared.jointName.c_str());
                         continue;
                     }
 
-                    if (joint.controlMode == "velocity") {
-                        if (!proto->setVelocity(joint.motorId, rawCommandBuffer[index])) {
+                    if (prepared.route == PreparedCommandRoute::Velocity) {
+                        if (!proto->setVelocity(prepared.motorId, rawCommandBuffer[index])) {
                             ROS_WARN_THROTTLE(
                                 1.0,
                                 "[CanDriverHW] setVelocity rejected on '%s'.",
                                 group.canDevice.c_str());
                         }
-                    } else if (joint.controlMode == "csp") {
-                        if (!proto->quickSetPosition(joint.motorId, rawCommandBuffer[index])) {
+                    } else if (prepared.route == PreparedCommandRoute::Csp) {
+                        if (!proto->quickSetPosition(prepared.motorId, rawCommandBuffer[index])) {
                             ROS_WARN_THROTTLE(
                                 1.0,
                                 "[CanDriverHW] quickSetPosition rejected on '%s'.",
                                 group.canDevice.c_str());
                         }
                     } else {
-                        if (!proto->setPosition(joint.motorId, rawCommandBuffer[index])) {
+                        if (!proto->setPosition(prepared.motorId, rawCommandBuffer[index])) {
                             ROS_WARN_THROTTLE(
                                 1.0,
                                 "[CanDriverHW] setPosition rejected on '%s'.",

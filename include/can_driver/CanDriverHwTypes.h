@@ -23,6 +23,31 @@ inline bool controlModeUsesPositionSemantics(const std::string &controlMode)
     return !controlModeUsesVelocitySemantics(controlMode);
 }
 
+enum class PreparedCommandRoute {
+    Position,
+    Velocity,
+    Csp,
+};
+
+inline PreparedCommandRoute controlModeDispatchRoute(const std::string &controlMode)
+{
+    if (controlModeUsesVelocitySemantics(controlMode)) {
+        return PreparedCommandRoute::Velocity;
+    }
+    if (controlMode == "csp") {
+        return PreparedCommandRoute::Csp;
+    }
+    return PreparedCommandRoute::Position;
+}
+
+struct CanDriverPreparedCommand {
+    bool valid{false};
+    std::size_t jointIndex{0};
+    MotorID motorId{MotorID::LeftWheel};
+    PreparedCommandRoute route{PreparedCommandRoute::Position};
+    std::string jointName;
+};
+
 struct CanDriverJointConfig {
     std::string name;
     MotorID motorId{MotorID::LeftWheel};
