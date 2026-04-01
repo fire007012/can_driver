@@ -117,7 +117,7 @@ public:
     uint64_t fastWriteSentCount() const;
     uint64_t normalWriteSentCount() const;
     using RefreshQuery = can_driver::PpRefreshQuery;
-    void issueRefreshQuery(MotorID motorId, RefreshQuery query);
+    bool issueRefreshQuery(MotorID motorId, RefreshQuery query);
 
 private:
     /**
@@ -184,12 +184,12 @@ private:
      * @brief 处理来自底层传输的回复帧（0x02/0x04）
      */
     void handleResponse(const CanTransport::Frame &data);
-    void requestPosition(uint8_t motorId);
-    void requestMode(uint8_t motorId);
-    void requestEnable(uint8_t motorId);
-    void requestFault(uint8_t motorId);
-    void requestCurrent(uint8_t motorId);
-    void requestVelocity(uint8_t motorId);
+    bool requestPosition(uint8_t motorId);
+    bool requestMode(uint8_t motorId);
+    bool requestEnable(uint8_t motorId);
+    bool requestFault(uint8_t motorId);
+    bool requestCurrent(uint8_t motorId);
+    bool requestVelocity(uint8_t motorId);
     bool isManagedMotorId(uint8_t motorId) const;
     void registerManagedMotorId(uint8_t motorId) const;
     std::chrono::milliseconds computeRefreshSleep(std::size_t motorCount) const;

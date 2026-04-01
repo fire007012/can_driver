@@ -165,10 +165,21 @@ void DeviceManager::syncDeviceRefreshRuntimeLocked(const std::string &device)
                             auto &scheduleState = runtime->ppScheduleStates[motorIds[i]];
                             plan = can_driver::BuildPpRefreshPlan(
                                 now, queryPressureActive, snapshot, &scheduleState);
+                            for (std::size_t j = 0; j < plan.count; ++j) {
+                                can_driver::NotePpRefreshQueryDue(
+                                    now, &scheduleState, plan.items[j]);
+                            }
                         }
                         for (std::size_t j = 0; j < plan.count; ++j) {
-                            protocol->issueRefreshQuery(
+                            const bool issued = protocol->issueRefreshQuery(
                                 static_cast<MotorID>(motorIds[i]), plan.items[j]);
+                            if (!issued) {
+                                continue;
+                            }
+                            std::lock_guard<std::mutex> lock(runtime->scheduleMutex);
+                            auto &scheduleState = runtime->ppScheduleStates[motorIds[i]];
+                            can_driver::NotePpRefreshQueryIssued(
+                                now, &scheduleState, plan.items[j]);
                         }
                     }
                     const auto nextSleep = clampRefreshSleep(protocol->refreshSleepInterval());

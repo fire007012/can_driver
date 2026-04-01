@@ -56,7 +56,8 @@ struct PpAxisRefreshSnapshot {
 };
 
 struct PpAxisRefreshScheduleState {
-    std::array<std::chrono::steady_clock::time_point, kPpRefreshQueryCount> lastScheduled {};
+    std::array<std::chrono::steady_clock::time_point, kPpRefreshQueryCount> lastDue {};
+    std::array<std::chrono::steady_clock::time_point, kPpRefreshQueryCount> lastIssued {};
 };
 
 inline bool NeedsPpPriorityLifecycleQueries(const PpAxisRefreshSnapshot &snapshot)
@@ -130,26 +131,42 @@ inline PpRefreshPlan BuildPpRefreshPlan(std::chrono::steady_clock::time_point no
                                         PpAxisRefreshScheduleState *state)
 {
     PpRefreshPlan plan;
-    if (!state) {
-        return plan;
-    }
-
     for (const auto query : PpRefreshQueryOrder()) {
         const auto period = PpRefreshPeriod(query, queryPressureActive, snapshot);
         if (period <= std::chrono::milliseconds::zero()) {
             continue;
         }
         const auto index = PpRefreshQueryIndex(query);
-        const auto lastScheduled = state->lastScheduled[index];
-        if (lastScheduled != std::chrono::steady_clock::time_point {} &&
-            now >= lastScheduled &&
-            (now - lastScheduled) < period) {
+        const auto lastIssued =
+            state ? state->lastIssued[index] : std::chrono::steady_clock::time_point {};
+        if (lastIssued != std::chrono::steady_clock::time_point {} &&
+            now >= lastIssued &&
+            (now - lastIssued) < period) {
             continue;
         }
         plan.push(query);
-        state->lastScheduled[index] = now;
     }
     return plan;
+}
+
+inline void NotePpRefreshQueryDue(std::chrono::steady_clock::time_point now,
+                                  PpAxisRefreshScheduleState *state,
+                                  PpRefreshQuery query)
+{
+    if (!state) {
+        return;
+    }
+    state->lastDue[PpRefreshQueryIndex(query)] = now;
+}
+
+inline void NotePpRefreshQueryIssued(std::chrono::steady_clock::time_point now,
+                                     PpAxisRefreshScheduleState *state,
+                                     PpRefreshQuery query)
+{
+    if (!state) {
+        return;
+    }
+    state->lastIssued[PpRefreshQueryIndex(query)] = now;
 }
 
 inline MtRefreshPlan BuildMtRefreshPlan(std::uint64_t cycle,

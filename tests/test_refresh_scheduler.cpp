@@ -16,6 +16,16 @@ bool planContains(const can_driver::PpRefreshPlan &plan, can_driver::PpRefreshQu
     return false;
 }
 
+void noteIssued(steady_tp now,
+                can_driver::PpAxisRefreshScheduleState *state,
+                const can_driver::PpRefreshPlan &plan)
+{
+    for (std::size_t i = 0; i < plan.count; ++i) {
+        can_driver::NotePpRefreshQueryDue(now, state, plan.items[i]);
+        can_driver::NotePpRefreshQueryIssued(now, state, plan.items[i]);
+    }
+}
+
 TEST(RefreshSchedulerTest, PpHealthyPlanKeepsAllFieldsWithinDeadline)
 {
     can_driver::PpAxisRefreshSnapshot snapshot;
@@ -37,16 +47,19 @@ TEST(RefreshSchedulerTest, PpHealthyPlanKeepsAllFieldsWithinDeadline)
     EXPECT_TRUE(planContains(plan0, can_driver::PpRefreshQuery::Enable));
     EXPECT_TRUE(planContains(plan0, can_driver::PpRefreshQuery::Fault));
     EXPECT_TRUE(planContains(plan0, can_driver::PpRefreshQuery::Current));
+    noteIssued(t0, &state, plan0);
 
     const auto plan1 =
         can_driver::BuildPpRefreshPlan(t0 + std::chrono::milliseconds(50), false, snapshot, &state);
     ASSERT_EQ(plan1.count, 1u);
     EXPECT_EQ(plan1.items[0], can_driver::PpRefreshQuery::Position);
+    noteIssued(t0 + std::chrono::milliseconds(50), &state, plan1);
 
     const auto plan2 =
         can_driver::BuildPpRefreshPlan(t0 + std::chrono::milliseconds(100), false, snapshot, &state);
     EXPECT_EQ(plan2.count, can_driver::kPpRefreshQueryCount);
     EXPECT_TRUE(planContains(plan2, can_driver::PpRefreshQuery::Current));
+    noteIssued(t0 + std::chrono::milliseconds(100), &state, plan2);
 
     const auto plan3 =
         can_driver::BuildPpRefreshPlan(t0 + std::chrono::milliseconds(150), false, snapshot, &state);
@@ -64,6 +77,7 @@ TEST(RefreshSchedulerTest, PpPriorityPlanAcceleratesLifecycleQueriesTo50Ms)
     const auto plan0 = can_driver::BuildPpRefreshPlan(t0, false, snapshot, &state);
     ASSERT_EQ(plan0.count, 6u);
     EXPECT_TRUE(planContains(plan0, can_driver::PpRefreshQuery::Current));
+    noteIssued(t0, &state, plan0);
 
     const auto plan1 =
         can_driver::BuildPpRefreshPlan(t0 + std::chrono::milliseconds(50), false, snapshot, &state);
@@ -74,6 +88,7 @@ TEST(RefreshSchedulerTest, PpPriorityPlanAcceleratesLifecycleQueriesTo50Ms)
     EXPECT_TRUE(planContains(plan1, can_driver::PpRefreshQuery::Enable));
     EXPECT_TRUE(planContains(plan1, can_driver::PpRefreshQuery::Fault));
     EXPECT_FALSE(planContains(plan1, can_driver::PpRefreshQuery::Current));
+    noteIssued(t0 + std::chrono::milliseconds(50), &state, plan1);
 }
 
 TEST(RefreshSchedulerTest, PpPressurePlanDoesNotStarveCurrentBeyond100Ms)
@@ -91,11 +106,13 @@ TEST(RefreshSchedulerTest, PpPressurePlanDoesNotStarveCurrentBeyond100Ms)
     const auto plan0 = can_driver::BuildPpRefreshPlan(t0, true, snapshot, &state);
     ASSERT_EQ(plan0.count, 6u);
     EXPECT_TRUE(planContains(plan0, can_driver::PpRefreshQuery::Current));
+    noteIssued(t0, &state, plan0);
 
     const auto plan1 =
         can_driver::BuildPpRefreshPlan(t0 + std::chrono::milliseconds(50), true, snapshot, &state);
     ASSERT_EQ(plan1.count, 1u);
     EXPECT_EQ(plan1.items[0], can_driver::PpRefreshQuery::Position);
+    noteIssued(t0 + std::chrono::milliseconds(50), &state, plan1);
 
     const auto plan2 =
         can_driver::BuildPpRefreshPlan(t0 + std::chrono::milliseconds(100), true, snapshot, &state);

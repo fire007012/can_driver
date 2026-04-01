@@ -180,29 +180,24 @@ uint64_t EyouCan::normalWriteSentCount() const
     return normalWriteSentCount_.load(std::memory_order_relaxed);
 }
 
-void EyouCan::issueRefreshQuery(MotorID motorId, RefreshQuery query)
+bool EyouCan::issueRefreshQuery(MotorID motorId, RefreshQuery query)
 {
     const uint8_t id = static_cast<uint8_t>(motorId);
     switch (query) {
     case RefreshQuery::Position:
-        requestPosition(id);
-        break;
+        return requestPosition(id);
     case RefreshQuery::Velocity:
-        requestVelocity(id);
-        break;
+        return requestVelocity(id);
     case RefreshQuery::Mode:
-        requestMode(id);
-        break;
+        return requestMode(id);
     case RefreshQuery::Enable:
-        requestEnable(id);
-        break;
+        return requestEnable(id);
     case RefreshQuery::Fault:
-        requestFault(id);
-        break;
+        return requestFault(id);
     case RefreshQuery::Current:
-        requestCurrent(id);
-        break;
+        return requestCurrent(id);
     }
+    return false;
 }
 
 bool EyouCan::setMode(MotorID Id, MotorMode mode)
@@ -1068,36 +1063,36 @@ void EyouCan::registerManagedMotorId(uint8_t motorId) const
     }
 }
 
-void EyouCan::requestPosition(uint8_t motorId)
+bool EyouCan::requestPosition(uint8_t motorId)
 {
-    (void)tryIssueReadCommand(motorId, 0x07);
+    return tryIssueReadCommand(motorId, 0x07);
 }
 
-void EyouCan::requestMode(uint8_t motorId)
+bool EyouCan::requestMode(uint8_t motorId)
 {
-    (void)tryIssueReadCommand(motorId, 0x0F);
+    return tryIssueReadCommand(motorId, 0x0F);
 }
 
-void EyouCan::requestEnable(uint8_t motorId)
+bool EyouCan::requestEnable(uint8_t motorId)
 {
-    (void)tryIssueReadCommand(motorId, 0x10);
+    return tryIssueReadCommand(motorId, 0x10);
 }
 
-void EyouCan::requestFault(uint8_t motorId)
+bool EyouCan::requestFault(uint8_t motorId)
 {
-    (void)tryIssueReadCommand(motorId, 0x15);
+    return tryIssueReadCommand(motorId, 0x15);
 }
 
 // [FIX #7] 新增：请求电流值
-void EyouCan::requestCurrent(uint8_t motorId)
+bool EyouCan::requestCurrent(uint8_t motorId)
 {
-    (void)tryIssueReadCommand(motorId, 0x05);
+    return tryIssueReadCommand(motorId, 0x05);
 }
 
 // [FIX #8] 新增：请求速度值
-void EyouCan::requestVelocity(uint8_t motorId)
+bool EyouCan::requestVelocity(uint8_t motorId)
 {
-    (void)tryIssueReadCommand(motorId, 0x06);
+    return tryIssueReadCommand(motorId, 0x06);
 }
 
 void EyouCan::stopRefreshLoop()
