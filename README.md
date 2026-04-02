@@ -6,6 +6,11 @@ Supported protocols:
 - `MT`
 - `PP` (Eyou)
 
+Supported control modes:
+- `position` - Position control (PP mode)
+- `velocity` - Velocity control (PV mode)
+- `csp` - Cyclic Synchronous Position mode (high-frequency position control for multi-axis synchronization)
+
 ## Build
 
 ```bash
@@ -32,11 +37,11 @@ roslaunch can_driver can_driver.launch
 
 - Topic sub: `~motor/<joint>/cmd_velocity` (`std_msgs/Float64`)
 - Topic sub: `~motor/<joint>/cmd_position` (`std_msgs/Float64`)
-- Topic pub: `~motor_states` (`can_driver/MotorState`)
+- Topic pub: `~motor_states` (`can_driver/MotorState`, feedback-only semantics with `*_valid` and `feedback_fresh`)
 - Service: `~init`
 - Service: `~shutdown`
 - Service: `~recover`
-- Service: `~motor_command`
+- Service: `~motor_command` (`CMD_SET_MODE=3`, value `0=position 1=velocity 2=csp`)
 
 ## More Docs
 
