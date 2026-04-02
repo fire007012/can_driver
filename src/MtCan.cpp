@@ -793,8 +793,11 @@ void MtCan::syncSharedFeedback(uint8_t motorId, const MotorState &state) const
             feedback->positionValid = true;
             feedback->velocityValid = true;
             feedback->currentValid = true;
+            feedback->modeValid = true;
             feedback->enabled = state.enabled;
             feedback->fault = state.error;
+            feedback->enabledValid = true;
+            feedback->faultValid = true;
             feedback->feedbackSeen = true;
             feedback->lastRxSteadyNs = nowNs;
             feedback->lastValidStateSteadyNs = nowNs;

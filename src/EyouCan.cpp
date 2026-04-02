@@ -789,8 +789,11 @@ void EyouCan::syncSharedFeedback(uint8_t motorId, const MotorState &state) const
             feedback->positionValid = state.positionReceived;
             feedback->velocityValid = state.velocityReceived;
             feedback->currentValid = state.currentReceived;
+            feedback->modeValid = state.modeReceived;
             feedback->enabled = state.enabled;
             feedback->fault = state.fault;
+            feedback->enabledValid = state.enabledReceived;
+            feedback->faultValid = state.faultReceived;
             feedback->feedbackSeen = true;
             feedback->lastRxSteadyNs = nowNs;
             feedback->lastValidStateSteadyNs = nowNs;
@@ -981,17 +984,20 @@ void EyouCan::handleResponse(const CanTransport::Frame &frame)
                     state.mode = MotorMode::Position;
                     break;
                 }
+                state.modeReceived = true;
                 break;
             case 0x10:
                 // 使能/失能状态
                 // 读返回: 32位数据，01=使能 00=失能
                 state.enabled = dataByteOrZero(frame, 5) != 0;
+                state.enabledReceived = true;
                 break;
             case 0x15:
                 // [FIX #4] 告警指示，数据从 data[2] 开始
                 {
                     uint32_t errorCode = readUInt32BE(frame, 2);
                     state.fault = (errorCode != 0);
+                    state.faultReceived = true;
                     if (errorCode != 0) {
                         std::cerr << "[EyouCan] Motor " << static_cast<int>(motorId)
                                   << " reported error code 0x" << std::hex

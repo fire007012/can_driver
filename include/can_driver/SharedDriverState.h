@@ -53,8 +53,11 @@ public:
         bool positionValid{false};
         bool velocityValid{false};
         bool currentValid{false};
+        bool modeValid{false};
         bool enabled{false};
         bool fault{false};
+        bool enabledValid{false};
+        bool faultValid{false};
         bool feedbackSeen{false};
         bool degraded{false};
         std::int64_t lastRxSteadyNs{0};

@@ -74,6 +74,7 @@ class MotorPanel:
         self.enabled = tk.BooleanVar(value=False)
         self.fault = tk.BooleanVar(value=False)
         self.mode_text = tk.StringVar(value="--")
+        self.feedback_text = tk.StringVar(value="未知")
 
         self.frame = ttk.LabelFrame(parent, text=self.name, padding=4)
 
@@ -91,6 +92,9 @@ class MotorPanel:
         self.lbl_enabled.pack(side=tk.LEFT, padx=8)
         self.lbl_fault = ttk.Label(row_status, text="● 故障", foreground="gray")
         self.lbl_fault.pack(side=tk.LEFT, padx=4)
+        ttk.Label(row_status, text="反馈:").pack(side=tk.LEFT, padx=(6, 0))
+        self.lbl_feedback = ttk.Label(row_status, textvariable=self.feedback_text, foreground="gray")
+        self.lbl_feedback.pack(side=tk.LEFT, padx=4)
 
         ttk.Label(row_status, text="位置(rad):").pack(side=tk.LEFT, padx=(12, 0))
         ttk.Label(row_status, textvariable=self.position, width=10).pack(side=tk.LEFT)
@@ -100,24 +104,43 @@ class MotorPanel:
         ttk.Label(row_status, textvariable=self.current, width=8).pack(side=tk.LEFT)
 
     def update_state(self, msg: MotorState):
-        position_si = float(msg.position) * self.position_scale
-        velocity_si = float(msg.velocity) * self.velocity_scale
-        self.position.set(f"{position_si:.4f}")
-        self.velocity.set(f"{velocity_si:.4f}")
-        self.current.set(str(msg.current))
-        self.enabled.set(msg.enabled)
-        self.fault.set(msg.fault)
-        self.mode_text.set(MODE_NAMES.get(msg.mode, f"({msg.mode})"))
-
-        if msg.enabled:
-            self.lbl_enabled.config(text="● 已使能", foreground="green")
+        if msg.position_valid:
+            position_si = float(msg.position) * self.position_scale
+            self.position.set(f"{position_si:.4f}")
         else:
-            self.lbl_enabled.config(text="● 未使能", foreground="gray")
+            self.position.set("--")
 
-        if msg.fault:
-            self.lbl_fault.config(text="● 故障", foreground="red")
+        if msg.velocity_valid:
+            velocity_si = float(msg.velocity) * self.velocity_scale
+            self.velocity.set(f"{velocity_si:.4f}")
         else:
-            self.lbl_fault.config(text="● 正常", foreground="gray")
+            self.velocity.set("--")
+
+        self.current.set(str(msg.current) if msg.current_valid else "--")
+        self.enabled.set(msg.enabled if msg.status_valid else False)
+        self.fault.set(msg.fault if msg.status_valid else False)
+        self.mode_text.set(MODE_NAMES.get(msg.mode, f"({msg.mode})") if msg.mode_valid else "未知")
+
+        if msg.status_valid:
+            if msg.enabled:
+                self.lbl_enabled.config(text="● 已使能", foreground="green")
+            else:
+                self.lbl_enabled.config(text="● 未使能", foreground="gray")
+
+            if msg.fault:
+                self.lbl_fault.config(text="● 故障", foreground="red")
+            else:
+                self.lbl_fault.config(text="● 正常", foreground="gray")
+        else:
+            self.lbl_enabled.config(text="● 使能未知", foreground="gray")
+            self.lbl_fault.config(text="● 故障未知", foreground="gray")
+
+        if msg.feedback_fresh:
+            self.feedback_text.set("新鲜")
+            self.lbl_feedback.config(foreground="green")
+        else:
+            self.feedback_text.set("陈旧/未知")
+            self.lbl_feedback.config(foreground="#b36b00")
 
 
 class RealtimeMotorUI:

@@ -330,10 +330,15 @@ public:
                         feedback->positionValid = true;
                         feedback->velocityValid = true;
                         feedback->currentValid = true;
+                        feedback->modeValid = true;
                         feedback->position = protocol_->getPosition(entry.second);
                         feedback->velocity = protocol_->getVelocity(entry.second);
                         feedback->current = protocol_->getCurrent(entry.second);
                         feedback->mode = protocol_->lastMode();
+                        feedback->enabled = protocol_->isEnabled(entry.second);
+                        feedback->fault = protocol_->hasFault(entry.second);
+                        feedback->enabledValid = true;
+                        feedback->faultValid = true;
                         feedback->lastRxSteadyNs = nowNs;
                         feedback->lastValidStateSteadyNs = nowNs;
                     });
@@ -413,12 +418,15 @@ public:
                         feedback->positionValid = true;
                         feedback->velocityValid = true;
                         feedback->currentValid = true;
+                        feedback->modeValid = true;
                         feedback->position = protocol_->getPosition(motorEntry.second);
                         feedback->velocity = protocol_->getVelocity(motorEntry.second);
                         feedback->current = protocol_->getCurrent(motorEntry.second);
                         feedback->mode = protocol_->lastMode();
                         feedback->enabled = protocol_->isEnabled(motorEntry.second);
                         feedback->fault = protocol_->hasFault(motorEntry.second);
+                        feedback->enabledValid = true;
+                        feedback->faultValid = true;
                         feedback->lastRxSteadyNs = nowNs;
                         feedback->lastValidStateSteadyNs = nowNs;
                     });
@@ -1173,6 +1181,12 @@ TEST_F(CanDriverHWSmokeTest, InitCspJointSetsModeAndPublishesRawFeedbackFromPprC
     EXPECT_EQ(latestState.position, 16384);
     EXPECT_EQ(latestState.velocity, 512);
     EXPECT_EQ(latestState.mode, can_driver::MotorState::MODE_CSP);
+    EXPECT_TRUE(latestState.mode_valid);
+    EXPECT_TRUE(latestState.status_valid);
+    EXPECT_TRUE(latestState.position_valid);
+    EXPECT_TRUE(latestState.velocity_valid);
+    EXPECT_TRUE(latestState.current_valid);
+    EXPECT_TRUE(latestState.feedback_fresh);
 
     spinner.stop();
 }
@@ -1202,7 +1216,8 @@ TEST_F(CanDriverHWSmokeTest, MotorStatesPreferSharedFeedbackOverConfiguredModeAn
             std::lock_guard<std::mutex> lock(stateMutex);
             latestState = *msg;
             sawSharedState =
-                msg->mode == can_driver::MotorState::MODE_POSITION && !msg->enabled && msg->fault;
+                msg->mode_valid && msg->mode == can_driver::MotorState::MODE_POSITION &&
+                msg->status_valid && !msg->enabled && msg->fault;
         });
 
     ros::AsyncSpinner spinner(1);
@@ -1219,6 +1234,9 @@ TEST_F(CanDriverHWSmokeTest, MotorStatesPreferSharedFeedbackOverConfiguredModeAn
             feedback->enabled = false;
             feedback->fault = true;
             feedback->mode = CanProtocol::MotorMode::Position;
+            feedback->modeValid = true;
+            feedback->enabledValid = true;
+            feedback->faultValid = true;
             feedback->lastRxSteadyNs = can_driver::SharedDriverSteadyNowNs();
             feedback->lastValidStateSteadyNs = feedback->lastRxSteadyNs;
         });
@@ -1229,8 +1247,85 @@ TEST_F(CanDriverHWSmokeTest, MotorStatesPreferSharedFeedbackOverConfiguredModeAn
 
     ASSERT_TRUE(sawSharedState);
     EXPECT_EQ(latestState.mode, can_driver::MotorState::MODE_POSITION);
+    EXPECT_TRUE(latestState.mode_valid);
     EXPECT_FALSE(latestState.enabled);
     EXPECT_TRUE(latestState.fault);
+    EXPECT_TRUE(latestState.status_valid);
+    EXPECT_TRUE(latestState.feedback_fresh);
+
+    spinner.stop();
+}
+
+TEST_F(CanDriverHWSmokeTest, MotorStatesPublishUnknownWhenFeedbackValidityIsMissingOrStale)
+{
+    auto fakeDm = std::make_shared<FakeDeviceManager>();
+
+    CanDriverHW hw(fakeDm);
+
+    ros::NodeHandle nh;
+    ros::NodeHandle pnh(uniqueNs("can_driver_hw_smoke_invalid_motor_state"));
+
+    pnh.setParam("joints", makeSingleCspJoint());
+    pnh.setParam("motor_state_period_sec", 0.05);
+
+    ASSERT_TRUE(hw.init(nh, pnh));
+
+    std::mutex stateMutex;
+    can_driver::MotorState latestState;
+    bool sawInvalidState = false;
+    ros::Subscriber stateSub = nh.subscribe<can_driver::MotorState>(
+        pnh.resolveName("motor_states"), 1,
+        [&stateMutex, &latestState, &sawInvalidState](const can_driver::MotorState::ConstPtr &msg) {
+            std::lock_guard<std::mutex> lock(stateMutex);
+            latestState = *msg;
+            sawInvalidState = !msg->mode_valid && !msg->status_valid &&
+                              msg->position_valid && !msg->velocity_valid &&
+                              !msg->current_valid && !msg->feedback_fresh;
+        });
+
+    ros::AsyncSpinner spinner(1);
+    spinner.start();
+
+    const auto initResult = hw.operationalCoordinator().RequestInit("fake0", false);
+    ASSERT_TRUE(initResult.ok) << initResult.message;
+
+    const auto axisKey = can_driver::MakeAxisKey("fake0", CanType::PP, static_cast<MotorID>(0x05));
+    fakeDm->sharedState()->mutateAxisFeedback(
+        axisKey,
+        [](can_driver::SharedDriverState::AxisFeedbackState *feedback) {
+            feedback->feedbackSeen = true;
+            feedback->position = 2048;
+            feedback->velocity = 777;
+            feedback->current = 123;
+            feedback->positionValid = true;
+            feedback->velocityValid = false;
+            feedback->currentValid = false;
+            feedback->mode = CanProtocol::MotorMode::CSP;
+            feedback->modeValid = false;
+            feedback->enabled = true;
+            feedback->fault = true;
+            feedback->enabledValid = false;
+            feedback->faultValid = false;
+            feedback->lastRxSteadyNs =
+                can_driver::SharedDriverSteadyNowNs() - 1000000000LL;
+            feedback->lastValidStateSteadyNs = feedback->lastRxSteadyNs;
+        });
+
+    for (int i = 0; i < 20 && !sawInvalidState; ++i) {
+        ros::Duration(0.02).sleep();
+    }
+
+    ASSERT_TRUE(sawInvalidState);
+    EXPECT_EQ(latestState.position, 2048);
+    EXPECT_TRUE(latestState.position_valid);
+    EXPECT_FALSE(latestState.velocity_valid);
+    EXPECT_FALSE(latestState.current_valid);
+    EXPECT_EQ(latestState.mode, can_driver::MotorState::MODE_UNKNOWN);
+    EXPECT_FALSE(latestState.mode_valid);
+    EXPECT_FALSE(latestState.status_valid);
+    EXPECT_FALSE(latestState.enabled);
+    EXPECT_FALSE(latestState.fault);
+    EXPECT_FALSE(latestState.feedback_fresh);
 
     spinner.stop();
 }

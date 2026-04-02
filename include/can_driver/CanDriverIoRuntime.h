@@ -379,15 +379,23 @@ public:
         result.messages.reserve(joints.size());
 
         struct StatusSnapshot {
+            std::int32_t position{0};
+            std::int16_t velocity{0};
+            std::int16_t current{0};
+            bool positionValid{false};
+            bool velocityValid{false};
+            bool currentValid{false};
             bool enabled{false};
             bool fault{false};
             std::uint8_t mode{can_driver::MotorState::MODE_UNKNOWN};
             bool statusValid{false};
             bool modeValid{false};
+            bool feedbackFresh{false};
         };
 
         std::vector<StatusSnapshot> statusSnapshots(joints.size());
         const auto sharedState = deviceManager.getSharedDriverState();
+        const auto nowNs = SharedDriverSteadyNowNs();
         if (sharedState) {
             for (const auto &group : groups) {
                 for (const std::size_t index : group.jointIndices) {
@@ -395,59 +403,53 @@ public:
                     can_driver::SharedDriverState::AxisFeedbackState feedback;
                     if (!sharedState->getAxisFeedback(
                             can_driver::MakeAxisKey(group.canDevice, group.protocol, joint.motorId),
-                            &feedback) ||
-                        !feedback.feedbackSeen) {
+                            &feedback)) {
                         continue;
                     }
 
-                    statusSnapshots[index].enabled = feedback.enabled;
-                    statusSnapshots[index].fault = feedback.fault;
-                    statusSnapshots[index].mode = motorStateModeFromProtocolMode(feedback.mode);
-                    statusSnapshots[index].statusValid = true;
-                    statusSnapshots[index].modeValid = true;
+                    auto &snapshot = statusSnapshots[index];
+                    snapshot.position = can_driver::safe_command::clampToInt32(feedback.position);
+                    snapshot.velocity = can_driver::safe_command::clampToInt16(feedback.velocity);
+                    snapshot.current = can_driver::safe_command::clampToInt16(feedback.current);
+                    snapshot.positionValid = feedback.positionValid;
+                    snapshot.velocityValid = feedback.velocityValid;
+                    snapshot.currentValid = feedback.currentValid;
+                    snapshot.enabled = feedback.enabled;
+                    snapshot.fault = feedback.fault;
+                    snapshot.mode = feedback.modeValid
+                                        ? motorStateModeFromProtocolMode(feedback.mode)
+                                        : can_driver::MotorState::MODE_UNKNOWN;
+                    snapshot.statusValid = feedback.enabledValid && feedback.faultValid;
+                    snapshot.modeValid = feedback.modeValid;
+                    snapshot.feedbackFresh = sharedFeedbackFresh(feedback, nowNs);
                 }
-            }
-        }
-
-        for (const auto &group : groups) {
-            auto proto = deviceManager.getProtocol(group.canDevice, group.protocol);
-            auto devMutex = deviceManager.getDeviceMutex(group.canDevice);
-            if (!proto || !devMutex) {
-                continue;
-            }
-
-            std::lock_guard<std::mutex> devLock(*devMutex);
-            for (const std::size_t index : group.jointIndices) {
-                if (statusSnapshots[index].statusValid) {
-                    continue;
-                }
-                const auto &joint = joints[index];
-                statusSnapshots[index].enabled = proto->isEnabled(joint.motorId);
-                statusSnapshots[index].fault = proto->hasFault(joint.motorId);
-                statusSnapshots[index].statusValid = true;
             }
         }
 
         std::lock_guard<std::mutex> lock(*jointStateMutex);
         for (std::size_t index = 0; index < joints.size(); ++index) {
             const auto &joint = joints[index];
+            const auto &snapshot = statusSnapshots[index];
             can_driver::MotorState message;
             message.motor_id = static_cast<uint16_t>(joint.motorId);
             message.name = joint.name;
 
-            const double rawPos = joint.pos / joint.positionScale;
-            const double rawVel = joint.vel / joint.velocityScale;
-            message.position = can_driver::safe_command::clampToInt32(rawPos);
-            message.velocity = can_driver::safe_command::clampToInt16(rawVel);
-            message.current = can_driver::safe_command::clampToInt16(joint.eff);
-            message.mode = statusSnapshots[index].modeValid
-                               ? statusSnapshots[index].mode
-                               : motorStateModeFromControlMode(joint.controlMode);
-            if (statusSnapshots[index].statusValid) {
-                message.enabled = statusSnapshots[index].enabled;
-                message.fault = statusSnapshots[index].fault;
+            message.position = snapshot.position;
+            message.velocity = snapshot.velocity;
+            message.current = snapshot.current;
+            message.mode =
+                snapshot.modeValid ? snapshot.mode : can_driver::MotorState::MODE_UNKNOWN;
+            if (snapshot.statusValid) {
+                message.enabled = snapshot.enabled;
+                message.fault = snapshot.fault;
             }
-            result.anyFault = result.anyFault || message.fault;
+            message.mode_valid = snapshot.modeValid;
+            message.status_valid = snapshot.statusValid;
+            message.position_valid = snapshot.positionValid;
+            message.velocity_valid = snapshot.velocityValid;
+            message.current_valid = snapshot.currentValid;
+            message.feedback_fresh = snapshot.feedbackFresh;
+            result.anyFault = result.anyFault || (message.status_valid && message.fault);
 
             result.messages.push_back(std::move(message));
         }
@@ -467,18 +469,6 @@ private:
             return can_driver::MotorState::MODE_POSITION;
         }
         return can_driver::MotorState::MODE_UNKNOWN;
-    }
-
-    static std::uint8_t motorStateModeFromControlMode(const std::string &controlMode)
-    {
-        const auto mode = can_driver::axisControlModeFromString(controlMode);
-        if (mode == can_driver::AxisControlMode::Velocity) {
-            return can_driver::MotorState::MODE_VELOCITY;
-        }
-        if (mode == can_driver::AxisControlMode::Csp) {
-            return can_driver::MotorState::MODE_CSP;
-        }
-        return can_driver::MotorState::MODE_POSITION;
     }
 
     static bool sharedFeedbackFresh(const SharedDriverState::AxisFeedbackState &feedback,

@@ -139,6 +139,9 @@ private:
         bool positionReceived = false;
         bool velocityReceived = false;
         bool currentReceived = false;
+        bool modeReceived = false;
+        bool enabledReceived = false;
+        bool faultReceived = false;
         bool positionVelocityConfigured = false;
         MotorMode mode = MotorMode::Position;
     };

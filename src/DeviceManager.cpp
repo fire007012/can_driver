@@ -47,10 +47,16 @@ can_driver::PpAxisRefreshSnapshot buildPpAxisRefreshSnapshot(
     can_driver::SharedDriverState::AxisFeedbackState feedback;
     if (sharedState->getAxisFeedback(axisKey, &feedback)) {
         snapshot.feedbackSeen = feedback.feedbackSeen;
-        snapshot.enabled = feedback.enabled;
-        snapshot.fault = feedback.fault;
+        if (feedback.enabledValid) {
+            snapshot.enabled = feedback.enabled;
+        }
+        if (feedback.faultValid) {
+            snapshot.fault = feedback.fault;
+        }
         snapshot.degraded = feedback.degraded;
-        snapshot.feedbackMode = feedback.mode;
+        if (feedback.modeValid) {
+            snapshot.feedbackMode = feedback.mode;
+        }
     }
 
     can_driver::SharedDriverState::AxisCommandState command;
