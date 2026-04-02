@@ -9,31 +9,18 @@ bool snapshotCommandChanged(const CommandGate::Snapshot &current,
 {
     constexpr double kEps = 1e-12;
 
-    if (current.controlMode == "velocity") {
-        if (current.hasDirectVelCmd != baseline.hasDirectVelCmd) {
-            return true;
-        }
-        if (current.hasDirectVelCmd &&
-            std::fabs(current.directVelCmd - baseline.directVelCmd) > kEps) {
-            return true;
-        }
-        return std::fabs(current.velCmd - baseline.velCmd) > kEps;
-    }
-
-    if (current.hasDirectPosCmd != baseline.hasDirectPosCmd) {
+    if (current.controlMode != baseline.controlMode) {
         return true;
     }
-    if (current.hasDirectPosCmd &&
-        std::fabs(current.directPosCmd - baseline.directPosCmd) > kEps) {
+    if (current.hasDirectCommand != baseline.hasDirectCommand) {
         return true;
     }
-    return std::fabs(current.posCmd - baseline.posCmd) > kEps;
+    return std::fabs(current.commandValue - baseline.commandValue) > kEps;
 }
 
 bool snapshotTargetAlreadyAligned(const CommandGate::Snapshot &snapshot)
 {
-    return (snapshot.controlMode == "velocity") ? snapshot.velocityTargetNearActual
-                                                : snapshot.positionTargetNearActual;
+    return snapshot.targetNearActual;
 }
 
 } // namespace

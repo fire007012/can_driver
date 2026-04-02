@@ -1,6 +1,7 @@
 #ifndef CAN_DRIVER_CAN_DRIVER_IO_RUNTIME_H
 #define CAN_DRIVER_CAN_DRIVER_IO_RUNTIME_H
 
+#include "can_driver/AxisCommandSemantics.h"
 #include "can_driver/AxisReadinessEvaluator.h"
 #include "can_driver/CanDriverHwTypes.h"
 #include "can_driver/IDeviceManager.h"
@@ -103,59 +104,37 @@ public:
         const ros::Time now = ros::Time::now();
         for (std::size_t index = 0; index < joints->size(); ++index) {
             auto &joint = (*joints)[index];
+            const auto mode = can_driver::axisControlModeFromString(joint.controlMode);
             auto &prepared = (*preparedCommandBuffer)[index];
             prepared.valid = false;
             prepared.jointIndex = index;
             prepared.motorId = joint.motorId;
-            prepared.route = can_driver::controlModeDispatchRoute(joint.controlMode);
+            prepared.route = can_driver::controlModeDispatchRoute(mode);
             prepared.jointName = joint.name;
 
             bool useDirect = false;
             double cmdValue = 0.0;
             bool hasCommand = true;
-            if (joint.controlMode == "velocity") {
-                if (joint.hasDirectVelCmd) {
-                    if (config.debugBypassRosControl) {
+            if (can_driver::controlModeHasDirectCommand(joint, mode)) {
+                if (config.debugBypassRosControl) {
+                    useDirect = true;
+                    cmdValue = can_driver::controlModeDirectCommandValue(joint, mode);
+                } else {
+                    const double age =
+                        (now - can_driver::controlModeLastDirectCommandTime(joint, mode)).toSec();
+                    if (age <= config.directCmdTimeoutSec) {
                         useDirect = true;
-                        cmdValue = joint.directVelCmd;
+                        cmdValue = can_driver::controlModeDirectCommandValue(joint, mode);
                     } else {
-                        const double age = (now - joint.lastDirectVelTime).toSec();
-                        if (age <= config.directCmdTimeoutSec) {
-                            useDirect = true;
-                            cmdValue = joint.directVelCmd;
-                        } else {
-                            joint.hasDirectVelCmd = false;
-                        }
+                        can_driver::clearDirectCommandForControlMode(&joint, mode);
                     }
                 }
-                if (!useDirect) {
-                    if (config.debugBypassRosControl) {
-                        hasCommand = false;
-                    } else {
-                        cmdValue = joint.velCmd;
-                    }
-                }
-            } else {
-                if (joint.hasDirectPosCmd) {
-                    if (config.debugBypassRosControl) {
-                        useDirect = true;
-                        cmdValue = joint.directPosCmd;
-                    } else {
-                        const double age = (now - joint.lastDirectPosTime).toSec();
-                        if (age <= config.directCmdTimeoutSec) {
-                            useDirect = true;
-                            cmdValue = joint.directPosCmd;
-                        } else {
-                            joint.hasDirectPosCmd = false;
-                        }
-                    }
-                }
-                if (!useDirect) {
-                    if (config.debugBypassRosControl) {
-                        hasCommand = false;
-                    } else {
-                        cmdValue = joint.posCmd;
-                    }
+            }
+            if (!useDirect) {
+                if (config.debugBypassRosControl) {
+                    hasCommand = false;
+                } else {
+                    cmdValue = can_driver::controlModeFallbackCommandValue(joint, mode);
                 }
             }
 
@@ -166,11 +145,8 @@ public:
 
             cmdValue = clampWithJointLimits(joint, cmdValue);
             if (joint.requireCommandAlignment) {
-                const double actualValue =
-                    (joint.controlMode == "velocity") ? joint.vel : joint.pos;
-                const double tolerance = std::max(
-                    (joint.controlMode == "velocity") ? joint.velocityScale : joint.positionScale,
-                    1e-9);
+                const double actualValue = can_driver::controlModeActualFeedbackValue(joint, mode);
+                const double tolerance = can_driver::controlModeAlignmentTolerance(joint, mode);
                 if (!std::isfinite(cmdValue) || !std::isfinite(actualValue) ||
                     std::fabs(cmdValue - actualValue) > tolerance) {
                     (*commandValidBuffer)[index] = 0;
@@ -178,7 +154,7 @@ public:
                         1.0,
                         "[CanDriverHW] Joint '%s' waiting for an aligned %s command after mode switch: actual=%.6f target=%.6f tolerance=%.6f.",
                         joint.name.c_str(),
-                        (joint.controlMode == "velocity") ? "velocity" : "position",
+                        can_driver::controlModeSemanticLabel(mode),
                         actualValue,
                         cmdValue,
                         tolerance);
@@ -206,8 +182,7 @@ public:
                 cmdValue = clampWithJointLimits(joint, cmdValue);
             }
 
-            const double scale =
-                (joint.controlMode == "velocity") ? joint.velocityScale : joint.positionScale;
+            const double scale = can_driver::controlModeScale(joint, mode);
             (*commandValidBuffer)[index] = static_cast<uint8_t>(
                 can_driver::safe_command::scaleAndClampToInt32(
                     cmdValue, scale, joint.name, (*rawCommandBuffer)[index]));
@@ -496,10 +471,11 @@ private:
 
     static std::uint8_t motorStateModeFromControlMode(const std::string &controlMode)
     {
-        if (controlMode == "velocity") {
+        const auto mode = can_driver::axisControlModeFromString(controlMode);
+        if (mode == can_driver::AxisControlMode::Velocity) {
             return can_driver::MotorState::MODE_VELOCITY;
         }
-        if (controlMode == "csp") {
+        if (mode == can_driver::AxisControlMode::Csp) {
             return can_driver::MotorState::MODE_CSP;
         }
         return can_driver::MotorState::MODE_POSITION;
@@ -550,7 +526,7 @@ private:
             joint.hasDirectPosCmd = false;
             joint.hasDirectVelCmd = false;
             joint.stopIssuedOnFault = false;
-            if (joint.controlMode == "velocity") {
+            if (can_driver::controlModeUsesVelocitySemantics(joint.controlMode)) {
                 joint.velCmd = 0.0;
             } else {
                 joint.posCmd = joint.pos;

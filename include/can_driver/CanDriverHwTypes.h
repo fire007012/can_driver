@@ -13,32 +13,11 @@
 
 namespace can_driver {
 
-inline bool controlModeUsesVelocitySemantics(const std::string &controlMode)
-{
-    return controlMode == "velocity";
-}
-
-inline bool controlModeUsesPositionSemantics(const std::string &controlMode)
-{
-    return !controlModeUsesVelocitySemantics(controlMode);
-}
-
 enum class PreparedCommandRoute {
     Position,
     Velocity,
     Csp,
 };
-
-inline PreparedCommandRoute controlModeDispatchRoute(const std::string &controlMode)
-{
-    if (controlModeUsesVelocitySemantics(controlMode)) {
-        return PreparedCommandRoute::Velocity;
-    }
-    if (controlMode == "csp") {
-        return PreparedCommandRoute::Csp;
-    }
-    return PreparedCommandRoute::Position;
-}
 
 struct CanDriverPreparedCommand {
     bool valid{false};

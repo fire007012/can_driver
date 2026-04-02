@@ -1,6 +1,8 @@
 #ifndef CAN_DRIVER_COMMAND_GATE_HPP
 #define CAN_DRIVER_COMMAND_GATE_HPP
 
+#include "can_driver/AxisCommandSemantics.h"
+
 #include <functional>
 #include <map>
 #include <mutex>
@@ -10,15 +12,10 @@
 class CommandGate {
 public:
     struct Snapshot {
-        std::string controlMode;
-        double posCmd{0.0};
-        double velCmd{0.0};
-        double directPosCmd{0.0};
-        double directVelCmd{0.0};
-        bool hasDirectPosCmd{false};
-        bool hasDirectVelCmd{false};
-        bool positionTargetNearActual{false};
-        bool velocityTargetNearActual{false};
+        can_driver::AxisControlMode controlMode{can_driver::AxisControlMode::Unknown};
+        double commandValue{0.0};
+        bool hasDirectCommand{false};
+        bool targetNearActual{false};
     };
 
     enum class DeviceEvent {

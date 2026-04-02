@@ -1,3 +1,4 @@
+#include "can_driver/AxisCommandSemantics.h"
 #include "can_driver/CanDriverHW.h"
 #include "can_driver/CanDriverIoRuntime.h"
 #include "can_driver/SafeCommand.h"
@@ -16,7 +17,7 @@ namespace {
 
 struct ModeSelection {
     CanProtocol::MotorMode mode{CanProtocol::MotorMode::Position};
-    const char *controlMode{"position"};
+    can_driver::AxisControlMode controlMode{can_driver::AxisControlMode::Position};
 };
 
 long long steadyAgeMs(std::int64_t stampNs)
@@ -34,15 +35,18 @@ bool decodeModeSelection(double value, ModeSelection *selection)
         return false;
     }
     if (value == 0.0) {
-        *selection = ModeSelection{CanProtocol::MotorMode::Position, "position"};
+        selection->controlMode = can_driver::AxisControlMode::Position;
+        selection->mode = can_driver::protocolMotorModeFromAxisControlMode(selection->controlMode);
         return true;
     }
     if (value == 1.0) {
-        *selection = ModeSelection{CanProtocol::MotorMode::Velocity, "velocity"};
+        selection->controlMode = can_driver::AxisControlMode::Velocity;
+        selection->mode = can_driver::protocolMotorModeFromAxisControlMode(selection->controlMode);
         return true;
     }
     if (value == 2.0) {
-        *selection = ModeSelection{CanProtocol::MotorMode::CSP, "csp"};
+        selection->controlMode = can_driver::AxisControlMode::Csp;
+        selection->mode = can_driver::protocolMotorModeFromAxisControlMode(selection->controlMode);
         return true;
     }
     return false;
@@ -601,7 +605,7 @@ void CanDriverHW::registerJointInterfaces()
             jc.name, &jc.pos, &jc.vel, &jc.eff);
         jntStateIface_.registerHandle(stateHandle);
 
-        if (jc.controlMode == "velocity") {
+        if (can_driver::controlModeUsesVelocitySemantics(jc.controlMode)) {
             hardware_interface::JointHandle velHandle(stateHandle, &jc.velCmd);
             velIface_.registerHandle(velHandle);
         } else {
@@ -653,7 +657,7 @@ void CanDriverHW::loadJointLimits(const ros::NodeHandle &pnh)
         if (hasLimits) {
             jc.limits = limits;
             jc.hasLimits = true;
-            if (jc.controlMode == "velocity") {
+            if (can_driver::controlModeUsesVelocitySemantics(jc.controlMode)) {
                 joint_limits_interface::VelocityJointSaturationHandle handle(
                     velIface_.getHandle(jc.name), limits);
                 velLimitsIface_.registerHandle(handle);
@@ -782,7 +786,7 @@ void CanDriverHW::holdCommandsForLifecycleTransition()
         auto &jc = joints_[i];
         jc.hasDirectPosCmd = false;
         jc.hasDirectVelCmd = false;
-        if (jc.controlMode == "velocity") {
+        if (can_driver::controlModeUsesVelocitySemantics(jc.controlMode)) {
             jc.velCmd = 0.0;
         } else {
             jc.posCmd = jc.pos;
@@ -798,26 +802,12 @@ std::vector<CommandGate::Snapshot> CanDriverHW::captureCommandSnapshots() const
     std::vector<CommandGate::Snapshot> snapshots(joints_.size());
     for (std::size_t i = 0; i < joints_.size(); ++i) {
         const auto &jc = joints_[i];
+        const auto mode = can_driver::axisControlModeFromString(jc.controlMode);
         auto &snapshot = snapshots[i];
-        snapshot.controlMode = jc.controlMode;
-        snapshot.posCmd = jc.posCmd;
-        snapshot.velCmd = jc.velCmd;
-        snapshot.directPosCmd = jc.directPosCmd;
-        snapshot.directVelCmd = jc.directVelCmd;
-        snapshot.hasDirectPosCmd = jc.hasDirectPosCmd;
-        snapshot.hasDirectVelCmd = jc.hasDirectVelCmd;
-
-        const double positionTarget = jc.hasDirectPosCmd ? jc.directPosCmd : jc.posCmd;
-        const double velocityTarget = jc.hasDirectVelCmd ? jc.directVelCmd : jc.velCmd;
-        const double positionTolerance = std::max(jc.positionScale, 1e-9);
-        const double velocityTolerance = std::max(jc.velocityScale, 1e-9);
-
-        snapshot.positionTargetNearActual =
-            std::isfinite(positionTarget) && std::isfinite(jc.pos) &&
-            std::fabs(positionTarget - jc.pos) <= positionTolerance;
-        snapshot.velocityTargetNearActual =
-            std::isfinite(velocityTarget) && std::isfinite(jc.vel) &&
-            std::fabs(velocityTarget - jc.vel) <= velocityTolerance;
+        snapshot.controlMode = mode;
+        snapshot.commandValue = can_driver::controlModeSelectedCommandValue(jc, mode);
+        snapshot.hasDirectCommand = can_driver::controlModeHasDirectCommand(jc, mode);
+        snapshot.targetNearActual = can_driver::controlModeTargetNearActual(jc, mode);
     }
     return snapshots;
 }
@@ -854,7 +844,8 @@ bool CanDriverHW::applyInitialModes(const std::string &deviceFilter)
         if (!deviceFilter.empty() && jc.canDevice != deviceFilter) {
             continue;
         }
-        if (jc.controlMode != "csp") {
+        if (can_driver::axisControlModeFromString(jc.controlMode) !=
+            can_driver::AxisControlMode::Csp) {
             continue;
         }
         const auto status = motorActionExecutor_.execute(
@@ -1169,7 +1160,7 @@ bool CanDriverHW::onMotorCommand(can_driver::MotorCommand::Request &req,
         {
             std::lock_guard<std::mutex> stateLock(jointStateMutex_);
             auto &joint = joints_[targetIndex];
-            joint.controlMode = selection.controlMode;
+            joint.controlMode = can_driver::axisControlModeName(selection.controlMode);
             joint.hasDirectPosCmd = false;
             joint.hasDirectVelCmd = false;
             joint.posCmd = joint.pos;

@@ -1,3 +1,4 @@
+#include "can_driver/AxisCommandSemantics.h"
 #include "can_driver/JointConfigParser.h"
 
 #include <cmath>
@@ -64,7 +65,8 @@ bool parse(const XmlRpc::XmlRpcValue &jointList,
         jc.name = static_cast<std::string>(jv["name"]);
         jc.canDevice = static_cast<std::string>(jv["can_device"]);
         jc.controlMode = static_cast<std::string>(jv["control_mode"]);
-        if (jc.controlMode != "velocity" && jc.controlMode != "position" && jc.controlMode != "csp") {
+        if (can_driver::axisControlModeFromString(jc.controlMode) ==
+            can_driver::AxisControlMode::Unknown) {
             errorMsg = "Joint '" + jc.name + "': unknown control_mode '" + jc.controlMode +
                        "' (use velocity, position, or csp).";
             return false;
