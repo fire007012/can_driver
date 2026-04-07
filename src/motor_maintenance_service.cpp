@@ -1,6 +1,7 @@
 #include "can_driver/motor_maintenance_service.hpp"
 
 #include "can_driver/AxisCommandSemantics.h"
+#include "can_driver/EyouCan.h"
 #include "can_driver/SafeCommand.h"
 
 #include <joint_limits_interface/joint_limits.h>
@@ -129,6 +130,44 @@ void MotorMaintenanceService::clearDirectCmd(const std::string &jointName)
     }
 }
 
+bool MotorMaintenanceService::waitForPpModeConfirmation(const JointConfig &joint,
+                                                        CanProtocol::MotorMode expectedMode,
+                                                        std::string *message) const
+{
+    if (joint.protocol != CanType::PP || !getProtocol_) {
+        return true;
+    }
+
+    auto protocol = std::dynamic_pointer_cast<EyouCan>(getProtocol_(joint.canDevice, joint.protocol));
+    if (!protocol) {
+        return true;
+    }
+    if (!getFreshAxisFeedback_) {
+        if (message != nullptr) {
+            *message = "Mode confirmation requires fresh feedback access.";
+        }
+        return false;
+    }
+
+    const auto deadline = std::chrono::steady_clock::now() + std::chrono::milliseconds(500);
+    while (std::chrono::steady_clock::now() < deadline) {
+        protocol->issueRefreshQuery(joint.motorId, EyouCan::RefreshQuery::Mode);
+
+        can_driver::SharedDriverState::AxisFeedbackState feedback;
+        if (getFreshAxisFeedback_(joint, &feedback) && feedback.modeValid &&
+            feedback.mode == expectedMode) {
+            return true;
+        }
+
+        std::this_thread::sleep_for(std::chrono::milliseconds(20));
+    }
+
+    if (message != nullptr) {
+        *message = "Timed out waiting for mode confirmation from PP feedback.";
+    }
+    return false;
+}
+
 bool MotorMaintenanceService::onMotorCommand(can_driver::MotorCommand::Request &req,
                                              can_driver::MotorCommand::Response &res)
 {
@@ -192,6 +231,10 @@ bool MotorMaintenanceService::onMotorCommand(can_driver::MotorCommand::Request &
             "Set mode");
         if (status != MotorActionExecutor::Status::Ok) {
             handleFailure(status, "Set mode command rejected.");
+            return true;
+        }
+        if (!waitForPpModeConfirmation(*target, selection.mode, &res.message)) {
+            res.success = false;
             return true;
         }
 

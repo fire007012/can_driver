@@ -55,6 +55,9 @@ private:
     std::size_t findJointIndexByMotorId(uint16_t motorId) const;
     MotorActionExecutor::Target makeMotorTarget(const JointConfig &joint) const;
     void clearDirectCmd(const std::string &jointName);
+    bool waitForPpModeConfirmation(const JointConfig &joint,
+                                   CanProtocol::MotorMode expectedMode,
+                                   std::string *message) const;
 
     bool onMotorCommand(can_driver::MotorCommand::Request &req,
                         can_driver::MotorCommand::Response &res);
