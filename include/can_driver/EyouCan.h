@@ -97,7 +97,7 @@ public:
     /**
      * @brief 返回缓存的实际速度
      */
-    int16_t getVelocity(MotorID motorId) const override;
+    int32_t getVelocity(MotorID motorId) const override;
     bool isEnabled(MotorID motorId) const override;
     bool hasFault(MotorID motorId) const override;
     bool configurePositionLimits(MotorID motorId,

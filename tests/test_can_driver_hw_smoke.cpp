@@ -126,7 +126,7 @@ public:
         return feedbackCurrent_;
     }
 
-    int16_t getVelocity(MotorID) const override
+    int32_t getVelocity(MotorID) const override
     {
         std::lock_guard<std::mutex> lock(mutex_);
         return feedbackVelocity_;

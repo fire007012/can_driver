@@ -458,7 +458,7 @@ int16_t MtCan::getCurrent(MotorID Id) const
 }
 
 // [FIX #7] 移除 velocity == 0 的不可靠刷新判断
-int16_t MtCan::getVelocity(MotorID Id) const
+int32_t MtCan::getVelocity(MotorID Id) const
 {
     const uint8_t motorId = toProtocolNodeId(Id);
     {

@@ -116,7 +116,7 @@ public:
     /**
      * @brief 返回电机速度（0x9C 返回的值，单位 1 dps/LSB）
      */
-    int16_t getVelocity(MotorID motorId) const override;
+    int32_t getVelocity(MotorID motorId) const override;
     bool isEnabled(MotorID motorId) const override;
     bool hasFault(MotorID motorId) const override;
 

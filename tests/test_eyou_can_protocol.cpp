@@ -655,7 +655,7 @@ TEST_F(EyouCanTest, GetCurrentAndVelocityClampInt16Range)
     currentFrame.data[5] = 0x40;
     transport->simulateReceive(currentFrame);
 
-    // 速度 -40000 -> 低于 int16 下限，应钳制为 -32768。
+    // 速度字段现已发布为 int32，应保留完整反馈值。
     CanTransport::Frame velocityFrame {};
     velocityFrame.id = 0x0005;
     velocityFrame.isExtended = false;
@@ -670,7 +670,7 @@ TEST_F(EyouCanTest, GetCurrentAndVelocityClampInt16Range)
     transport->simulateReceive(velocityFrame);
 
     EXPECT_EQ(eyou.getCurrent(static_cast<MotorID>(0x05)), 32767);
-    EXPECT_EQ(eyou.getVelocity(static_cast<MotorID>(0x05)), -32768);
+    EXPECT_EQ(eyou.getVelocity(static_cast<MotorID>(0x05)), -40000);
 }
 
 TEST_F(EyouCanTest, ReadResponsesUpdateEnabledAndFaultState)

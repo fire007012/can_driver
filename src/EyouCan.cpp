@@ -507,7 +507,7 @@ int16_t EyouCan::getCurrent(MotorID Id) const
 }
 
 // [FIX #8] 读取协议 0x06（当前速度值），返回缓存的实际速度
-int16_t EyouCan::getVelocity(MotorID Id) const
+int32_t EyouCan::getVelocity(MotorID Id) const
 {
     uint8_t motorId = toProtocolNodeId(Id);
     registerManagedMotorId(Id);
@@ -515,7 +515,7 @@ int16_t EyouCan::getVelocity(MotorID Id) const
         std::lock_guard<std::mutex> stateLock(stateMutex);
         auto it = motorStates.find(motorId);
         if (it != motorStates.end() && it->second.velocityReceived) {
-            return clampInt32ToInt16WithWarn(it->second.actualVelocity, motorId, "velocity");
+            return it->second.actualVelocity;
         }
     }
     return 0;

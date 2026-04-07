@@ -133,7 +133,7 @@ public:
      * @param motorId 目标电机 ID
      * @return 速度数值（协议单位）
      */
-    [[nodiscard]] virtual int16_t getVelocity(MotorID motorId) const = 0;
+    [[nodiscard]] virtual int32_t getVelocity(MotorID motorId) const = 0;
 
     /**
      * @brief 返回缓存的使能状态（未实现协议默认 false）。
