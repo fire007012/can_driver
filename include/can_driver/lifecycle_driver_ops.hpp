@@ -57,6 +57,7 @@ private:
                                const char *protocolUnavailableMessage,
                                bool requireAnyTarget) const;
     bool queryMotorFault(const MotorActionExecutor::Target &target, bool *hasFault) const;
+    bool queryMotorEnabled(const MotorActionExecutor::Target &target, bool *enabled) const;
     std::shared_ptr<CanProtocol> getProtocol(const std::string &device, CanType type) const;
     std::shared_ptr<std::mutex> getDeviceMutex(const std::string &device) const;
     bool isDeviceReady(const std::string &device) const;

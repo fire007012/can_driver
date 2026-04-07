@@ -17,11 +17,14 @@ struct AxisReadiness {
     bool feedbackFresh{false};
     bool degraded{false};
     bool fault{false};
+    bool faultKnown{false};
     bool faultCleared{false};
     bool enabled{false};
+    bool enabledKnown{false};
     bool enabledReady{false};
     bool commandValid{false};
     bool modeExpected{false};
+    bool modeKnown{true};
     bool modeMatched{true};
     bool modeReady{true};
     bool feedbackReady{false};
@@ -87,8 +90,14 @@ public:
         if (!readiness.feedbackReady) {
             return "Feedback degraded.";
         }
+        if (!readiness.faultKnown) {
+            return "Fault state unknown.";
+        }
         if (!readiness.faultCleared) {
             return "Fault still active.";
+        }
+        if (!readiness.enabledKnown) {
+            return "Enable state unknown.";
         }
         if (!readiness.enabledReady) {
             return "Axis not enabled.";
@@ -127,7 +136,9 @@ private:
         readiness.feedbackSeen = feedback.feedbackSeen;
         readiness.degraded = feedback.degraded || feedback.consecutiveTimeoutCount > 0;
         readiness.fault = feedback.fault;
+        readiness.faultKnown = feedback.faultValid;
         readiness.enabled = feedback.enabled;
+        readiness.enabledKnown = feedback.enabledValid;
         readiness.commandValid = command != nullptr && command->valid;
         readiness.modeExpected = command != nullptr && command->desiredModeValid;
 
@@ -139,15 +150,16 @@ private:
         }
 
         if (readiness.modeExpected) {
+            readiness.modeKnown = feedback.modeValid;
             readiness.modeMatched =
-                feedback.feedbackSeen && command != nullptr &&
+                feedback.modeValid && feedback.feedbackSeen && command != nullptr &&
                 feedback.mode == command->desiredMode;
         }
 
         readiness.feedbackReady = readiness.deviceReady && readiness.feedbackSeen &&
                                   readiness.feedbackFresh && !readiness.degraded;
-        readiness.faultCleared = !readiness.fault;
-        readiness.enabledReady = readiness.enabled;
+        readiness.faultCleared = readiness.faultKnown && !readiness.fault;
+        readiness.enabledReady = readiness.enabledKnown && readiness.enabled;
         readiness.modeReady = !readiness.modeExpected || readiness.modeMatched;
         readiness.axisReadyForEnable = readiness.feedbackReady && readiness.faultCleared;
         readiness.axisReadyForRun =

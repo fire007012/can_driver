@@ -203,10 +203,14 @@ bool LifecycleDriverOps::queryMotorFault(const MotorActionExecutor::Target &targ
         if (sharedState->getAxisFeedback(
                 MakeAxisKey(target.canDevice, target.protocol, target.motorId),
                 &feedback) &&
-            feedback.feedbackSeen) {
+            feedback.feedbackSeen && feedback.faultValid) {
             *hasFault = feedback.fault;
             return true;
         }
+    }
+
+    if (target.protocol != CanType::MT) {
+        return false;
     }
 
     auto proto = getProtocol(target.canDevice, target.protocol);
@@ -217,6 +221,39 @@ bool LifecycleDriverOps::queryMotorFault(const MotorActionExecutor::Target &targ
 
     std::lock_guard<std::mutex> devLock(*devMutex);
     *hasFault = proto->hasFault(target.motorId);
+    return true;
+}
+
+bool LifecycleDriverOps::queryMotorEnabled(const MotorActionExecutor::Target &target,
+                                           bool *enabled) const
+{
+    if (!enabled) {
+        return false;
+    }
+
+    if (const auto sharedState = getSharedDriverState()) {
+        SharedDriverState::AxisFeedbackState feedback;
+        if (sharedState->getAxisFeedback(
+                MakeAxisKey(target.canDevice, target.protocol, target.motorId),
+                &feedback) &&
+            feedback.feedbackSeen && feedback.enabledValid) {
+            *enabled = feedback.enabled;
+            return true;
+        }
+    }
+
+    if (target.protocol != CanType::MT) {
+        return false;
+    }
+
+    auto proto = getProtocol(target.canDevice, target.protocol);
+    auto devMutex = getDeviceMutex(target.canDevice);
+    if (!proto || !devMutex) {
+        return false;
+    }
+
+    std::lock_guard<std::mutex> devLock(*devMutex);
+    *enabled = proto->isEnabled(target.motorId);
     return true;
 }
 
@@ -419,6 +456,13 @@ LifecycleDriverOps::Result LifecycleDriverOps::recoverAll() const
                         sharedState->getDeviceHealth(target.canDevice, &deviceHealth)
                             ? &deviceHealth
                             : nullptr;
+                    if (!feedback.faultValid) {
+                        bool hasFault = false;
+                        if (queryMotorFault(target, &hasFault)) {
+                            feedback.fault = hasFault;
+                            feedback.faultValid = true;
+                        }
+                    }
 
                     const auto readiness = evaluateAxisReadiness(axisKey,
                                                                  feedback,
@@ -495,6 +539,13 @@ bool LifecycleDriverOps::enableHealthy(std::string *detail) const
                     sharedState->getDeviceHealth(target.canDevice, &deviceHealth)
                         ? &deviceHealth
                         : nullptr;
+                if (!feedback.faultValid) {
+                    bool hasFault = false;
+                    if (queryMotorFault(target, &hasFault)) {
+                        feedback.fault = hasFault;
+                        feedback.faultValid = true;
+                    }
+                }
 
                 const auto readiness = evaluateAxisReadiness(
                     axisKey,
@@ -550,6 +601,27 @@ bool LifecycleDriverOps::motionHealthy(std::string *detail) const
                     sharedState->getDeviceHealth(target.canDevice, &deviceHealth)
                         ? &deviceHealth
                         : nullptr;
+                if (!feedback.faultValid) {
+                    bool hasFault = false;
+                    if (queryMotorFault(target, &hasFault)) {
+                        feedback.fault = hasFault;
+                        feedback.faultValid = true;
+                    }
+                }
+                if (!feedback.enabledValid) {
+                    bool enabled = false;
+                    if (queryMotorEnabled(target, &enabled)) {
+                        feedback.enabled = enabled;
+                        feedback.enabledValid = true;
+                    }
+                }
+                if (target.protocol == CanType::MT &&
+                    !feedback.modeValid &&
+                    commandPtr != nullptr &&
+                    commandPtr->desiredModeValid) {
+                    feedback.mode = commandPtr->desiredMode;
+                    feedback.modeValid = true;
+                }
 
                 const auto readiness = evaluateAxisReadiness(
                     axisKey,
