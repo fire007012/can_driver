@@ -76,6 +76,10 @@ class MotorPanel:
         self.mode_text = tk.StringVar(value="--")
         self.feedback_text = tk.StringVar(value="未知")
         self.last_mode_name = "unknown"
+        self.last_position_si = 0.0
+        self.last_velocity_si = 0.0
+        self.position_valid_flag = False
+        self.velocity_valid_flag = False
 
         self.frame = ttk.LabelFrame(parent, text=self.name, padding=4)
 
@@ -108,14 +112,20 @@ class MotorPanel:
         if msg.position_valid:
             position_si = float(msg.position) * self.position_scale
             self.position.set(f"{position_si:.4f}")
+            self.last_position_si = position_si
+            self.position_valid_flag = True
         else:
             self.position.set("--")
+            self.position_valid_flag = False
 
         if msg.velocity_valid:
             velocity_si = float(msg.velocity) * self.velocity_scale
             self.velocity.set(f"{velocity_si:.4f}")
+            self.last_velocity_si = velocity_si
+            self.velocity_valid_flag = True
         else:
             self.velocity.set("--")
+            self.velocity_valid_flag = False
 
         self.current.set(str(msg.current) if msg.current_valid else "--")
         self.enabled.set(msg.enabled if msg.status_valid else False)
@@ -247,6 +257,16 @@ class RealtimeMotorUI:
             for j in self.joints
         }
         self.link_preview_vars = {}
+        self.last_sent_target_by_joint = {
+            j["name"]: "--" for j in self.joints
+        }
+        self.last_mode_result_by_joint = {
+            j["name"]: "--" for j in self.joints
+        }
+        self.current_target_text = tk.StringVar(value="当前输入目标: --")
+        self.last_sent_target_text = tk.StringVar(value="最近下发目标: --")
+        self.actual_mode_feedback_text = tk.StringVar(value="实际模式反馈: 未知")
+        self.last_mode_result_text = tk.StringVar(value="最近切模返回: --")
 
         self._build_ui()
 
@@ -432,6 +452,21 @@ class RealtimeMotorUI:
         )
         self.scale.pack(fill=tk.X, pady=4)
 
+        row_target_status = ttk.Frame(frm_cmd)
+        row_target_status.pack(fill=tk.X, pady=2)
+        ttk.Label(row_target_status, textvariable=self.current_target_text).pack(
+            side=tk.LEFT, padx=4
+        )
+        ttk.Label(row_target_status, textvariable=self.last_sent_target_text).pack(
+            side=tk.LEFT, padx=12
+        )
+        ttk.Label(row_target_status, textvariable=self.actual_mode_feedback_text).pack(
+            side=tk.LEFT, padx=12
+        )
+        ttk.Label(row_target_status, textvariable=self.last_mode_result_text).pack(
+            side=tk.LEFT, padx=12
+        )
+
         # 范围
         row_range = ttk.Frame(frm_cmd)
         row_range.pack(fill=tk.X, pady=2)
@@ -471,6 +506,11 @@ class RealtimeMotorUI:
         ttk.Button(row_motor, text="发送一次", command=self._publish_once).pack(
             side=tk.LEFT, padx=4
         )
+        ttk.Button(
+            row_motor,
+            text="对齐到实际并发送",
+            command=self._align_to_actual_and_publish_once,
+        ).pack(side=tk.LEFT, padx=4)
 
         # 零点/限位
         frm_zero = ttk.LabelFrame(self.root, text="零点/限位（当前选中关节）", padding=6)
@@ -621,6 +661,7 @@ class RealtimeMotorUI:
 
         self._apply_link_range()
         self._refresh_link_preview()
+        self._refresh_single_axis_status()
 
     # ------------------------------------------------------- lifecycle actions
     def _call_async(self, label, func):
@@ -694,7 +735,11 @@ class RealtimeMotorUI:
     def _on_motor_state(self, msg: MotorState):
         name = msg.name
         if name in self.motor_panels:
-            self.root.after(0, lambda: self.motor_panels[name].update_state(msg))
+            def _update():
+                self.motor_panels[name].update_state(msg)
+                if self.selected_joint.get() == name:
+                    self._refresh_single_axis_status()
+            self.root.after(0, _update)
 
     def _on_lifecycle_state(self, msg: String):
         self.root.after(0, lambda: self.lifecycle_state.set(msg.data or "未知"))
@@ -727,6 +772,12 @@ class RealtimeMotorUI:
                     )
                     if res.success and command == CMD_SET_MODE:
                         cfg["control_mode"] = self.selected_mode.get()
+                    if command == CMD_SET_MODE:
+                        self.last_mode_result_by_joint[cfg["name"]] = (
+                            res.message if res.success else f"失败: {res.message}"
+                        )
+                        if self.selected_joint.get() == cfg["name"]:
+                            self._refresh_single_axis_status()
                 self.root.after(0, _finish)
             except Exception as exc:
                 self.root.after(0, lambda: self.status_text.set(f"服务调用异常: {exc}"))
@@ -742,6 +793,7 @@ class RealtimeMotorUI:
             actual_mode if actual_mode != "unknown" else cfg["control_mode"]
         )
         self._apply_range()
+        self._refresh_single_axis_status()
         self.status_text.set(f"已选择: {name} (ID=0x{cfg['motor_id']:02X})")
 
     def _apply_selected_mode(self) -> None:
@@ -909,12 +961,41 @@ class RealtimeMotorUI:
         cfg = self._get_joint_cfg(name)
         self._publish_joint_command(cfg, self.selected_mode.get(), val)
 
+    def _align_to_actual_and_publish_once(self) -> None:
+        cfg = self._get_joint_cfg(self.selected_joint.get())
+        panel = self.motor_panels.get(cfg["name"])
+        if panel is None:
+            self.status_text.set("未找到当前关节面板，无法对齐。")
+            return
+
+        mode = self.selected_mode.get()
+        if mode == "velocity":
+            if not panel.velocity_valid_flag:
+                self.status_text.set(f"{cfg['name']} 当前速度无有效反馈，无法对齐。")
+                return
+            target = panel.last_velocity_si
+        else:
+            if not panel.position_valid_flag:
+                self.status_text.set(f"{cfg['name']} 当前位置无有效反馈，无法对齐。")
+                return
+            target = panel.last_position_si
+
+        self.command_value.set(target)
+        self._refresh_single_axis_status()
+        self._publish_once()
+        unit = "rad/s" if mode == "velocity" else "rad"
+        self.status_text.set(f"{cfg['name']} 已对齐到实际反馈并发送: {target:.4f} {unit}")
+
     def _publish_joint_command(self, cfg: dict, mode: str, value: float) -> None:
         msg = Float64(data=value)
         if mode == "velocity":
             self.pub_vel[cfg["name"]].publish(msg)
         else:
             self.pub_pos[cfg["name"]].publish(msg)
+        unit = "rad/s" if mode == "velocity" else "rad"
+        self.last_sent_target_by_joint[cfg["name"]] = f"{value:.4f} {unit} [{mode}]"
+        if self.selected_joint.get() == cfg["name"]:
+            self._refresh_single_axis_status()
 
     def _link_publish_once(self) -> None:
         selected = self._selected_link_joints()
@@ -942,6 +1023,7 @@ class RealtimeMotorUI:
         )
 
     def _on_slider_changed(self, _value: str) -> None:
+        self._refresh_single_axis_status()
         if not self.stream_enable.get():
             return
         try:
@@ -986,6 +1068,22 @@ class RealtimeMotorUI:
         except Exception:
             pass
         self.root.destroy()
+
+    def _refresh_single_axis_status(self) -> None:
+        cfg = self._get_joint_cfg(self.selected_joint.get())
+        mode = self.selected_mode.get()
+        value = float(self.command_value.get())
+        unit = "rad/s" if mode == "velocity" else "rad"
+        self.current_target_text.set(f"当前输入目标: {value:.4f} {unit} [{mode}]")
+        self.last_sent_target_text.set(
+            f"最近下发目标: {self.last_sent_target_by_joint.get(cfg['name'], '--')}"
+        )
+        panel = self.motor_panels.get(cfg["name"])
+        actual_mode = panel.mode_text.get() if panel is not None else "未知"
+        self.actual_mode_feedback_text.set(f"实际模式反馈: {actual_mode}")
+        self.last_mode_result_text.set(
+            f"最近切模返回: {self.last_mode_result_by_joint.get(cfg['name'], '--')}"
+        )
 
     def run(self) -> None:
         self.root.mainloop()
