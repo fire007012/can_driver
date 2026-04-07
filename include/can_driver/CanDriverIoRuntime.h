@@ -380,7 +380,7 @@ public:
 
         struct StatusSnapshot {
             std::int32_t position{0};
-            std::int16_t velocity{0};
+            std::int32_t velocity{0};
             std::int16_t current{0};
             bool positionValid{false};
             bool velocityValid{false};
@@ -409,7 +409,7 @@ public:
 
                     auto &snapshot = statusSnapshots[index];
                     snapshot.position = can_driver::safe_command::clampToInt32(feedback.position);
-                    snapshot.velocity = can_driver::safe_command::clampToInt16(feedback.velocity);
+                    snapshot.velocity = can_driver::safe_command::clampToInt32(feedback.velocity);
                     snapshot.current = can_driver::safe_command::clampToInt16(feedback.current);
                     snapshot.positionValid = feedback.positionValid;
                     snapshot.velocityValid = feedback.velocityValid;

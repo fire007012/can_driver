@@ -887,10 +887,10 @@ bool CanDriverHW::applyPerAxisPpDefaultVelocities(const std::string &deviceFilte
 
         auto protocol = std::dynamic_pointer_cast<EyouCan>(getProtocol(group.canDevice, group.protocol));
         if (!protocol) {
-            ROS_ERROR("[CanDriverHW] Failed to access EyouCan protocol while applying per-axis "
-                      "default velocities on '%s'.",
-                      group.canDevice.c_str());
-            return false;
+            ROS_WARN("[CanDriverHW] Skip per-axis PP default velocity override on '%s' because "
+                     "the protocol instance is not EyouCan.",
+                     group.canDevice.c_str());
+            continue;
         }
 
         for (const auto jointIndex : group.jointIndices) {
