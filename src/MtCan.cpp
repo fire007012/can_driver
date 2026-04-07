@@ -808,14 +808,14 @@ void MtCan::syncSharedFeedback(uint8_t motorId, const MotorState &state) const
             feedback->velocity = state.velocity;
             feedback->current = static_cast<std::int32_t>(std::lround(state.current * 100.0));
             feedback->mode = state.mode;
-            feedback->positionValid = true;
-            feedback->velocityValid = true;
-            feedback->currentValid = true;
-            feedback->modeValid = true;
+            feedback->positionValid = state.positionReceived;
+            feedback->velocityValid = state.velocityReceived;
+            feedback->currentValid = state.currentReceived;
+            feedback->modeValid = state.modeReceived;
             feedback->enabled = state.enabled;
             feedback->fault = state.error;
-            feedback->enabledValid = true;
-            feedback->faultValid = true;
+            feedback->enabledValid = state.enabledReceived;
+            feedback->faultValid = state.faultReceived;
             feedback->feedbackSeen = true;
             feedback->lastRxSteadyNs = nowNs;
             feedback->lastValidStateSteadyNs = nowNs;
@@ -989,6 +989,8 @@ void MtCan::handleResponse(const CanTransport::Frame &frame)
                 // 速度 int16_t, 单位 1 dps/LSB（保持协议原始单位）
                 state.velocity = readInt16LE(frame, 4);
                 state.encoderPosition = readUInt16LE(frame, 6);
+                state.currentReceived = true;
+                state.velocityReceived = true;
             }
             break;
         }
@@ -1001,6 +1003,7 @@ void MtCan::handleResponse(const CanTransport::Frame &frame)
                 state.voltageRaw2 = readUInt16LE(frame, 4);
                 const uint16_t errorCode = readUInt16LE(frame, 6);
                 state.error = errorCode != 0;
+                state.faultReceived = true;
                 if (state.error) {
                     std::cerr << "[MtCan] Motor " << static_cast<int>(nodeId)
                               << " error code 0x" << std::hex << errorCode
@@ -1015,6 +1018,7 @@ void MtCan::handleResponse(const CanTransport::Frame &frame)
             // DATA[1] = NULL, DATA[2~7] = int48_t LE, 单位 0.01°/LSB
             if (frame.dlc >= 8) {
                 state.multiTurnAngle = readInt48LE(frame, 2);
+                state.positionReceived = true;
             }
             break;
         }
@@ -1036,6 +1040,8 @@ void MtCan::handleResponse(const CanTransport::Frame &frame)
                 state.current = static_cast<double>(rawCurrent) / 100.0;
                 state.velocity = readInt16LE(frame, 4);
                 state.encoderPosition = readUInt16LE(frame, 6);
+                state.currentReceived = true;
+                state.velocityReceived = true;
             }
             break;
         }

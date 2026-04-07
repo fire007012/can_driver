@@ -145,6 +145,12 @@ private:
         uint16_t encoderPosition = 0; ///< 单圈编码器位置
         bool enabled = false;
         bool error = false;
+        bool positionReceived = false;
+        bool velocityReceived = false;
+        bool currentReceived = false;
+        bool modeReceived = false;
+        bool enabledReceived = false;
+        bool faultReceived = false;
         MotorMode mode = MotorMode::Velocity;
     };
     struct PendingReadRequest {
