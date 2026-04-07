@@ -28,7 +28,7 @@ from std_msgs.msg import Float64
 from std_srvs.srv import Trigger
 
 from can_driver.msg import MotorState
-from can_driver.srv import Init, MotorCommand, Recover, Shutdown
+from can_driver.srv import Init, MotorCommand, Recover, SetZeroLimit, Shutdown
 
 # MotorCommand.srv 常量
 CMD_ENABLE = 0
@@ -75,6 +75,7 @@ class MotorPanel:
         self.fault = tk.BooleanVar(value=False)
         self.mode_text = tk.StringVar(value="--")
         self.feedback_text = tk.StringVar(value="未知")
+        self.last_mode_name = "unknown"
 
         self.frame = ttk.LabelFrame(parent, text=self.name, padding=4)
 
@@ -120,6 +121,15 @@ class MotorPanel:
         self.enabled.set(msg.enabled if msg.status_valid else False)
         self.fault.set(msg.fault if msg.status_valid else False)
         self.mode_text.set(MODE_NAMES.get(msg.mode, f"({msg.mode})") if msg.mode_valid else "未知")
+        self.last_mode_name = (
+            "position"
+            if msg.mode == MotorState.MODE_POSITION
+            else "velocity"
+            if msg.mode == MotorState.MODE_VELOCITY
+            else "csp"
+            if msg.mode == MotorState.MODE_CSP
+            else "unknown"
+        )
 
         if msg.status_valid:
             if msg.enabled:
@@ -181,6 +191,7 @@ class RealtimeMotorUI:
         self.srv_init = self._wait_service("init", Init)
         self.srv_shutdown = self._wait_service("shutdown", Shutdown)
         self.srv_recover = self._wait_service("recover", Recover)
+        self.srv_set_zero_limit = self._wait_service("set_zero_limit", SetZeroLimit)
         self.srv_enable = self._wait_service("enable", Trigger)
         self.srv_disable = self._wait_service("disable", Trigger)
         self.srv_halt = self._wait_service("halt", Trigger)
@@ -200,9 +211,16 @@ class RealtimeMotorUI:
         self.selected_mode = tk.StringVar(value=self.joints[0]["control_mode"])
         self.stream_enable = tk.BooleanVar(value=False)
         self.command_value = tk.DoubleVar(value=0.0)
+        self.lifecycle_state = tk.StringVar(value="Configured/未知")
         self.link_mode = tk.StringVar(value="csp")
         self.link_stream_enable = tk.BooleanVar(value=False)
         self.link_command_value = tk.DoubleVar(value=0.0)
+        self.zero_offset = tk.DoubleVar(value=0.0)
+        self.limit_min = tk.DoubleVar(value=-1.0)
+        self.limit_max = tk.DoubleVar(value=1.0)
+        self.use_urdf_limits = tk.BooleanVar(value=False)
+        self.apply_to_motor = tk.BooleanVar(value=True)
+        self.zero_limit_result = tk.StringVar(value="零点/限位结果: --")
         self.status_text = tk.StringVar(
             value=(
                 f"就绪 — 当前 CAN={self.can_device}, loopback={self.init_loopback}, "
@@ -334,6 +352,10 @@ class RealtimeMotorUI:
             ttk.Button(frm_lifecycle, text=text, command=cmd).grid(
                 row=0, column=i, padx=4, pady=2
             )
+        ttk.Label(frm_lifecycle, text="状态:").grid(row=1, column=0, sticky="w", padx=4, pady=(4, 0))
+        ttk.Label(frm_lifecycle, textvariable=self.lifecycle_state, foreground="dark green").grid(
+            row=1, column=1, columnspan=3, sticky="w", padx=4, pady=(4, 0)
+        )
 
         # ======== 电机状态面板 ========
         frm_states = ttk.LabelFrame(self.root, text="电机实时状态", padding=6)
@@ -386,7 +408,7 @@ class RealtimeMotorUI:
                 text=label,
                 value=val,
                 variable=self.selected_mode,
-                command=self._on_mode_changed,
+                command=self._apply_range,
             ).pack(side=tk.LEFT, padx=4)
 
         ttk.Checkbutton(
@@ -439,8 +461,39 @@ class RealtimeMotorUI:
         ttk.Button(row_motor, text="单电机失能", command=self._motor_disable).pack(
             side=tk.LEFT, padx=4
         )
-        ttk.Button(row_motor, text="切换模式", command=self._on_mode_changed).pack(
+        ttk.Button(row_motor, text="应用模式", command=self._apply_selected_mode).pack(
             side=tk.LEFT, padx=4
+        )
+        ttk.Button(row_motor, text="发送一次", command=self._publish_once).pack(
+            side=tk.LEFT, padx=4
+        )
+
+        # 零点/限位
+        frm_zero = ttk.LabelFrame(self.root, text="零点/限位（当前选中关节）", padding=6)
+        frm_zero.pack(fill=tk.X, padx=8, pady=4)
+
+        row_zero1 = ttk.Frame(frm_zero)
+        row_zero1.pack(fill=tk.X, pady=2)
+        ttk.Label(row_zero1, text="偏置(rad)").pack(side=tk.LEFT)
+        ttk.Entry(row_zero1, width=10, textvariable=self.zero_offset).pack(side=tk.LEFT, padx=4)
+        ttk.Label(row_zero1, text="下限(rad)").pack(side=tk.LEFT, padx=(8, 0))
+        ttk.Entry(row_zero1, width=10, textvariable=self.limit_min).pack(side=tk.LEFT, padx=4)
+        ttk.Label(row_zero1, text="上限(rad)").pack(side=tk.LEFT, padx=(8, 0))
+        ttk.Entry(row_zero1, width=10, textvariable=self.limit_max).pack(side=tk.LEFT, padx=4)
+
+        row_zero2 = ttk.Frame(frm_zero)
+        row_zero2.pack(fill=tk.X, pady=2)
+        ttk.Checkbutton(row_zero2, text="使用URDF限位", variable=self.use_urdf_limits).pack(
+            side=tk.LEFT, padx=4
+        )
+        ttk.Checkbutton(row_zero2, text="下发到电机", variable=self.apply_to_motor).pack(
+            side=tk.LEFT, padx=4
+        )
+        ttk.Button(row_zero2, text="应用零点/限位", command=self._apply_zero_limit).pack(
+            side=tk.LEFT, padx=8
+        )
+        ttk.Label(row_zero2, textvariable=self.zero_limit_result, foreground="#0b5d86").pack(
+            side=tk.LEFT, padx=8
         )
 
         # ======== 多轴联动区 ========
@@ -574,6 +627,9 @@ class RealtimeMotorUI:
 
         threading.Thread(target=_run, daemon=True).start()
 
+    def _set_lifecycle_state(self, state: str) -> None:
+        self.lifecycle_state.set(state)
+
     def _lifecycle_init_release(self):
         self.status_text.set(
             f"Init({self.can_device}, loopback={self.init_loopback}) + Release ..."
@@ -591,7 +647,11 @@ class RealtimeMotorUI:
                 res2 = self.srv_resume()
                 msg = res2.message if res2.success else f"Release 失败: {res2.message}"
                 self.root.after(
-                    0, lambda: self.status_text.set(f"Init + Release: {msg}")
+                    0,
+                    lambda: (
+                        self.status_text.set(f"Init + Release: {msg}"),
+                        self._set_lifecycle_state("Running" if res2.success else "Armed")
+                    ),
                 )
             except Exception as exc:
                 self.root.after(
@@ -601,28 +661,67 @@ class RealtimeMotorUI:
         threading.Thread(target=_run, daemon=True).start()
 
     def _lifecycle_init(self):
-        self._call_async(
-            "Init",
-            lambda: self.srv_init(device=self.can_device, loopback=self.init_loopback),
-        )
+        def _run():
+            res = self.srv_init(device=self.can_device, loopback=self.init_loopback)
+            if res.success:
+                self.root.after(0, lambda: self._set_lifecycle_state("Armed"))
+            return res
+
+        self._call_async("Init", _run)
 
     def _lifecycle_enable(self):
-        self._call_async("Enable", self.srv_enable)
+        def _run():
+            res = self.srv_enable()
+            if res.success:
+                self.root.after(0, lambda: self._set_lifecycle_state("Armed"))
+            return res
+
+        self._call_async("Enable", _run)
 
     def _lifecycle_disable(self):
-        self._call_async("Disable", self.srv_disable)
+        def _run():
+            res = self.srv_disable()
+            if res.success:
+                self.root.after(0, lambda: self._set_lifecycle_state("Standby"))
+            return res
+
+        self._call_async("Disable", _run)
 
     def _lifecycle_halt(self):
-        self._call_async("Halt", self.srv_halt)
+        def _run():
+            res = self.srv_halt()
+            if res.success:
+                self.root.after(0, lambda: self._set_lifecycle_state("Armed"))
+            return res
+
+        self._call_async("Halt", _run)
 
     def _lifecycle_resume(self):
-        self._call_async("Resume", self.srv_resume)
+        def _run():
+            res = self.srv_resume()
+            if res.success:
+                self.root.after(0, lambda: self._set_lifecycle_state("Running"))
+            return res
+
+        self._call_async("Resume", _run)
 
     def _lifecycle_recover(self):
-        self._call_async("Recover", lambda: self.srv_recover(motor_id=0xFFFF))
+        def _run():
+            res = self.srv_recover(motor_id=0xFFFF)
+            if res.success:
+                self.root.after(0, lambda: self._set_lifecycle_state("Standby"))
+            return res
+
+        self._call_async("Recover", _run)
 
     def _lifecycle_shutdown(self):
-        self._call_async("Shutdown", lambda: self.srv_shutdown(force=False))
+        def _run():
+            res = self.srv_shutdown(force=False)
+            if res.success:
+                self.root.after(0, lambda: self._set_lifecycle_state("Configured"))
+            return res
+
+        self._call_async("Shutdown", _run)
 
     # --------------------------------------------------- motor state callback
     def _on_motor_state(self, msg: MotorState):
@@ -644,15 +743,25 @@ class RealtimeMotorUI:
     def _send_motor_service_for_cfg(
         self, cfg: dict, command: int, value: float = 0.0
     ) -> None:
-        try:
-            res = self.srv_motor_cmd(
-                motor_id=cfg["motor_id"], command=command, value=value
-            )
-            self.status_text.set(
-                res.message if res.success else f"失败: {res.message}"
-            )
-        except Exception as exc:
-            self.status_text.set(f"服务调用异常: {exc}")
+        label = f"{cfg['name']} 指令"
+        self.status_text.set(f"{label} ...")
+
+        def _run():
+            try:
+                res = self.srv_motor_cmd(
+                    motor_id=cfg["motor_id"], command=command, value=value
+                )
+                def _finish():
+                    self.status_text.set(
+                        res.message if res.success else f"失败: {res.message}"
+                    )
+                    if res.success and command == CMD_SET_MODE:
+                        cfg["control_mode"] = self.selected_mode.get()
+                self.root.after(0, _finish)
+            except Exception as exc:
+                self.root.after(0, lambda: self.status_text.set(f"服务调用异常: {exc}"))
+
+        threading.Thread(target=_run, daemon=True).start()
 
     def _on_joint_changed(self) -> None:
         name = self.selected_joint.get()
@@ -661,7 +770,7 @@ class RealtimeMotorUI:
         self._apply_range()
         self.status_text.set(f"已选择: {name} (ID=0x{cfg['motor_id']:02X})")
 
-    def _on_mode_changed(self) -> None:
+    def _apply_selected_mode(self) -> None:
         mode = self.selected_mode.get()
         val = MODE_MAP.get(mode, 0.0)
         self._send_motor_service(CMD_SET_MODE, val)
@@ -702,6 +811,47 @@ class RealtimeMotorUI:
 
     def _motor_disable(self) -> None:
         self._send_motor_service(CMD_DISABLE)
+
+    def _apply_zero_limit(self) -> None:
+        cfg = self._get_joint_cfg(self.selected_joint.get())
+        self.status_text.set(f"{cfg['name']} 零点/限位应用中 ...")
+
+        def _run():
+            try:
+                res = self.srv_set_zero_limit(
+                    motor_id=cfg["motor_id"],
+                    zero_offset_rad=float(self.zero_offset.get()),
+                    min_position_rad=float(self.limit_min.get()),
+                    max_position_rad=float(self.limit_max.get()),
+                    use_urdf_limits=bool(self.use_urdf_limits.get()),
+                    apply_to_motor=bool(self.apply_to_motor.get()),
+                )
+
+                def _finish():
+                    if res.success:
+                        self.status_text.set(
+                            f"{cfg['name']} 零点/限位已应用: {res.message}"
+                        )
+                        self.zero_limit_result.set(
+                            "零点/限位结果: "
+                            f"pos={res.current_position_rad:.4f}, "
+                            f"[{res.applied_min_rad:.4f}, {res.applied_max_rad:.4f}]"
+                        )
+                    else:
+                        self.status_text.set(f"{cfg['name']} 零点/限位失败: {res.message}")
+                        self.zero_limit_result.set(f"零点/限位结果: 失败 ({res.message})")
+
+                self.root.after(0, _finish)
+            except Exception as exc:
+                self.root.after(
+                    0,
+                    lambda: (
+                        self.status_text.set(f"{cfg['name']} 零点/限位异常: {exc}"),
+                        self.zero_limit_result.set(f"零点/限位结果: 异常 ({exc})"),
+                    ),
+                )
+
+        threading.Thread(target=_run, daemon=True).start()
 
     def _selected_link_joints(self):
         selected = []
