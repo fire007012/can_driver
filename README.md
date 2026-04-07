@@ -38,6 +38,7 @@ roslaunch can_driver can_driver.launch
 - Topic sub: `~motor/<joint>/cmd_velocity` (`std_msgs/Float64`)
 - Topic sub: `~motor/<joint>/cmd_position` (`std_msgs/Float64`)
 - Topic pub: `~motor_states` (`can_driver/MotorState`, feedback-only semantics with `*_valid` and `feedback_fresh`)
+- Topic pub: `~lifecycle_state` (`std_msgs/String`, actual `SystemOpMode` text from the driver)
 - Service: `~init`
 - Service: `~shutdown`
 - Service: `~recover`

@@ -130,6 +130,7 @@ bool CanDriverHW::init(ros::NodeHandle &nh, ros::NodeHandle &pnh)
     ROS_INFO("[CanDriverHW] Initialized with %zu joints on %zu configured CAN device(s).",
              joints_.size(), configuredDevices.size());
     lifecycleCoordinator_.SetConfigured();
+    publishLifecycleState(ros::TimerEvent{});
     return true;
 }
 
@@ -138,6 +139,7 @@ void CanDriverHW::resetInternalState()
     active_.store(false, std::memory_order_release);
     lifecycleCoordinator_.SetInactive();
     stateTimer_.stop();
+    lifecycleStateTimer_.stop();
 
     for (auto &kv : cmdVelSubs_) {
         kv.second.shutdown();
@@ -759,6 +761,10 @@ void CanDriverHW::setupMaintenanceRosComm(ros::NodeHandle &pnh)
     setZeroLimitSrv_ = pnh.advertiseService("set_zero_limit",
                                             &CanDriverHW::onSetZeroLimit,
                                             this);
+    lifecycleStatePub_ = pnh.advertise<std_msgs::String>("lifecycle_state", 1, true);
+    lifecycleStateTimer_ = pnh.createTimer(ros::Duration(0.1),
+                                           &CanDriverHW::publishLifecycleState,
+                                           this);
 
     const auto makeDirectCmdCallback =
         [this](std::size_t idx, bool isVelocity) {
@@ -1107,6 +1113,17 @@ void CanDriverHW::publishMotorStates(const ros::TimerEvent & /*e*/)
     for (const auto &msg : publishResult.messages) {
         motorStatesPub_.publish(msg);
     }
+}
+
+void CanDriverHW::publishLifecycleState(const ros::TimerEvent & /*e*/)
+{
+    if (!lifecycleStatePub_) {
+        return;
+    }
+
+    std_msgs::String msg;
+    msg.data = can_driver::SystemOpModeName(lifecycleCoordinator_.mode());
+    lifecycleStatePub_.publish(msg);
 }
 
 // ---------------------------------------------------------------------------

@@ -26,6 +26,7 @@
 #include <joint_limits_interface/joint_limits_urdf.h>
 #include <ros/ros.h>
 #include <std_msgs/Float64.h>
+#include <std_msgs/String.h>
 #include <std_srvs/Trigger.h>
 #include <urdf/model.h>
 
@@ -119,7 +120,9 @@ private:
     std::map<std::string, ros::Subscriber> cmdPosSubs_;
 
     ros::Publisher motorStatesPub_;
+    ros::Publisher lifecycleStatePub_;
     ros::Timer     stateTimer_;
+    ros::Timer     lifecycleStateTimer_;
 
     // 生命周期与并发控制
     std::atomic<bool> active_{false};
@@ -183,6 +186,7 @@ private:
      * @brief 定时发布 ~/motor_states（10 Hz）。
      */
     void publishMotorStates(const ros::TimerEvent &);
+    void publishLifecycleState(const ros::TimerEvent &);
 
     bool onMotorCommand(can_driver::MotorCommand::Request &req,
                         can_driver::MotorCommand::Response &res);
