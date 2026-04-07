@@ -11,6 +11,7 @@
 #include "can_driver/lifecycle_driver_ops.hpp"
 #include "can_driver/MotorID.h"
 #include "can_driver/motor_action_executor.hpp"
+#include "can_driver/motor_maintenance_service.hpp"
 #include "can_driver/operational_coordinator.hpp"
 
 #include <can_driver/MotorCommand.h>
@@ -112,8 +113,7 @@ private:
     // -----------------------------------------------------------------------
     // ROS 通信
     // -----------------------------------------------------------------------
-    ros::ServiceServer motorCmdSrv_;
-    ros::ServiceServer setZeroLimitSrv_;
+    std::unique_ptr<MotorMaintenanceService> maintenanceService_;
 
     // 直接命令订阅者（per joint，绕过控制器，测试/调试用）
     std::map<std::string, ros::Subscriber> cmdVelSubs_;
@@ -157,7 +157,6 @@ private:
     void setupMaintenanceRosComm(ros::NodeHandle &pnh);
     void configureCommandGate();
     void configureLifecycleCoordinator();
-    void clearDirectCmd(const std::string &jointName);
     void holdCommandsForLifecycleTransition();
     std::vector<CommandGate::Snapshot> captureCommandSnapshots() const;
     void syncLifecycleTargets();
@@ -190,11 +189,6 @@ private:
      */
     void publishMotorStates(const ros::TimerEvent &);
     void publishLifecycleState(const ros::TimerEvent &);
-
-    bool onMotorCommand(can_driver::MotorCommand::Request &req,
-                        can_driver::MotorCommand::Response &res);
-    bool onSetZeroLimit(can_driver::SetZeroLimit::Request &req,
-                        can_driver::SetZeroLimit::Response &res);
 };
 
 #endif // CAN_DRIVER_CAN_DRIVER_HW_H
