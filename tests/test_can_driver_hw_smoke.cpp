@@ -572,6 +572,26 @@ protected:
         return joints;
     }
 
+    static XmlRpc::XmlRpcValue makeAliasedMtJoints()
+    {
+        XmlRpc::XmlRpcValue joints;
+        joints.setSize(2);
+
+        joints[0]["name"] = "test_wheel_a";
+        joints[0]["motor_id"] = static_cast<int>(0x141);
+        joints[0]["protocol"] = "MT";
+        joints[0]["can_device"] = "fake0";
+        joints[0]["control_mode"] = "velocity";
+
+        joints[1]["name"] = "test_wheel_b";
+        joints[1]["motor_id"] = static_cast<int>(0x041);
+        joints[1]["protocol"] = "MT";
+        joints[1]["can_device"] = "fake0";
+        joints[1]["control_mode"] = "velocity";
+
+        return joints;
+    }
+
     static void setPositionLimits(ros::NodeHandle &pnh,
                                   const std::string &jointName,
                                   double minPosition,
@@ -642,6 +662,19 @@ TEST_F(CanDriverHWSmokeTest, InitAndDirectWriteUsesProtocol)
     EXPECT_EQ(fakeDm->protocol()->lastVelocity(), 12);
 
     spinner.stop();
+}
+
+TEST_F(CanDriverHWSmokeTest, InitRejectsAliasedProtocolNodeIdsOnSameBus)
+{
+    auto fakeDm = std::make_shared<FakeDeviceManager>();
+    CanDriverHW hw(fakeDm);
+
+    ros::NodeHandle nh;
+    ros::NodeHandle pnh(uniqueNs("can_driver_hw_smoke_alias"));
+
+    pnh.setParam("joints", makeAliasedMtJoints());
+
+    EXPECT_FALSE(hw.init(nh, pnh));
 }
 
 TEST_F(CanDriverHWSmokeTest, InitDefersDeviceActivationUntilLifecycleInit)

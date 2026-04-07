@@ -31,7 +31,7 @@ roslaunch can_driver can_driver.launch
 - `motor_state_period_sec` (default: `0.1`)
 - `motor_query_hz` (default: `0.0`, protocol auto strategy)
 - `direct_cmd_queue_size` (default: `1`)
-- `debug_bypass_ros_control` (default: `false`, debugging only)
+- `debug_bypass_ros_control` (recommended: `false`, debugging only; check your loaded YAML because local configs may override it)
 
 ## Interfaces
 
@@ -41,6 +41,10 @@ roslaunch can_driver can_driver.launch
 - Service: `~init`
 - Service: `~shutdown`
 - Service: `~recover`
+- Service: `~enable`
+- Service: `~disable`
+- Service: `~halt`
+- Service: `~resume`
 - Service: `~motor_command` (`CMD_SET_MODE=3`, value `0=position 1=velocity 2=csp`)
 
 ## More Docs

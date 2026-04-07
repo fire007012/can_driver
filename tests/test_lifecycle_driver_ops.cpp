@@ -252,6 +252,8 @@ TEST(AxisReadinessEvaluatorTest, PpAxisReportsReadyFactsBeforeAndAfterFirstComma
     feedback.key = key;
     feedback.feedbackSeen = true;
     feedback.enabled = true;
+    feedback.enabledValid = true;
+    feedback.faultValid = true;
     feedback.lastRxSteadyNs = nowNs;
 
     can_driver::SharedDriverState::AxisCommandState command;
@@ -274,6 +276,7 @@ TEST(AxisReadinessEvaluatorTest, PpAxisReportsReadyFactsBeforeAndAfterFirstComma
     command.desiredMode = CanProtocol::MotorMode::Position;
     command.desiredModeValid = true;
     feedback.mode = CanProtocol::MotorMode::Position;
+    feedback.modeValid = true;
 
     const auto commanding = evaluator.Evaluate(
         feedback, &command, can_driver::AxisIntent::Enable, &deviceHealth, nowNs);
@@ -295,6 +298,8 @@ TEST(AxisReadinessEvaluatorTest, PpAxisReportsDegradedAndFaultFactsOnUnhealthyPa
     feedback.key = key;
     feedback.feedbackSeen = true;
     feedback.enabled = true;
+    feedback.enabledValid = true;
+    feedback.faultValid = true;
     feedback.lastRxSteadyNs = nowNs - 600000000LL;
 
     can_driver::SharedDriverState::AxisCommandState command;
@@ -334,6 +339,8 @@ TEST(AxisReadinessEvaluatorTest, RecoverIntentRemainsPredicateOnlyWithoutLifecyc
     feedback.key = key;
     feedback.feedbackSeen = true;
     feedback.enabled = true;
+    feedback.enabledValid = true;
+    feedback.faultValid = true;
     feedback.lastRxSteadyNs = nowNs;
 
     can_driver::SharedDriverState::AxisCommandState command;
@@ -381,7 +388,10 @@ TEST(AxisReadinessEvaluatorTest, EnabledAxisStillRequiresSelectedModeToMatchBefo
     feedback.key = key;
     feedback.feedbackSeen = true;
     feedback.enabled = true;
+    feedback.enabledValid = true;
+    feedback.faultValid = true;
     feedback.mode = CanProtocol::MotorMode::Position;
+    feedback.modeValid = true;
     feedback.lastRxSteadyNs = nowNs;
 
     can_driver::SharedDriverState::AxisCommandState command;
@@ -421,7 +431,10 @@ TEST(SharedDriverStateTest, CommandAndIntentUpdatesDoNotRewriteFeedbackFacts)
         key, [lastRxNs](can_driver::SharedDriverState::AxisFeedbackState *feedback) {
             feedback->feedbackSeen = true;
             feedback->enabled = true;
+            feedback->enabledValid = true;
+            feedback->faultValid = true;
             feedback->mode = CanProtocol::MotorMode::Position;
+            feedback->modeValid = true;
             feedback->lastRxSteadyNs = lastRxNs;
             feedback->consecutiveTimeoutCount = 0;
         });
@@ -572,7 +585,9 @@ TEST(LifecycleDriverOpsTest, EnableHealthyAcceptsFreshDisabledPpAxis)
     feedback.key = axisKey;
     feedback.feedbackSeen = true;
     feedback.enabled = false;
+    feedback.enabledValid = true;
     feedback.fault = false;
+    feedback.faultValid = true;
     feedback.lastRxSteadyNs = nowNs;
     deviceManager->sharedState()->mutateAxisFeedback(
         axisKey,
@@ -610,7 +625,9 @@ TEST(LifecycleDriverOpsTest, EnableHealthyRejectsFaultedPpAxisFromSharedState)
     feedback.key = axisKey;
     feedback.feedbackSeen = true;
     feedback.enabled = false;
+    feedback.enabledValid = true;
     feedback.fault = true;
+    feedback.faultValid = true;
     feedback.lastRxSteadyNs = nowNs;
     deviceManager->sharedState()->mutateAxisFeedback(
         axisKey,
@@ -675,6 +692,9 @@ TEST(LifecycleDriverOpsTest, MotionHealthyUsesSharedStateDegradationBeforeProtoc
         can_driver::MakeAxisKey("fake0", CanType::MT, static_cast<MotorID>(0x141)),
         [](can_driver::SharedDriverState::AxisFeedbackState *feedback) {
             feedback->feedbackSeen = true;
+            feedback->enabled = true;
+            feedback->enabledValid = true;
+            feedback->faultValid = true;
             feedback->consecutiveTimeoutCount = 2;
         });
 
@@ -698,6 +718,7 @@ TEST(LifecycleDriverOpsTest, AnyFaultActiveUsesSharedStateFeedback)
         [](can_driver::SharedDriverState::AxisFeedbackState *feedback) {
             feedback->feedbackSeen = true;
             feedback->fault = true;
+            feedback->faultValid = true;
         });
 
     EXPECT_TRUE(ops.anyFaultActive());
@@ -723,7 +744,10 @@ TEST(LifecycleDriverOpsTest, MotionHealthyUsesAxisReadinessForPpModeMismatch)
         [](can_driver::SharedDriverState::AxisFeedbackState *feedback) {
             feedback->feedbackSeen = true;
             feedback->enabled = true;
+            feedback->enabledValid = true;
+            feedback->faultValid = true;
             feedback->mode = CanProtocol::MotorMode::Velocity;
+            feedback->modeValid = true;
             feedback->lastRxSteadyNs = can_driver::SharedDriverSteadyNowNs();
         });
     deviceManager->sharedState()->mutateAxisCommand(
@@ -761,7 +785,10 @@ TEST(LifecycleDriverOpsTest, MotionHealthyRejectsStaleModeObservationAfterComman
         [nowNs](can_driver::SharedDriverState::AxisFeedbackState *feedback) {
             feedback->feedbackSeen = true;
             feedback->enabled = true;
+            feedback->enabledValid = true;
+            feedback->faultValid = true;
             feedback->mode = CanProtocol::MotorMode::Position;
+            feedback->modeValid = true;
             feedback->lastRxSteadyNs = nowNs;
         });
     deviceManager->sharedState()->mutateAxisCommand(
@@ -808,6 +835,8 @@ TEST(LifecycleDriverOpsTest, MotionHealthyAcceptsFreshPpAxisBeforeFirstMotionCom
         [](can_driver::SharedDriverState::AxisFeedbackState *feedback) {
             feedback->feedbackSeen = true;
             feedback->enabled = true;
+            feedback->enabledValid = true;
+            feedback->faultValid = true;
             feedback->lastRxSteadyNs = can_driver::SharedDriverSteadyNowNs();
         });
 
@@ -837,7 +866,9 @@ TEST(LifecycleDriverOpsTest, RecoverAllWaitsForAxisReadinessRecoveryConfirmation
         [](can_driver::SharedDriverState::AxisFeedbackState *feedback) {
             feedback->feedbackSeen = true;
             feedback->fault = true;
+            feedback->faultValid = true;
             feedback->enabled = true;
+            feedback->enabledValid = true;
             feedback->lastRxSteadyNs = can_driver::SharedDriverSteadyNowNs();
         });
 
@@ -847,7 +878,9 @@ TEST(LifecycleDriverOpsTest, RecoverAllWaitsForAxisReadinessRecoveryConfirmation
             key,
             [](can_driver::SharedDriverState::AxisFeedbackState *feedback) {
                 feedback->fault = false;
+                feedback->faultValid = true;
                 feedback->enabled = true;
+                feedback->enabledValid = true;
                 feedback->lastRxSteadyNs = can_driver::SharedDriverSteadyNowNs();
             });
         std::this_thread::sleep_for(std::chrono::milliseconds(70));
@@ -855,7 +888,9 @@ TEST(LifecycleDriverOpsTest, RecoverAllWaitsForAxisReadinessRecoveryConfirmation
             key,
             [](can_driver::SharedDriverState::AxisFeedbackState *feedback) {
                 feedback->fault = false;
+                feedback->faultValid = true;
                 feedback->enabled = true;
+                feedback->enabledValid = true;
                 feedback->lastRxSteadyNs = can_driver::SharedDriverSteadyNowNs();
             });
     });
