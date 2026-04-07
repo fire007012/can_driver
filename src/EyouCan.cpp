@@ -249,7 +249,12 @@ bool EyouCan::setMode(MotorID Id, MotorMode mode)
     registerManagedMotorId(Id);
     {
         std::lock_guard<std::mutex> stateLock(stateMutex);
-        motorStates[motorId].mode = mode;
+        auto &state = motorStates[motorId];
+        state.mode = mode;
+        // Mode switching can invalidate the device-side velocity preconfiguration
+        // used by position/CSP motion. Force the next motion command path to
+        // re-issue 0x09 before 0x0A.
+        state.positionVelocityConfigured = false;
     }
     syncSharedModeSelection(motorId, mode);
 
