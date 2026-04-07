@@ -181,6 +181,9 @@ private:
     bool isDeviceReady(const std::string &device) const;
     bool getFreshAxisFeedback(const JointConfig &joint,
                               can_driver::SharedDriverState::AxisFeedbackState *feedback) const;
+    bool requireAxisDisabledForConfiguration(const JointConfig &joint,
+                                             const char *operation,
+                                             std::string *message) const;
 
     /**
      * @brief 定时发布 ~/motor_states（10 Hz）。

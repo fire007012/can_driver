@@ -675,6 +675,26 @@ protected:
         return static_cast<int32_t>(std::llround(valueRad / (2.0 * M_PI / 65536.0)));
     }
 
+    static void setFreshEnabledFeedback(FakeDeviceManager &dm,
+                                        const std::string &device,
+                                        CanType protocol,
+                                        MotorID motorId,
+                                        bool enabled)
+    {
+        dm.protocol()->setEnabledState(enabled);
+        const auto key = can_driver::MakeAxisKey(device, protocol, motorId);
+        const auto nowNs = can_driver::SharedDriverSteadyNowNs();
+        dm.sharedState()->mutateAxisFeedback(
+            key,
+            [enabled, nowNs](can_driver::SharedDriverState::AxisFeedbackState *feedback) {
+                feedback->feedbackSeen = true;
+                feedback->enabled = enabled;
+                feedback->enabledValid = true;
+                feedback->lastRxSteadyNs = nowNs;
+                feedback->lastValidStateSteadyNs = nowNs;
+            });
+    }
+
     static std::string uniqueNs(const std::string &base)
     {
         static std::atomic<int> seq{0};
@@ -1727,6 +1747,8 @@ TEST_F(CanDriverHWSmokeTest, SetZeroLimitServiceCanAutoZeroFromCurrentPosition)
         pnh.resolveName("set_zero_limit"));
     ASSERT_TRUE(client.waitForExistence(ros::Duration(1.0)));
 
+    setFreshEnabledFeedback(*fakeDm, "fake0", CanType::PP, static_cast<MotorID>(0x05), false);
+
     can_driver::SetZeroLimit srv;
     srv.request.motor_id = 0x05u;
     srv.request.zero_offset_rad = 999.0;
@@ -1747,6 +1769,45 @@ TEST_F(CanDriverHWSmokeTest, SetZeroLimitServiceCanAutoZeroFromCurrentPosition)
     EXPECT_EQ(fakeDm->protocol()->lastLimitMin(), rawFromPprRadians(-0.5));
     EXPECT_EQ(fakeDm->protocol()->lastLimitMax(), rawFromPprRadians(0.3));
     EXPECT_TRUE(fakeDm->protocol()->lastLimitEnable());
+
+    spinner.stop();
+}
+
+TEST_F(CanDriverHWSmokeTest, SetZeroLimitServiceRejectsHardwareWriteWhileEnabled)
+{
+    auto fakeDm = std::make_shared<FakeDeviceManager>();
+    fakeDm->protocol()->setFeedbackPosition(rawFromPprRadians(0.1));
+    CanDriverHW hw(fakeDm);
+
+    ros::NodeHandle nh;
+    ros::NodeHandle pnh(uniqueNs("can_driver_hw_smoke_zero_limit_enabled_reject"));
+
+    pnh.setParam("joints", makeSingleCspJoint());
+
+    ASSERT_TRUE(hw.init(nh, pnh));
+    const auto initResult = hw.operationalCoordinator().RequestInit("fake0", false);
+    ASSERT_TRUE(initResult.ok) << initResult.message;
+
+    ros::AsyncSpinner spinner(1);
+    spinner.start();
+
+    ros::ServiceClient client = nh.serviceClient<can_driver::SetZeroLimit>(
+        pnh.resolveName("set_zero_limit"));
+    ASSERT_TRUE(client.waitForExistence(ros::Duration(1.0)));
+
+    setFreshEnabledFeedback(*fakeDm, "fake0", CanType::PP, static_cast<MotorID>(0x05), true);
+
+    can_driver::SetZeroLimit srv;
+    srv.request.motor_id = 0x05u;
+    srv.request.zero_offset_rad = 0.0;
+    srv.request.use_current_position_as_zero = false;
+    srv.request.min_position_rad = -0.4;
+    srv.request.max_position_rad = 0.4;
+    srv.request.use_urdf_limits = false;
+    srv.request.apply_to_motor = true;
+    ASSERT_TRUE(client.call(srv));
+    EXPECT_FALSE(srv.response.success);
+    EXPECT_NE(srv.response.message.find("disabled first"), std::string::npos);
 
     spinner.stop();
 }
@@ -1784,8 +1845,11 @@ TEST_F(CanDriverHWSmokeTest, SetModeServiceUpdatesRuntimeRoutingToVelocity)
     setModeSrv.request.motor_id = 0x05u;
     setModeSrv.request.command = can_driver::MotorCommand::Request::CMD_SET_MODE;
     setModeSrv.request.value = 1.0;
+    setFreshEnabledFeedback(*fakeDm, "fake0", CanType::PP, static_cast<MotorID>(0x05), false);
     ASSERT_TRUE(client.call(setModeSrv));
     ASSERT_TRUE(setModeSrv.response.success) << setModeSrv.response.message;
+
+    setFreshEnabledFeedback(*fakeDm, "fake0", CanType::PP, static_cast<MotorID>(0x05), true);
 
     std_msgs::Float64 msg;
     msg.data = 0.0;
@@ -1836,6 +1900,7 @@ TEST_F(CanDriverHWSmokeTest, SetModeServicePreloadsCurrentPositionWhenSwitchingT
     setModeSrv.request.motor_id = 0x05u;
     setModeSrv.request.command = can_driver::MotorCommand::Request::CMD_SET_MODE;
     setModeSrv.request.value = 0.0;
+    setFreshEnabledFeedback(*fakeDm, "fake0", CanType::PP, static_cast<MotorID>(0x05), false);
     ASSERT_TRUE(client.call(setModeSrv));
     ASSERT_TRUE(setModeSrv.response.success) << setModeSrv.response.message;
 
@@ -1857,6 +1922,7 @@ TEST_F(CanDriverHWSmokeTest, VelocityModeRequiresAlignedCommandOnceAfterModeSwit
     pnh.setParam("joints", makeSingleCspJoint());
     pnh.setParam("debug_bypass_ros_control", true);
     pnh.setParam("motor_state_period_sec", 0.05);
+    pnh.setParam("safety_require_enabled_for_motion", false);
 
     ASSERT_TRUE(hw.init(nh, pnh));
     enterRunning(hw);
@@ -1878,10 +1944,13 @@ TEST_F(CanDriverHWSmokeTest, VelocityModeRequiresAlignedCommandOnceAfterModeSwit
     setModeSrv.request.motor_id = 0x05u;
     setModeSrv.request.command = can_driver::MotorCommand::Request::CMD_SET_MODE;
     setModeSrv.request.value = 1.0;
+    setFreshEnabledFeedback(*fakeDm, "fake0", CanType::PP, static_cast<MotorID>(0x05), false);
     ASSERT_TRUE(client.call(setModeSrv));
     ASSERT_TRUE(setModeSrv.response.success) << setModeSrv.response.message;
     EXPECT_EQ(fakeDm->protocol()->velocityCalls(), 1);
     EXPECT_EQ(fakeDm->protocol()->lastVelocity(), 0);
+
+    setFreshEnabledFeedback(*fakeDm, "fake0", CanType::PP, static_cast<MotorID>(0x05), true);
 
     std_msgs::Float64 msg;
     msg.data = 1.25;
@@ -1903,6 +1972,40 @@ TEST_F(CanDriverHWSmokeTest, VelocityModeRequiresAlignedCommandOnceAfterModeSwit
     hw.write(ros::Time::now(), ros::Duration(0.01));
     EXPECT_EQ(fakeDm->protocol()->velocityCalls(), 3);
     EXPECT_EQ(fakeDm->protocol()->lastVelocity(), 13038);
+
+    spinner.stop();
+}
+
+TEST_F(CanDriverHWSmokeTest, SetModeServiceRejectsWhileEnabled)
+{
+    auto fakeDm = std::make_shared<FakeDeviceManager>();
+    CanDriverHW hw(fakeDm);
+
+    ros::NodeHandle nh;
+    ros::NodeHandle pnh(uniqueNs("can_driver_hw_smoke_set_mode_enabled_reject"));
+
+    pnh.setParam("joints", makeSingleCspJoint());
+    pnh.setParam("motor_state_period_sec", 0.05);
+
+    ASSERT_TRUE(hw.init(nh, pnh));
+    enterRunning(hw);
+
+    ros::AsyncSpinner spinner(1);
+    spinner.start();
+
+    ros::ServiceClient client = nh.serviceClient<can_driver::MotorCommand>(
+        pnh.resolveName("motor_command"));
+    ASSERT_TRUE(client.waitForExistence(ros::Duration(1.0)));
+
+    setFreshEnabledFeedback(*fakeDm, "fake0", CanType::PP, static_cast<MotorID>(0x05), true);
+
+    can_driver::MotorCommand setModeSrv;
+    setModeSrv.request.motor_id = 0x05u;
+    setModeSrv.request.command = can_driver::MotorCommand::Request::CMD_SET_MODE;
+    setModeSrv.request.value = 1.0;
+    ASSERT_TRUE(client.call(setModeSrv));
+    EXPECT_FALSE(setModeSrv.response.success);
+    EXPECT_NE(setModeSrv.response.message.find("disabled first"), std::string::npos);
 
     spinner.stop();
 }

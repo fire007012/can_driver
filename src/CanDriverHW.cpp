@@ -1099,6 +1099,30 @@ bool CanDriverHW::getFreshAxisFeedback(
     return sharedFeedbackFresh(*feedback);
 }
 
+bool CanDriverHW::requireAxisDisabledForConfiguration(const JointConfig &joint,
+                                                      const char *operation,
+                                                      std::string *message) const
+{
+    can_driver::SharedDriverState::AxisFeedbackState feedback;
+    if (!getFreshAxisFeedback(joint, &feedback) || !feedback.enabledValid) {
+        if (message != nullptr) {
+            *message = std::string(operation ? operation : "Configuration") +
+                       " requires fresh enable-state feedback while the motor is disabled.";
+        }
+        return false;
+    }
+
+    if (feedback.enabled) {
+        if (message != nullptr) {
+            *message = std::string(operation ? operation : "Configuration") +
+                       " requires the motor to be disabled first.";
+        }
+        return false;
+    }
+
+    return true;
+}
+
 void CanDriverHW::publishMotorStates(const ros::TimerEvent & /*e*/)
 {
     if (!active_.load(std::memory_order_acquire)) {
@@ -1166,6 +1190,10 @@ bool CanDriverHW::onMotorCommand(can_driver::MotorCommand::Request &req,
         if (!decodeModeSelection(req.value, &selection)) {
             res.success = false;
             res.message = "CMD_SET_MODE value must be 0 (position), 1 (velocity) or 2 (csp).";
+            return true;
+        }
+        if (!requireAxisDisabledForConfiguration(*target, "Mode switch", &res.message)) {
+            res.success = false;
             return true;
         }
         const auto status = motorActionExecutor_.execute(
@@ -1397,6 +1425,12 @@ bool CanDriverHW::onSetZeroLimit(can_driver::SetZeroLimit::Request &req,
     }
 
     if (req.apply_to_motor) {
+        if (!requireAxisDisabledForConfiguration(*target,
+                                                 "Writing zero offset / hardware limits",
+                                                 &res.message)) {
+            res.success = false;
+            return true;
+        }
         int32_t rawMin = 0;
         int32_t rawMax = 0;
         int32_t rawOffset = 0;
