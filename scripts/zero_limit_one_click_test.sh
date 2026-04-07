@@ -139,6 +139,7 @@ main() {
   # T2: 手工限位 + 物理下发（PP）
   REQ_T2="motor_id: ${MOTOR_ID}
 zero_offset_rad: 0.0
+use_current_position_as_zero: false
 min_position_rad: -1.0
 max_position_rad: 1.0
 use_urdf_limits: false
@@ -173,6 +174,7 @@ apply_to_motor: true"
   # T3: 仅软件生效（不下发电机）
   REQ_T3="motor_id: ${MOTOR_ID}
 zero_offset_rad: 0.1
+use_current_position_as_zero: false
 min_position_rad: -1.0
 max_position_rad: 1.0
 use_urdf_limits: false
@@ -195,6 +197,7 @@ apply_to_motor: false"
   if rosparam get /robot_description >/dev/null 2>&1; then
     REQ_T4="motor_id: ${MOTOR_ID}
 zero_offset_rad: 0.2
+use_current_position_as_zero: false
 min_position_rad: 0.0
 max_position_rad: 0.0
 use_urdf_limits: true
@@ -215,6 +218,7 @@ apply_to_motor: false"
   OUT_BASE="${TMP_DIR}/t5_base.out"
   REQ_BASE="motor_id: ${MOTOR_ID}
 zero_offset_rad: 0.0
+use_current_position_as_zero: false
 min_position_rad: -1000.0
 max_position_rad: 1000.0
 use_urdf_limits: false
@@ -236,6 +240,7 @@ PY
       OUT_T5="${TMP_DIR}/t5.out"
       REQ_T5="motor_id: ${MOTOR_ID}
 zero_offset_rad: 0.0
+use_current_position_as_zero: false
 min_position_rad: ${LOW}
 max_position_rad: ${HIGH}
 use_urdf_limits: false
@@ -259,6 +264,7 @@ apply_to_motor: true"
     OUT_T7="${TMP_DIR}/t7.out"
     REQ_T7="motor_id: ${VEL_ID}
 zero_offset_rad: 0.0
+use_current_position_as_zero: false
 min_position_rad: -1.0
 max_position_rad: 1.0
 use_urdf_limits: false

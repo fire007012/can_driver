@@ -91,6 +91,29 @@ public:
         return true;
     }
 
+    bool configurePositionLimits(MotorID motorId,
+                                 int32_t minPositionRaw,
+                                 int32_t maxPositionRaw,
+                                 bool enable) override
+    {
+        std::lock_guard<std::mutex> lock(mutex_);
+        lastLimitMotor_ = motorId;
+        lastLimitMin_ = minPositionRaw;
+        lastLimitMax_ = maxPositionRaw;
+        lastLimitEnable_ = enable;
+        ++setLimitCalls_;
+        return true;
+    }
+
+    bool setPositionOffset(MotorID motorId, int32_t offsetRaw) override
+    {
+        std::lock_guard<std::mutex> lock(mutex_);
+        lastOffsetMotor_ = motorId;
+        lastOffsetRaw_ = offsetRaw;
+        ++setOffsetCalls_;
+        return true;
+    }
+
     int64_t getPosition(MotorID) const override
     {
         std::lock_guard<std::mutex> lock(mutex_);
@@ -249,6 +272,42 @@ public:
         return stopCalls_;
     }
 
+    int setOffsetCalls() const
+    {
+        std::lock_guard<std::mutex> lock(mutex_);
+        return setOffsetCalls_;
+    }
+
+    int setLimitCalls() const
+    {
+        std::lock_guard<std::mutex> lock(mutex_);
+        return setLimitCalls_;
+    }
+
+    int32_t lastOffsetRaw() const
+    {
+        std::lock_guard<std::mutex> lock(mutex_);
+        return lastOffsetRaw_;
+    }
+
+    int32_t lastLimitMin() const
+    {
+        std::lock_guard<std::mutex> lock(mutex_);
+        return lastLimitMin_;
+    }
+
+    int32_t lastLimitMax() const
+    {
+        std::lock_guard<std::mutex> lock(mutex_);
+        return lastLimitMax_;
+    }
+
+    bool lastLimitEnable() const
+    {
+        std::lock_guard<std::mutex> lock(mutex_);
+        return lastLimitEnable_;
+    }
+
 private:
     mutable std::mutex mutex_;
     MotorID lastModeMotor_{MotorID::LeftWheel};
@@ -271,6 +330,14 @@ private:
     MotorID lastEnableMotor_{MotorID::LeftWheel};
     int enableCalls_{0};
     int stopCalls_{0};
+    MotorID lastOffsetMotor_{MotorID::LeftWheel};
+    int32_t lastOffsetRaw_{0};
+    int setOffsetCalls_{0};
+    MotorID lastLimitMotor_{MotorID::LeftWheel};
+    int32_t lastLimitMin_{0};
+    int32_t lastLimitMax_{0};
+    bool lastLimitEnable_{false};
+    int setLimitCalls_{0};
     bool enabled_{true};
     bool hasFault_{false};
     int64_t feedbackPosition_{0};
@@ -1623,15 +1690,63 @@ TEST_F(CanDriverHWSmokeTest, SetZeroLimitServiceAcceptsCspJoint)
     can_driver::SetZeroLimit srv;
     srv.request.motor_id = 0x05u;
     srv.request.zero_offset_rad = 0.0;
+    srv.request.use_current_position_as_zero = false;
     srv.request.min_position_rad = -0.4;
     srv.request.max_position_rad = 0.4;
     srv.request.use_urdf_limits = false;
     srv.request.apply_to_motor = false;
     ASSERT_TRUE(client.call(srv));
     ASSERT_TRUE(srv.response.success) << srv.response.message;
+    EXPECT_DOUBLE_EQ(srv.response.applied_zero_offset_rad, 0.0);
     EXPECT_NEAR(srv.response.current_position_rad, 0.1, 1e-4);
     EXPECT_DOUBLE_EQ(srv.response.applied_min_rad, -0.4);
     EXPECT_DOUBLE_EQ(srv.response.applied_max_rad, 0.4);
+
+    spinner.stop();
+}
+
+TEST_F(CanDriverHWSmokeTest, SetZeroLimitServiceCanAutoZeroFromCurrentPosition)
+{
+    auto fakeDm = std::make_shared<FakeDeviceManager>();
+    fakeDm->protocol()->setFeedbackPosition(rawFromPprRadians(0.1));
+    CanDriverHW hw(fakeDm);
+
+    ros::NodeHandle nh;
+    ros::NodeHandle pnh(uniqueNs("can_driver_hw_smoke_csp_auto_zero"));
+
+    pnh.setParam("joints", makeSingleCspJoint());
+
+    ASSERT_TRUE(hw.init(nh, pnh));
+    const auto initResult = hw.operationalCoordinator().RequestInit("fake0", false);
+    ASSERT_TRUE(initResult.ok) << initResult.message;
+
+    ros::AsyncSpinner spinner(1);
+    spinner.start();
+
+    ros::ServiceClient client = nh.serviceClient<can_driver::SetZeroLimit>(
+        pnh.resolveName("set_zero_limit"));
+    ASSERT_TRUE(client.waitForExistence(ros::Duration(1.0)));
+
+    can_driver::SetZeroLimit srv;
+    srv.request.motor_id = 0x05u;
+    srv.request.zero_offset_rad = 999.0;
+    srv.request.use_current_position_as_zero = true;
+    srv.request.min_position_rad = -0.4;
+    srv.request.max_position_rad = 0.4;
+    srv.request.use_urdf_limits = false;
+    srv.request.apply_to_motor = true;
+    ASSERT_TRUE(client.call(srv));
+    ASSERT_TRUE(srv.response.success) << srv.response.message;
+    EXPECT_NEAR(srv.response.current_position_rad, 0.1, 1e-4);
+    EXPECT_NEAR(srv.response.applied_zero_offset_rad, -0.1, 1e-4);
+    EXPECT_NEAR(srv.response.applied_min_rad, -0.5, 1e-4);
+    EXPECT_NEAR(srv.response.applied_max_rad, 0.3, 1e-4);
+    EXPECT_EQ(fakeDm->protocol()->setOffsetCalls(), 1);
+    EXPECT_EQ(fakeDm->protocol()->setLimitCalls(), 1);
+    EXPECT_EQ(fakeDm->protocol()->lastOffsetRaw(), -rawFromPprRadians(0.1));
+    EXPECT_EQ(fakeDm->protocol()->lastLimitMin(), rawFromPprRadians(-0.5));
+    EXPECT_EQ(fakeDm->protocol()->lastLimitMax(), rawFromPprRadians(0.3));
+    EXPECT_TRUE(fakeDm->protocol()->lastLimitEnable());
 
     spinner.stop();
 }

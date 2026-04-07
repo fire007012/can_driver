@@ -1292,6 +1292,11 @@ bool CanDriverHW::onSetZeroLimit(can_driver::SetZeroLimit::Request &req,
         res.message = "Only position-semantic joints support zero/position limits.";
         return true;
     }
+    if (req.use_current_position_as_zero && !req.apply_to_motor) {
+        res.success = false;
+        res.message = "Automatic zeroing requires apply_to_motor=true.";
+        return true;
+    }
 
     double baseMin = req.min_position_rad;
     double baseMax = req.max_position_rad;
@@ -1319,14 +1324,6 @@ bool CanDriverHW::onSetZeroLimit(can_driver::SetZeroLimit::Request &req,
         baseMax = urdfLimits.max_position;
     }
 
-    const double appliedMin = baseMin + req.zero_offset_rad;
-    const double appliedMax = baseMax + req.zero_offset_rad;
-    if (!std::isfinite(appliedMin) || !std::isfinite(appliedMax) || appliedMin >= appliedMax) {
-        res.success = false;
-        res.message = "Invalid limit range after zero offset.";
-        return true;
-    }
-
     auto proto = getProtocol(target->canDevice, target->protocol);
     auto devMutex = getDeviceMutex(target->canDevice);
     if (!proto || !devMutex) {
@@ -1351,11 +1348,28 @@ bool CanDriverHW::onSetZeroLimit(can_driver::SetZeroLimit::Request &req,
     }
     const double currentPosRad = static_cast<double>(rawPos) * target->positionScale;
     res.current_position_rad = currentPosRad;
+    if (req.use_current_position_as_zero && !hasFreshFeedback) {
+        res.success = false;
+        res.message =
+            "Current position feedback unavailable or stale; cannot auto-zero.";
+        return true;
+    }
     if (!hasFreshFeedback) {
         ROS_WARN_THROTTLE(1.0,
                           "[CanDriverHW] SetZeroLimit using protocol cached position for joint '%s' "
                           "because no fresh shared feedback is available.",
                           target->name.c_str());
+    }
+
+    const double resolvedZeroOffset =
+        req.use_current_position_as_zero ? -currentPosRad : req.zero_offset_rad;
+    res.applied_zero_offset_rad = resolvedZeroOffset;
+    const double appliedMin = baseMin + resolvedZeroOffset;
+    const double appliedMax = baseMax + resolvedZeroOffset;
+    if (!std::isfinite(appliedMin) || !std::isfinite(appliedMax) || appliedMin >= appliedMax) {
+        res.success = false;
+        res.message = "Invalid limit range after zero offset.";
+        return true;
     }
     if (currentPosRad < appliedMin || currentPosRad > appliedMax) {
         res.success = false;
@@ -1374,7 +1388,10 @@ bool CanDriverHW::onSetZeroLimit(can_driver::SetZeroLimit::Request &req,
             !can_driver::safe_command::scaleAndClampToInt32(
                 appliedMax, target->positionScale, target->name + ".max_limit", rawMax) ||
             !can_driver::safe_command::scaleAndClampToInt32(
-                req.zero_offset_rad, target->positionScale, target->name + ".zero_offset", rawOffset)) {
+                resolvedZeroOffset,
+                target->positionScale,
+                target->name + ".zero_offset",
+                rawOffset)) {
             res.success = false;
             res.message = "Failed to convert limits/offset to protocol raw values.";
             return true;
@@ -1414,7 +1431,7 @@ bool CanDriverHW::onSetZeroLimit(can_driver::SetZeroLimit::Request &req,
             jc.limits.has_position_limits = true;
             jc.limits.min_position = appliedMin;
             jc.limits.max_position = appliedMax;
-            jointZeroOffsetRadByMotorId_[req.motor_id] = req.zero_offset_rad;
+            jointZeroOffsetRadByMotorId_[req.motor_id] = resolvedZeroOffset;
             break;
         }
     }

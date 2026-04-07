@@ -161,6 +161,7 @@ widen_limits_if_available() {
 		echo "[INFO] 预设宽限位(-6.28~6.28 rad)，避免历史限位影响演示。"
 		rosservice call "${NS}/set_zero_limit" "motor_id: ${MOTOR_ID}
 zero_offset_rad: 0.0
+use_current_position_as_zero: false
 min_position_rad: -6.28
 max_position_rad: 6.28
 use_urdf_limits: false

@@ -216,6 +216,7 @@ class RealtimeMotorUI:
         self.link_stream_enable = tk.BooleanVar(value=False)
         self.link_command_value = tk.DoubleVar(value=0.0)
         self.zero_offset = tk.DoubleVar(value=0.0)
+        self.auto_zero_from_current = tk.BooleanVar(value=False)
         self.limit_min = tk.DoubleVar(value=-1.0)
         self.limit_max = tk.DoubleVar(value=1.0)
         self.use_urdf_limits = tk.BooleanVar(value=False)
@@ -486,12 +487,20 @@ class RealtimeMotorUI:
         ttk.Checkbutton(row_zero2, text="使用URDF限位", variable=self.use_urdf_limits).pack(
             side=tk.LEFT, padx=4
         )
+        ttk.Checkbutton(row_zero2, text="按当前位置归零", variable=self.auto_zero_from_current).pack(
+            side=tk.LEFT, padx=4
+        )
         ttk.Checkbutton(row_zero2, text="下发到电机", variable=self.apply_to_motor).pack(
             side=tk.LEFT, padx=4
         )
         ttk.Button(row_zero2, text="应用零点/限位", command=self._apply_zero_limit).pack(
             side=tk.LEFT, padx=8
         )
+        ttk.Button(
+            row_zero2,
+            text="当前位置归零并应用",
+            command=lambda: self._apply_zero_limit(force_auto_zero=True, force_apply_to_motor=True),
+        ).pack(side=tk.LEFT, padx=4)
         ttk.Label(row_zero2, textvariable=self.zero_limit_result, foreground="#0b5d86").pack(
             side=tk.LEFT, padx=8
         )
@@ -812,19 +821,24 @@ class RealtimeMotorUI:
     def _motor_disable(self) -> None:
         self._send_motor_service(CMD_DISABLE)
 
-    def _apply_zero_limit(self) -> None:
+    def _apply_zero_limit(
+        self, force_auto_zero: bool = False, force_apply_to_motor: bool = False
+    ) -> None:
         cfg = self._get_joint_cfg(self.selected_joint.get())
         self.status_text.set(f"{cfg['name']} 零点/限位应用中 ...")
+        use_auto_zero = bool(self.auto_zero_from_current.get() or force_auto_zero)
+        apply_to_motor = bool(self.apply_to_motor.get() or force_apply_to_motor)
 
         def _run():
             try:
                 res = self.srv_set_zero_limit(
                     motor_id=cfg["motor_id"],
                     zero_offset_rad=float(self.zero_offset.get()),
+                    use_current_position_as_zero=use_auto_zero,
                     min_position_rad=float(self.limit_min.get()),
                     max_position_rad=float(self.limit_max.get()),
                     use_urdf_limits=bool(self.use_urdf_limits.get()),
-                    apply_to_motor=bool(self.apply_to_motor.get()),
+                    apply_to_motor=apply_to_motor,
                 )
 
                 def _finish():
@@ -834,6 +848,7 @@ class RealtimeMotorUI:
                         )
                         self.zero_limit_result.set(
                             "零点/限位结果: "
+                            f"offset={res.applied_zero_offset_rad:.4f}, "
                             f"pos={res.current_position_rad:.4f}, "
                             f"[{res.applied_min_rad:.4f}, {res.applied_max_rad:.4f}]"
                         )
