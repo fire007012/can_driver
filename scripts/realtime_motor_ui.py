@@ -573,6 +573,11 @@ class RealtimeMotorUI:
         ttk.Button(
             row_link_mode, text="联动发送一次", command=self._link_publish_once
         ).pack(side=tk.LEFT, padx=4)
+        ttk.Button(
+            row_link_mode,
+            text="联动对齐并发送",
+            command=self._link_align_to_actual_and_publish_once,
+        ).pack(side=tk.LEFT, padx=4)
 
         self.link_scale = tk.Scale(
             frm_link,
@@ -961,24 +966,27 @@ class RealtimeMotorUI:
         cfg = self._get_joint_cfg(name)
         self._publish_joint_command(cfg, self.selected_mode.get(), val)
 
-    def _align_to_actual_and_publish_once(self) -> None:
-        cfg = self._get_joint_cfg(self.selected_joint.get())
+    def _actual_target_from_panel(self, cfg: dict, mode: str):
         panel = self.motor_panels.get(cfg["name"])
         if panel is None:
-            self.status_text.set("未找到当前关节面板，无法对齐。")
-            return
+            return None, "未找到当前关节面板"
 
-        mode = self.selected_mode.get()
         if mode == "velocity":
             if not panel.velocity_valid_flag:
-                self.status_text.set(f"{cfg['name']} 当前速度无有效反馈，无法对齐。")
-                return
-            target = panel.last_velocity_si
+                return None, f"{cfg['name']} 当前速度无有效反馈"
+            return panel.last_velocity_si, None
         else:
             if not panel.position_valid_flag:
-                self.status_text.set(f"{cfg['name']} 当前位置无有效反馈，无法对齐。")
-                return
-            target = panel.last_position_si
+                return None, f"{cfg['name']} 当前位置无有效反馈"
+            return panel.last_position_si, None
+
+    def _align_to_actual_and_publish_once(self) -> None:
+        cfg = self._get_joint_cfg(self.selected_joint.get())
+        mode = self.selected_mode.get()
+        target, error = self._actual_target_from_panel(cfg, mode)
+        if error is not None:
+            self.status_text.set(f"{error}，无法对齐。")
+            return
 
         self.command_value.set(target)
         self._refresh_single_axis_status()
@@ -1021,6 +1029,37 @@ class RealtimeMotorUI:
             + ", ".join(preview_parts[:4])
             + f" {unit}"
         )
+
+    def _link_align_to_actual_and_publish_once(self) -> None:
+        selected = self._selected_link_joints()
+        if not selected:
+            self.status_text.set("联动对齐已跳过: 未勾选任何关节")
+            return
+
+        mode = self.link_mode.get()
+        preview_parts = []
+        failed = []
+        for joint in selected:
+            target, error = self._actual_target_from_panel(joint, mode)
+            if error is not None:
+                failed.append(error)
+                continue
+            self._publish_joint_command(joint, mode, target)
+            preview_parts.append(f"{joint['name']}={target:.3f}")
+
+        if preview_parts:
+            unit = "rad/s" if mode == "velocity" else "rad"
+            message = (
+                f"联动对齐[{mode}] {len(preview_parts)}轴: "
+                + ", ".join(preview_parts[:4])
+                + f" {unit}"
+            )
+            if failed:
+                message += " | 跳过: " + "; ".join(failed[:2])
+            self.status_text.set(message)
+            return
+
+        self.status_text.set("联动对齐失败: " + "; ".join(failed[:3]))
 
     def _on_slider_changed(self, _value: str) -> None:
         self._refresh_single_axis_status()
