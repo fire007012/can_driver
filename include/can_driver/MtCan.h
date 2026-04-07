@@ -163,6 +163,7 @@ private:
     mutable std::mutex stateMutex;
     std::size_t receiveHandlerId = 0;
     std::vector<uint8_t> refreshMotorIds;
+    mutable std::unordered_map<uint8_t, MotorID> systemMotorIdsByNodeId_;
     mutable std::mutex refreshMutex;
     std::atomic<double> refreshRateHz_{0.0};
     mutable std::mutex pendingReadMutex_;
@@ -222,6 +223,8 @@ private:
     bool tryIssueReadCommand(uint8_t motorId, uint8_t command);
     void markReadResponseReceived(uint8_t motorId, uint8_t command);
     void resetReadTracking();
+    void rememberSystemMotorId(MotorID motorId);
+    MotorID resolveSystemMotorId(uint8_t motorId) const;
     can_driver::SharedDriverState::AxisKey makeAxisKey(uint8_t motorId) const;
     void syncSharedFeedback(uint8_t motorId, const MotorState &state) const;
     void syncSharedCommand(uint8_t motorId,

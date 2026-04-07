@@ -25,8 +25,7 @@ std::vector<std::uint8_t> normalizeMotorIds(const std::vector<MotorID> &motorIds
     std::vector<std::uint8_t> normalized;
     normalized.reserve(motorIds.size());
     for (const auto motorId : motorIds) {
-        normalized.push_back(static_cast<std::uint8_t>(
-            can_driver::NormalizeProtocolMotorId(motorId)));
+        normalized.push_back(can_driver::toProtocolNodeId(motorId));
     }
     return normalized;
 }

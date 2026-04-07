@@ -24,7 +24,9 @@ inline std::int64_t SharedDriverSteadyNowNs()
 
 inline std::uint16_t NormalizeProtocolMotorId(MotorID motorId)
 {
-    return static_cast<std::uint8_t>(motorId);
+    // SharedDriverState 对外以“系统层 motor_id”为唯一轴标识；
+    // 协议 node id 的低 8 位缩并只能在线路层使用，不能污染共享状态键。
+    return toSystemMotorId(motorId);
 }
 
 enum class AxisIntent : std::uint8_t {

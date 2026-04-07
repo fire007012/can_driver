@@ -163,6 +163,7 @@ private:
     std::size_t receiveHandlerId = 0;
     std::vector<uint8_t> refreshMotorIds;
     mutable std::unordered_set<uint8_t> managedMotorIds;
+    mutable std::unordered_map<uint8_t, MotorID> systemMotorIdsByNodeId_;
     mutable std::mutex refreshMutex;
     std::atomic<double> refreshRateHz_{0.0};
     std::atomic<bool> fastWriteEnabled_{false};
@@ -196,7 +197,7 @@ private:
     bool requestCurrent(uint8_t motorId);
     bool requestVelocity(uint8_t motorId);
     bool isManagedMotorId(uint8_t motorId) const;
-    void registerManagedMotorId(uint8_t motorId) const;
+    void registerManagedMotorId(MotorID motorId) const;
     std::chrono::milliseconds computeRefreshSleep(std::size_t motorCount) const;
     void stopRefreshLoop();
     void publishWriteCountersParam() const;
@@ -215,6 +216,7 @@ private:
     bool tryIssueReadCommand(uint8_t motorId, uint8_t subCommand);
     void markReadResponseReceived(uint8_t motorId, uint8_t subCommand);
     void resetReadTracking();
+    MotorID resolveSystemMotorId(uint8_t motorId) const;
     can_driver::SharedDriverState::AxisKey makeAxisKey(uint8_t motorId) const;
     void syncSharedFeedback(uint8_t motorId, const MotorState &state) const;
     void syncSharedCommand(uint8_t motorId,

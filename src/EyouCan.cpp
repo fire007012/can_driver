@@ -14,6 +14,10 @@
 // EyouCan.cpp
 
 namespace {
+
+using can_driver::motorIdFromProtocolNodeId;
+using can_driver::toProtocolNodeId;
+
 constexpr uint8_t kWriteCommand = 0x01;
 constexpr uint8_t kFastWriteCommand = 0x05;
 constexpr uint8_t kReadCommand = 0x03;
@@ -113,13 +117,15 @@ void EyouCan::initializeMotorRefresh(const std::vector<MotorID> &motorIds)
         std::lock_guard<std::mutex> lock(refreshMutex);
         refreshMotorIds.clear();
         managedMotorIds.clear();
+        systemMotorIdsByNodeId_.clear();
         refreshMotorIds.reserve(motorIds.size());
         for (MotorID id : motorIds) {
-            const auto motorId = static_cast<uint8_t>(id);
+            const auto motorId = toProtocolNodeId(id);
             refreshMotorIds.push_back(motorId);
             managedMotorIds.insert(motorId);
+            systemMotorIdsByNodeId_[motorId] = id;
             if (sharedState_ && !deviceName_.empty()) {
-                sharedState_->registerAxis(deviceName_, CanType::PP, static_cast<MotorID>(motorId));
+                sharedState_->registerAxis(deviceName_, CanType::PP, id);
             }
         }
     }
@@ -189,7 +195,8 @@ uint64_t EyouCan::normalWriteSentCount() const
 
 bool EyouCan::issueRefreshQuery(MotorID motorId, RefreshQuery query)
 {
-    const uint8_t id = static_cast<uint8_t>(motorId);
+    registerManagedMotorId(motorId);
+    const uint8_t id = toProtocolNodeId(motorId);
     switch (query) {
     case RefreshQuery::Position:
         return requestPosition(id);
@@ -212,8 +219,8 @@ bool EyouCan::setMode(MotorID Id, MotorMode mode)
     if (!canController) {
         return false;
     }
-    uint8_t motorId = static_cast<uint8_t>(Id);
-    registerManagedMotorId(motorId);
+    uint8_t motorId = toProtocolNodeId(Id);
+    registerManagedMotorId(Id);
     {
         std::lock_guard<std::mutex> stateLock(stateMutex);
         motorStates[motorId].mode = mode;
@@ -245,8 +252,8 @@ bool EyouCan::setVelocity(MotorID Id, int32_t velocity)
     if (!canController) {
         return false;
     }
-    uint8_t motorId = static_cast<uint8_t>(Id);
-    registerManagedMotorId(motorId);
+    uint8_t motorId = toProtocolNodeId(Id);
+    registerManagedMotorId(Id);
     {
         std::lock_guard<std::mutex> stateLock(stateMutex);
         auto &state = motorStates[motorId];
@@ -312,8 +319,8 @@ bool EyouCan::setAcceleration(MotorID Id, int32_t acceleration)
     if (!canController) {
         return false;
     }
-    uint8_t motorId = static_cast<uint8_t>(Id);
-    registerManagedMotorId(motorId);
+    uint8_t motorId = toProtocolNodeId(Id);
+    registerManagedMotorId(Id);
     sendWriteCommand(motorId, 0x0B, static_cast<uint32_t>(acceleration), 4);
     return true;
 }
@@ -324,8 +331,8 @@ bool EyouCan::setDeceleration(MotorID Id, int32_t deceleration)
     if (!canController) {
         return false;
     }
-    uint8_t motorId = static_cast<uint8_t>(Id);
-    registerManagedMotorId(motorId);
+    uint8_t motorId = toProtocolNodeId(Id);
+    registerManagedMotorId(Id);
     sendWriteCommand(motorId, 0x0C, static_cast<uint32_t>(deceleration), 4);
     return true;
 }
@@ -335,8 +342,8 @@ bool EyouCan::setPosition(MotorID Id, int32_t position)
     if (!canController) {
         return false;
     }
-    uint8_t motorId = static_cast<uint8_t>(Id);
-    registerManagedMotorId(motorId);
+    uint8_t motorId = toProtocolNodeId(Id);
+    registerManagedMotorId(Id);
     {
         std::lock_guard<std::mutex> stateLock(stateMutex);
         motorStates[motorId].commandedPosition = position;
@@ -363,8 +370,8 @@ bool EyouCan::quickSetPosition(MotorID Id, int32_t position)
     if (!canController) {
         return false;
     }
-    uint8_t motorId = static_cast<uint8_t>(Id);
-    registerManagedMotorId(motorId);
+    uint8_t motorId = toProtocolNodeId(Id);
+    registerManagedMotorId(Id);
     {
         std::lock_guard<std::mutex> stateLock(stateMutex);
         motorStates[motorId].commandedPosition = position;
@@ -385,8 +392,8 @@ bool EyouCan::Enable(MotorID Id)
     if (!canController) {
         return false;
     }
-    uint8_t motorId = static_cast<uint8_t>(Id);
-    registerManagedMotorId(motorId);
+    uint8_t motorId = toProtocolNodeId(Id);
+    registerManagedMotorId(Id);
     syncSharedIntent(motorId, can_driver::AxisIntent::Enable);
     sendWriteCommand(motorId, 0x10, 0x00000001, 4);
     return true;
@@ -397,8 +404,8 @@ bool EyouCan::Disable(MotorID Id)
     if (!canController) {
         return false;
     }
-    uint8_t motorId = static_cast<uint8_t>(Id);
-    registerManagedMotorId(motorId);
+    uint8_t motorId = toProtocolNodeId(Id);
+    registerManagedMotorId(Id);
     syncSharedIntent(motorId, can_driver::AxisIntent::Disable);
     sendWriteCommand(motorId, 0x10, 0x00000000, 4);
     return true;
@@ -410,7 +417,8 @@ bool EyouCan::Stop(MotorID Id)
     if (!canController) {
         return false;
     }
-    uint8_t motorId = static_cast<uint8_t>(Id);
+    uint8_t motorId = toProtocolNodeId(Id);
+    registerManagedMotorId(Id);
     syncSharedIntent(motorId, can_driver::AxisIntent::Hold);
     sendWriteCommand(motorId, 0x11, 0x00000001, 4);
     return true;
@@ -421,8 +429,8 @@ bool EyouCan::ResetFault(MotorID Id)
     if (!canController) {
         return false;
     }
-    const uint8_t motorId = static_cast<uint8_t>(Id);
-    registerManagedMotorId(motorId);
+    const uint8_t motorId = toProtocolNodeId(Id);
+    registerManagedMotorId(Id);
     syncSharedIntent(motorId, can_driver::AxisIntent::Recover);
     sendWriteCommand(motorId, 0x15, 0x00000000, 4);
     markReadResponseReceived(motorId, 0x15);
@@ -433,8 +441,8 @@ bool EyouCan::ResetFault(MotorID Id)
 // [FIX #9] 移除 position==0 的不可靠判断，改用 hasReceived 标志
 int64_t EyouCan::getPosition(MotorID Id) const
 {
-    uint8_t motorId = static_cast<uint8_t>(Id);
-    registerManagedMotorId(motorId);
+    uint8_t motorId = toProtocolNodeId(Id);
+    registerManagedMotorId(Id);
     {
         std::lock_guard<std::mutex> stateLock(stateMutex);
         auto it = motorStates.find(motorId);
@@ -448,8 +456,8 @@ int64_t EyouCan::getPosition(MotorID Id) const
 // [FIX #7] 读取协议 0x05（当前电流值），返回缓存值
 int16_t EyouCan::getCurrent(MotorID Id) const
 {
-    uint8_t motorId = static_cast<uint8_t>(Id);
-    registerManagedMotorId(motorId);
+    uint8_t motorId = toProtocolNodeId(Id);
+    registerManagedMotorId(Id);
     {
         std::lock_guard<std::mutex> stateLock(stateMutex);
         auto it = motorStates.find(motorId);
@@ -463,8 +471,8 @@ int16_t EyouCan::getCurrent(MotorID Id) const
 // [FIX #8] 读取协议 0x06（当前速度值），返回缓存的实际速度
 int16_t EyouCan::getVelocity(MotorID Id) const
 {
-    uint8_t motorId = static_cast<uint8_t>(Id);
-    registerManagedMotorId(motorId);
+    uint8_t motorId = toProtocolNodeId(Id);
+    registerManagedMotorId(Id);
     {
         std::lock_guard<std::mutex> stateLock(stateMutex);
         auto it = motorStates.find(motorId);
@@ -477,8 +485,8 @@ int16_t EyouCan::getVelocity(MotorID Id) const
 
 bool EyouCan::isEnabled(MotorID Id) const
 {
-    const uint8_t motorId = static_cast<uint8_t>(Id);
-    registerManagedMotorId(motorId);
+    const uint8_t motorId = toProtocolNodeId(Id);
+    registerManagedMotorId(Id);
     std::lock_guard<std::mutex> stateLock(stateMutex);
     auto it = motorStates.find(motorId);
     return (it != motorStates.end()) ? it->second.enabled : false;
@@ -486,8 +494,8 @@ bool EyouCan::isEnabled(MotorID Id) const
 
 bool EyouCan::hasFault(MotorID Id) const
 {
-    const uint8_t motorId = static_cast<uint8_t>(Id);
-    registerManagedMotorId(motorId);
+    const uint8_t motorId = toProtocolNodeId(Id);
+    registerManagedMotorId(Id);
     std::lock_guard<std::mutex> stateLock(stateMutex);
     auto it = motorStates.find(motorId);
     return (it != motorStates.end()) ? it->second.fault : false;
@@ -505,8 +513,8 @@ bool EyouCan::configurePositionLimits(MotorID Id,
         return false;
     }
 
-    uint8_t motorId = static_cast<uint8_t>(Id);
-    registerManagedMotorId(motorId);
+    uint8_t motorId = toProtocolNodeId(Id);
+    registerManagedMotorId(Id);
     // PP 协议：0x39 上限、0x3A 下限、0x38 限位使能
     sendWriteCommand(motorId, 0x39, static_cast<uint32_t>(maxPositionRaw), 4, kWriteCommand);
     sendWriteCommand(motorId, 0x3A, static_cast<uint32_t>(minPositionRaw), 4, kWriteCommand);
@@ -519,8 +527,8 @@ bool EyouCan::setPositionOffset(MotorID Id, int32_t offsetRaw)
     if (!canController) {
         return false;
     }
-    uint8_t motorId = static_cast<uint8_t>(Id);
-    registerManagedMotorId(motorId);
+    uint8_t motorId = toProtocolNodeId(Id);
+    registerManagedMotorId(Id);
     // PP 协议：0x3B 位置偏置参数
     sendWriteCommand(motorId, 0x3B, static_cast<uint32_t>(offsetRaw), 4, kWriteCommand);
     return true;
@@ -769,7 +777,7 @@ void EyouCan::markReadResponseReceived(uint8_t motorId, uint8_t subCommand)
 
 can_driver::SharedDriverState::AxisKey EyouCan::makeAxisKey(uint8_t motorId) const
 {
-    return can_driver::MakeAxisKey(deviceName_, CanType::PP, static_cast<MotorID>(motorId));
+    return can_driver::MakeAxisKey(deviceName_, CanType::PP, resolveSystemMotorId(motorId));
 }
 
 void EyouCan::syncSharedFeedback(uint8_t motorId, const MotorState &state) const
@@ -855,6 +863,14 @@ void EyouCan::resetReadTracking()
 {
     std::lock_guard<std::mutex> lock(pendingReadMutex_);
     pendingReadRequests_.clear();
+}
+
+MotorID EyouCan::resolveSystemMotorId(uint8_t motorId) const
+{
+    std::lock_guard<std::mutex> lock(refreshMutex);
+    const auto it = systemMotorIdsByNodeId_.find(motorId);
+    return (it != systemMotorIdsByNodeId_.end()) ? it->second
+                                                 : motorIdFromProtocolNodeId(motorId);
 }
 
 uint16_t EyouCan::pendingReadKey(uint8_t motorId, uint8_t subCommand)
@@ -1043,12 +1059,14 @@ bool EyouCan::isManagedMotorId(uint8_t motorId) const
     return managedMotorIds.find(motorId) != managedMotorIds.end();
 }
 
-void EyouCan::registerManagedMotorId(uint8_t motorId) const
+void EyouCan::registerManagedMotorId(MotorID motorId) const
 {
+    const auto protocolNodeId = toProtocolNodeId(motorId);
     std::lock_guard<std::mutex> lock(refreshMutex);
-    managedMotorIds.insert(motorId);
+    managedMotorIds.insert(protocolNodeId);
+    systemMotorIdsByNodeId_[protocolNodeId] = motorId;
     if (sharedState_ && !deviceName_.empty()) {
-        sharedState_->registerAxis(deviceName_, CanType::PP, static_cast<MotorID>(motorId));
+        sharedState_->registerAxis(deviceName_, CanType::PP, motorId);
     }
 }
 

@@ -12,6 +12,10 @@
 #include <ros/ros.h>
 
 namespace {
+
+using can_driver::motorIdFromProtocolNodeId;
+using can_driver::toProtocolNodeId;
+
 constexpr uint16_t kSendBaseId = 0x140;
 constexpr uint16_t kResponseBaseId = 0x240;
 constexpr int32_t kDefaultPositionSpeedDps = 100;
@@ -104,12 +108,14 @@ void MtCan::initializeMotorRefresh(const std::vector<MotorID> &motorIds)
     {
         std::lock_guard<std::mutex> lock(refreshMutex);
         refreshMotorIds.clear();
+        systemMotorIdsByNodeId_.clear();
         refreshMotorIds.reserve(motorIds.size());
         for (MotorID id : motorIds) {
-            const auto motorId = static_cast<uint8_t>(id);
+            const auto motorId = toProtocolNodeId(id);
             refreshMotorIds.push_back(motorId);
+            systemMotorIdsByNodeId_[motorId] = id;
             if (sharedState_ && !deviceName_.empty()) {
-                sharedState_->registerAxis(deviceName_, CanType::MT, static_cast<MotorID>(motorId));
+                sharedState_->registerAxis(deviceName_, CanType::MT, id);
             }
         }
     }
@@ -146,7 +152,8 @@ std::chrono::milliseconds MtCan::refreshSleepInterval() const
 
 bool MtCan::setMode(MotorID Id, MotorMode mode)
 {
-    uint8_t motorId = static_cast<uint8_t>(Id);
+    const uint8_t motorId = toProtocolNodeId(Id);
+    rememberSystemMotorId(Id);
     {
         std::lock_guard<std::mutex> stateLock(stateMutex);
         motorStates[motorId].mode = mode;
@@ -157,7 +164,8 @@ bool MtCan::setMode(MotorID Id, MotorMode mode)
 
 void MtCan::issueRefreshQuery(MotorID motorId, RefreshQuery query)
 {
-    const uint8_t id = static_cast<uint8_t>(motorId);
+    rememberSystemMotorId(motorId);
+    const uint8_t id = toProtocolNodeId(motorId);
     switch (query) {
     case RefreshQuery::State:
         requestState(id);
@@ -176,7 +184,8 @@ bool MtCan::setVelocity(MotorID Id, int32_t velocity)
     if (!canController) {
         return false;
     }
-    uint8_t motorId = static_cast<uint8_t>(Id);
+    const uint8_t motorId = toProtocolNodeId(Id);
+    rememberSystemMotorId(Id);
     {
         std::lock_guard<std::mutex> stateLock(stateMutex);
         motorStates[motorId].commandedVelocity = velocity;
@@ -273,22 +282,26 @@ bool MtCan::writeAcceleration(uint8_t motorId, uint8_t index, uint32_t value)
 
 bool MtCan::setSpeedAcceleration(MotorID id, uint32_t accelDpsPerSec)
 {
-    return writeAcceleration(static_cast<uint8_t>(id), 0x02, accelDpsPerSec);
+    rememberSystemMotorId(id);
+    return writeAcceleration(toProtocolNodeId(id), 0x02, accelDpsPerSec);
 }
 
 bool MtCan::setSpeedDeceleration(MotorID id, uint32_t decelDpsPerSec)
 {
-    return writeAcceleration(static_cast<uint8_t>(id), 0x03, decelDpsPerSec);
+    rememberSystemMotorId(id);
+    return writeAcceleration(toProtocolNodeId(id), 0x03, decelDpsPerSec);
 }
 
 bool MtCan::setPositionAcceleration(MotorID id, uint32_t accelDpsPerSec)
 {
-    return writeAcceleration(static_cast<uint8_t>(id), 0x00, accelDpsPerSec);
+    rememberSystemMotorId(id);
+    return writeAcceleration(toProtocolNodeId(id), 0x00, accelDpsPerSec);
 }
 
 bool MtCan::setPositionDeceleration(MotorID id, uint32_t decelDpsPerSec)
 {
-    return writeAcceleration(static_cast<uint8_t>(id), 0x01, decelDpsPerSec);
+    rememberSystemMotorId(id);
+    return writeAcceleration(toProtocolNodeId(id), 0x01, decelDpsPerSec);
 }
 
 void MtCan::broadcastCommunicationTimeout(uint32_t timeoutMs)
@@ -301,7 +314,8 @@ bool MtCan::setPosition(MotorID Id, int32_t position)
     if (!canController) {
         return false;
     }
-    uint8_t motorId = static_cast<uint8_t>(Id);
+    const uint8_t motorId = toProtocolNodeId(Id);
+    rememberSystemMotorId(Id);
     int32_t commandedVelocity = 0;
     {
         std::lock_guard<std::mutex> stateLock(stateMutex);
@@ -359,7 +373,8 @@ bool MtCan::Enable(MotorID Id)
     if (!canController) {
         return false;
     }
-    uint8_t motorId = static_cast<uint8_t>(Id);
+    const uint8_t motorId = toProtocolNodeId(Id);
+    rememberSystemMotorId(Id);
     {
         std::lock_guard<std::mutex> stateLock(stateMutex);
         motorStates[motorId].enabled = true;
@@ -376,7 +391,8 @@ bool MtCan::Disable(MotorID Id)
     if (!canController) {
         return false;
     }
-    uint8_t motorId = static_cast<uint8_t>(Id);
+    const uint8_t motorId = toProtocolNodeId(Id);
+    rememberSystemMotorId(Id);
     {
         std::lock_guard<std::mutex> stateLock(stateMutex);
         motorStates[motorId].enabled = false;
@@ -392,7 +408,8 @@ bool MtCan::Stop(MotorID Id)
     if (!canController) {
         return false;
     }
-    uint8_t motorId = static_cast<uint8_t>(Id);
+    const uint8_t motorId = toProtocolNodeId(Id);
+    rememberSystemMotorId(Id);
     syncSharedIntent(motorId, can_driver::AxisIntent::Hold);
     const uint16_t canId = encodeSendCanId(motorId);
     sendFrame(canId, 0x81, {0, 0, 0, 0}); // Motor Stop: 停止运动，保持受控
@@ -404,7 +421,8 @@ bool MtCan::ResetFault(MotorID Id)
     if (!canController) {
         return false;
     }
-    const uint8_t motorId = static_cast<uint8_t>(Id);
+    const uint8_t motorId = toProtocolNodeId(Id);
+    rememberSystemMotorId(Id);
     syncSharedIntent(motorId, can_driver::AxisIntent::Recover);
     resetSystem(motorId);
     markReadResponseReceived(motorId, 0x9A);
@@ -415,7 +433,7 @@ bool MtCan::ResetFault(MotorID Id)
 // [FIX #5] 返回电机实际位置（从 0x92 多圈角度读回），而非命令值
 int64_t MtCan::getPosition(MotorID Id) const
 {
-    uint8_t motorId = static_cast<uint8_t>(Id);
+    const uint8_t motorId = toProtocolNodeId(Id);
     {
         std::lock_guard<std::mutex> stateLock(stateMutex);
         auto it = motorStates.find(motorId);
@@ -428,7 +446,7 @@ int64_t MtCan::getPosition(MotorID Id) const
 
 int16_t MtCan::getCurrent(MotorID Id) const
 {
-    uint8_t motorId = static_cast<uint8_t>(Id);
+    const uint8_t motorId = toProtocolNodeId(Id);
     {
         std::lock_guard<std::mutex> stateLock(stateMutex);
         auto it = motorStates.find(motorId);
@@ -442,7 +460,7 @@ int16_t MtCan::getCurrent(MotorID Id) const
 // [FIX #7] 移除 velocity == 0 的不可靠刷新判断
 int16_t MtCan::getVelocity(MotorID Id) const
 {
-    uint8_t motorId = static_cast<uint8_t>(Id);
+    const uint8_t motorId = toProtocolNodeId(Id);
     {
         std::lock_guard<std::mutex> stateLock(stateMutex);
         auto it = motorStates.find(motorId);
@@ -455,7 +473,7 @@ int16_t MtCan::getVelocity(MotorID Id) const
 
 bool MtCan::isEnabled(MotorID Id) const
 {
-    const uint8_t motorId = static_cast<uint8_t>(Id);
+    const uint8_t motorId = toProtocolNodeId(Id);
     std::lock_guard<std::mutex> stateLock(stateMutex);
     auto it = motorStates.find(motorId);
     return (it != motorStates.end()) ? it->second.enabled : false;
@@ -463,7 +481,7 @@ bool MtCan::isEnabled(MotorID Id) const
 
 bool MtCan::hasFault(MotorID Id) const
 {
-    const uint8_t motorId = static_cast<uint8_t>(Id);
+    const uint8_t motorId = toProtocolNodeId(Id);
     std::lock_guard<std::mutex> stateLock(stateMutex);
     auto it = motorStates.find(motorId);
     return (it != motorStates.end()) ? it->second.error : false;
@@ -773,7 +791,7 @@ void MtCan::markReadResponseReceived(uint8_t motorId, uint8_t command)
 
 can_driver::SharedDriverState::AxisKey MtCan::makeAxisKey(uint8_t motorId) const
 {
-    return can_driver::MakeAxisKey(deviceName_, CanType::MT, static_cast<MotorID>(motorId));
+    return can_driver::MakeAxisKey(deviceName_, CanType::MT, resolveSystemMotorId(motorId));
 }
 
 void MtCan::syncSharedFeedback(uint8_t motorId, const MotorState &state) const
@@ -873,6 +891,20 @@ void MtCan::resetReadTracking()
 {
     std::lock_guard<std::mutex> lock(pendingReadMutex_);
     pendingReadRequests_.clear();
+}
+
+void MtCan::rememberSystemMotorId(MotorID motorId)
+{
+    std::lock_guard<std::mutex> lock(refreshMutex);
+    systemMotorIdsByNodeId_[toProtocolNodeId(motorId)] = motorId;
+}
+
+MotorID MtCan::resolveSystemMotorId(uint8_t motorId) const
+{
+    std::lock_guard<std::mutex> lock(refreshMutex);
+    const auto it = systemMotorIdsByNodeId_.find(motorId);
+    return (it != systemMotorIdsByNodeId_.end()) ? it->second
+                                                 : motorIdFromProtocolNodeId(motorId);
 }
 
 uint16_t MtCan::pendingReadKey(uint8_t motorId, uint8_t command)

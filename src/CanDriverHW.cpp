@@ -11,9 +11,12 @@
 #include <sstream>
 #include <string>
 #include <thread>
+#include <tuple>
 #include <xmlrpcpp/XmlRpcValue.h>
 
 namespace {
+
+using can_driver::toProtocolNodeId;
 
 struct ModeSelection {
     CanProtocol::MotorMode mode{CanProtocol::MotorMode::Position};
@@ -544,9 +547,11 @@ bool CanDriverHW::parseAndSetupJoints(const ros::NodeHandle &pnh)
 
     std::set<std::string> seenJointNames;
     std::set<uint16_t> seenMotorIds;
+    std::set<std::tuple<std::string, CanType, std::uint8_t>> seenProtocolNodes;
     for (const auto &p : parsed) {
         const std::string &jointName = p.name;
         const uint16_t motorId = static_cast<uint16_t>(p.motorId);
+        const std::uint8_t protocolNodeId = toProtocolNodeId(p.motorId);
 
         if (!seenJointNames.insert(jointName).second) {
             ROS_ERROR("[CanDriverHW] Duplicate joint name '%s' in joints config.", jointName.c_str());
@@ -556,6 +561,16 @@ bool CanDriverHW::parseAndSetupJoints(const ros::NodeHandle &pnh)
             ROS_ERROR("[CanDriverHW] Duplicate motor_id=%u in joints config. "
                       "motor_id must be globally unique because service commands are addressed by motor_id only.",
                       static_cast<unsigned>(motorId));
+            return false;
+        }
+        if (!seenProtocolNodes.emplace(p.canDevice, p.protocol, protocolNodeId).second) {
+            ROS_ERROR("[CanDriverHW] Joint '%s' aliases protocol node id 0x%02X on device '%s' "
+                      "protocol '%s'. Distinct system motor_id values must not collapse onto the "
+                      "same on-wire node id.",
+                      jointName.c_str(),
+                      static_cast<unsigned>(protocolNodeId),
+                      p.canDevice.c_str(),
+                      (p.protocol == CanType::MT) ? "MT" : "PP");
             return false;
         }
 
