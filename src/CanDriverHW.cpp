@@ -1,3 +1,4 @@
+#include "can_driver/AxisReadinessEvaluator.h"
 #include "can_driver/AxisCommandSemantics.h"
 #include "can_driver/CanDriverHW.h"
 #include "can_driver/CanDriverIoRuntime.h"
@@ -30,6 +31,20 @@ long long steadyAgeMs(std::int64_t stampNs)
     }
     const auto nowNs = can_driver::SharedDriverSteadyNowNs();
     return (nowNs > stampNs) ? static_cast<long long>((nowNs - stampNs) / 1000000) : 0;
+}
+
+bool sharedFeedbackFresh(const can_driver::SharedDriverState::AxisFeedbackState &feedback)
+{
+    if (!feedback.feedbackSeen || feedback.lastRxSteadyNs <= 0) {
+        return false;
+    }
+
+    const auto nowNs = can_driver::SharedDriverSteadyNowNs();
+    const can_driver::AxisReadinessEvaluator::Config config;
+    if (config.feedbackFreshnessTimeoutNs <= 0 || nowNs <= feedback.lastRxSteadyNs) {
+        return true;
+    }
+    return (nowNs - feedback.lastRxSteadyNs) <= config.feedbackFreshnessTimeoutNs;
 }
 
 bool decodeModeSelection(double value, ModeSelection *selection)
@@ -1057,6 +1072,27 @@ bool CanDriverHW::isDeviceReady(const std::string &device) const
     return deviceManager_->isDeviceReady(device);
 }
 
+bool CanDriverHW::getFreshAxisFeedback(
+    const JointConfig &joint,
+    can_driver::SharedDriverState::AxisFeedbackState *feedback) const
+{
+    if (feedback == nullptr || !deviceManager_) {
+        return false;
+    }
+
+    const auto sharedState = deviceManager_->getSharedDriverState();
+    if (!sharedState) {
+        return false;
+    }
+
+    if (!sharedState->getAxisFeedback(
+            can_driver::MakeAxisKey(joint.canDevice, joint.protocol, joint.motorId), feedback)) {
+        return false;
+    }
+
+    return sharedFeedbackFresh(*feedback);
+}
+
 void CanDriverHW::publishMotorStates(const ros::TimerEvent & /*e*/)
 {
     if (!active_.load(std::memory_order_acquire)) {
@@ -1146,12 +1182,14 @@ bool CanDriverHW::onMotorCommand(can_driver::MotorCommand::Request &req,
         }
 
         int32_t preloadRaw = 0;
-        if (selection.mode != CanProtocol::MotorMode::Velocity &&
-            !can_driver::safe_command::scaleAndClampToInt32(
-                targetSnapshot.pos, targetSnapshot.positionScale, targetSnapshot.name, preloadRaw)) {
-            res.success = false;
-            res.message = "Failed to convert current position for mode preload.";
-            return true;
+        if (selection.mode != CanProtocol::MotorMode::Velocity) {
+            can_driver::SharedDriverState::AxisFeedbackState feedback;
+            if (!getFreshAxisFeedback(targetSnapshot, &feedback) || !feedback.positionValid) {
+                res.success = false;
+                res.message = "Current position feedback unavailable or stale for mode preload.";
+                return true;
+            }
+            preloadRaw = can_driver::safe_command::clampToInt32(feedback.position);
         }
         const auto preloadStatus = motorActionExecutor_.execute(
             makeMotorTarget(targetSnapshot),
@@ -1298,9 +1336,14 @@ bool CanDriverHW::onSetZeroLimit(can_driver::SetZeroLimit::Request &req,
     }
 
     int64_t rawPos = 0;
-    {
+    bool hasFreshFeedback = false;
+    can_driver::SharedDriverState::AxisFeedbackState feedback;
+    if (getFreshAxisFeedback(*target, &feedback) && feedback.positionValid) {
+        rawPos = feedback.position;
+        hasFreshFeedback = true;
+    } else {
         std::lock_guard<std::mutex> devLock(*devMutex);
-        // 连续读取几次，给协议层请求-返回留出时间。
+        // 仅在共享反馈尚未建立时回退到协议缓存读取。
         for (int i = 0; i < 5; ++i) {
             rawPos = proto->getPosition(target->motorId);
             std::this_thread::sleep_for(std::chrono::milliseconds(15));
@@ -1308,6 +1351,12 @@ bool CanDriverHW::onSetZeroLimit(can_driver::SetZeroLimit::Request &req,
     }
     const double currentPosRad = static_cast<double>(rawPos) * target->positionScale;
     res.current_position_rad = currentPosRad;
+    if (!hasFreshFeedback) {
+        ROS_WARN_THROTTLE(1.0,
+                          "[CanDriverHW] SetZeroLimit using protocol cached position for joint '%s' "
+                          "because no fresh shared feedback is available.",
+                          target->name.c_str());
+    }
     if (currentPosRad < appliedMin || currentPosRad > appliedMax) {
         res.success = false;
         res.applied_min_rad = appliedMin;

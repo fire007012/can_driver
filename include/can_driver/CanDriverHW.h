@@ -176,6 +176,8 @@ private:
     std::shared_ptr<CanProtocol> getProtocol(const std::string &device, CanType type) const;
     std::shared_ptr<std::mutex> getDeviceMutex(const std::string &device) const;
     bool isDeviceReady(const std::string &device) const;
+    bool getFreshAxisFeedback(const JointConfig &joint,
+                              can_driver::SharedDriverState::AxisFeedbackState *feedback) const;
 
     /**
      * @brief 定时发布 ~/motor_states（10 Hz）。
