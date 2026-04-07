@@ -183,6 +183,32 @@ void EyouCan::setDefaultCspVelocityRaw(int32_t velocityRaw)
     defaultCspVelocityRaw_.store(velocityRaw, std::memory_order_relaxed);
 }
 
+void EyouCan::setMotorDefaultPositionVelocityRaw(MotorID motorId, int32_t velocityRaw)
+{
+    if (velocityRaw <= 0) {
+        ROS_WARN("[EyouCan] Ignore invalid per-motor default position velocity raw=%d.",
+                 velocityRaw);
+        return;
+    }
+    const auto nodeId = toProtocolNodeId(motorId);
+    registerManagedMotorId(motorId);
+    std::lock_guard<std::mutex> lock(refreshMutex);
+    positionVelocityRawByMotorId_[nodeId] = velocityRaw;
+}
+
+void EyouCan::setMotorDefaultCspVelocityRaw(MotorID motorId, int32_t velocityRaw)
+{
+    if (velocityRaw <= 0) {
+        ROS_WARN("[EyouCan] Ignore invalid per-motor default CSP velocity raw=%d.",
+                 velocityRaw);
+        return;
+    }
+    const auto nodeId = toProtocolNodeId(motorId);
+    registerManagedMotorId(motorId);
+    std::lock_guard<std::mutex> lock(refreshMutex);
+    cspVelocityRawByMotorId_[nodeId] = velocityRaw;
+}
+
 uint64_t EyouCan::fastWriteSentCount() const
 {
     return fastWriteSentCount_.load(std::memory_order_relaxed);
@@ -349,8 +375,14 @@ bool EyouCan::setPosition(MotorID Id, int32_t position)
         motorStates[motorId].commandedPosition = position;
     }
     syncSharedCommand(motorId, position, 0, MotorMode::Position, true);
-    const int32_t positionVelocityRaw =
-        defaultPositionVelocityRaw_.load(std::memory_order_relaxed);
+    int32_t positionVelocityRaw = defaultPositionVelocityRaw_.load(std::memory_order_relaxed);
+    {
+        std::lock_guard<std::mutex> lock(refreshMutex);
+        const auto it = positionVelocityRawByMotorId_.find(motorId);
+        if (it != positionVelocityRawByMotorId_.end()) {
+            positionVelocityRaw = it->second;
+        }
+    }
     if (!ensurePositionVelocityConfigured(motorId, positionVelocityRaw, true)) {
         return false;
     }
@@ -377,8 +409,14 @@ bool EyouCan::quickSetPosition(MotorID Id, int32_t position)
         motorStates[motorId].commandedPosition = position;
     }
     syncSharedCommand(motorId, position, 0, MotorMode::CSP, true);
-    const int32_t positionVelocityRaw =
-        defaultCspVelocityRaw_.load(std::memory_order_relaxed);
+    int32_t positionVelocityRaw = defaultCspVelocityRaw_.load(std::memory_order_relaxed);
+    {
+        std::lock_guard<std::mutex> lock(refreshMutex);
+        const auto it = cspVelocityRawByMotorId_.find(motorId);
+        if (it != cspVelocityRawByMotorId_.end()) {
+            positionVelocityRaw = it->second;
+        }
+    }
     if (!ensurePositionVelocityConfigured(motorId, positionVelocityRaw, false)) {
         return false;
     }

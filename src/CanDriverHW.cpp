@@ -28,6 +28,8 @@ long long steadyAgeMs(std::int64_t stampNs)
     return (nowNs > stampNs) ? static_cast<long long>((nowNs - stampNs) / 1000000) : 0;
 }
 
+constexpr double kDefaultPpVelocityRadS = (10.0 * 2.0 * M_PI / 60.0);
+
 bool sharedFeedbackFresh(const can_driver::SharedDriverState::AxisFeedbackState &feedback)
 {
     if (!feedback.feedbackSeen || feedback.lastRxSteadyNs <= 0) {
@@ -194,36 +196,23 @@ bool CanDriverHW::loadRuntimeParams(const ros::NodeHandle &pnh)
     if (!pnh.getParam("pp_fast_write_enabled", ppFastWriteEnabled_)) {
         ppFastWriteEnabled_ = false;
     }
-    int legacyPpDefaultPositionVelocityRaw = EyouCan::kDefaultPositionVelocityRaw;
-    const bool hasLegacyPpDefaultVelocity =
-        pnh.getParam("pp_default_position_velocity_raw", legacyPpDefaultPositionVelocityRaw);
-    if (hasLegacyPpDefaultVelocity && legacyPpDefaultPositionVelocityRaw <= 0) {
-        ROS_WARN("[CanDriverHW] Invalid pp_default_position_velocity_raw=%d, fallback to %d.",
-                 legacyPpDefaultPositionVelocityRaw,
-                 EyouCan::kDefaultPositionVelocityRaw);
-        legacyPpDefaultPositionVelocityRaw = EyouCan::kDefaultPositionVelocityRaw;
+    if (!pnh.getParam("pp_position_default_velocity_rad_s", ppPositionDefaultVelocityRadS_)) {
+        ppPositionDefaultVelocityRadS_ = kDefaultPpVelocityRadS;
     }
-    if (!pnh.getParam("pp_position_default_velocity_raw", ppPositionDefaultVelocityRaw_)) {
-        ppPositionDefaultVelocityRaw_ =
-            hasLegacyPpDefaultVelocity ? legacyPpDefaultPositionVelocityRaw
-                                       : EyouCan::kDefaultPositionVelocityRaw;
+    if (!std::isfinite(ppPositionDefaultVelocityRadS_) || ppPositionDefaultVelocityRadS_ <= 0.0) {
+        ROS_WARN("[CanDriverHW] Invalid pp_position_default_velocity_rad_s=%.9g, fallback to %.6f rad/s.",
+                 ppPositionDefaultVelocityRadS_,
+                 kDefaultPpVelocityRadS);
+        ppPositionDefaultVelocityRadS_ = kDefaultPpVelocityRadS;
     }
-    if (!pnh.getParam("pp_csp_default_velocity_raw", ppCspDefaultVelocityRaw_)) {
-        ppCspDefaultVelocityRaw_ =
-            hasLegacyPpDefaultVelocity ? legacyPpDefaultPositionVelocityRaw
-                                       : EyouCan::kDefaultPositionVelocityRaw;
+    if (!pnh.getParam("pp_csp_default_velocity_rad_s", ppCspDefaultVelocityRadS_)) {
+        ppCspDefaultVelocityRadS_ = kDefaultPpVelocityRadS;
     }
-    if (ppPositionDefaultVelocityRaw_ <= 0) {
-        ROS_WARN("[CanDriverHW] Invalid pp_position_default_velocity_raw=%d, fallback to %d.",
-                 ppPositionDefaultVelocityRaw_,
-                 EyouCan::kDefaultPositionVelocityRaw);
-        ppPositionDefaultVelocityRaw_ = EyouCan::kDefaultPositionVelocityRaw;
-    }
-    if (ppCspDefaultVelocityRaw_ <= 0) {
-        ROS_WARN("[CanDriverHW] Invalid pp_csp_default_velocity_raw=%d, fallback to %d.",
-                 ppCspDefaultVelocityRaw_,
-                 EyouCan::kDefaultPositionVelocityRaw);
-        ppCspDefaultVelocityRaw_ = EyouCan::kDefaultPositionVelocityRaw;
+    if (!std::isfinite(ppCspDefaultVelocityRadS_) || ppCspDefaultVelocityRadS_ <= 0.0) {
+        ROS_WARN("[CanDriverHW] Invalid pp_csp_default_velocity_rad_s=%.9g, fallback to %.6f rad/s.",
+                 ppCspDefaultVelocityRadS_,
+                 kDefaultPpVelocityRadS);
+        ppCspDefaultVelocityRadS_ = kDefaultPpVelocityRadS;
     }
     if (!pnh.getParam("safety_stop_on_fault", safetyStopOnFault_)) {
         safetyStopOnFault_ = true;
@@ -244,8 +233,6 @@ bool CanDriverHW::loadRuntimeParams(const ros::NodeHandle &pnh)
     }
 
     deviceManager_->setPpFastWriteEnabled(ppFastWriteEnabled_);
-    deviceManager_->setPpPositionDefaultVelocityRaw(ppPositionDefaultVelocityRaw_);
-    deviceManager_->setPpCspDefaultVelocityRaw(ppCspDefaultVelocityRaw_);
     deviceManager_->setRefreshRateHz(motorQueryHz_);
 
     if (motorQueryHz_ > 0.0) {
@@ -253,10 +240,10 @@ bool CanDriverHW::loadRuntimeParams(const ros::NodeHandle &pnh)
     }
     ROS_INFO("[CanDriverHW] pp_fast_write_enabled=%s.",
              ppFastWriteEnabled_ ? "true" : "false");
-    ROS_INFO("[CanDriverHW] pp_position_default_velocity_raw=%d.",
-             ppPositionDefaultVelocityRaw_);
-    ROS_INFO("[CanDriverHW] pp_csp_default_velocity_raw=%d.",
-             ppCspDefaultVelocityRaw_);
+    ROS_INFO("[CanDriverHW] pp_position_default_velocity_rad_s=%.6f.",
+             ppPositionDefaultVelocityRadS_);
+    ROS_INFO("[CanDriverHW] pp_csp_default_velocity_rad_s=%.6f.",
+             ppCspDefaultVelocityRadS_);
     ROS_INFO("[CanDriverHW] startup_position_sync_timeout_sec=%.3f s.",
              startupPositionSyncTimeoutSec_);
     ROS_INFO("[CanDriverHW] startup_probe_query_hz=%.3f Hz.",
@@ -887,6 +874,54 @@ bool CanDriverHW::applyInitialModes(const std::string &deviceFilter)
     return allOk;
 }
 
+bool CanDriverHW::applyPerAxisPpDefaultVelocities(const std::string &deviceFilter)
+{
+    bool appliedAny = false;
+    for (const auto &group : jointGroups_) {
+        if (group.protocol != CanType::PP) {
+            continue;
+        }
+        if (!deviceFilter.empty() && group.canDevice != deviceFilter) {
+            continue;
+        }
+
+        auto protocol = std::dynamic_pointer_cast<EyouCan>(getProtocol(group.canDevice, group.protocol));
+        if (!protocol) {
+            ROS_ERROR("[CanDriverHW] Failed to access EyouCan protocol while applying per-axis "
+                      "default velocities on '%s'.",
+                      group.canDevice.c_str());
+            return false;
+        }
+
+        for (const auto jointIndex : group.jointIndices) {
+            const auto &joint = joints_[jointIndex];
+            int32_t rawVelocity = 0;
+            if (!can_driver::safe_command::scaleAndClampToInt32(ppPositionDefaultVelocityRadS_,
+                                                                joint.velocityScale,
+                                                                joint.name + ".pp_position_default_velocity_rad_s",
+                                                                rawVelocity)) {
+                return false;
+            }
+            protocol->setMotorDefaultPositionVelocityRaw(joint.motorId, rawVelocity);
+
+            if (!can_driver::safe_command::scaleAndClampToInt32(ppCspDefaultVelocityRadS_,
+                                                                joint.velocityScale,
+                                                                joint.name + ".pp_csp_default_velocity_rad_s",
+                                                                rawVelocity)) {
+                return false;
+            }
+            protocol->setMotorDefaultCspVelocityRaw(joint.motorId, rawVelocity);
+            appliedAny = true;
+        }
+    }
+
+    if (appliedAny) {
+        ROS_INFO("[CanDriverHW] Applied per-axis PP default velocity overrides from rad/s configuration%s.",
+                 deviceFilter.empty() ? "" : (" on " + deviceFilter).c_str());
+    }
+    return true;
+}
+
 can_driver::OperationalCoordinator::Result CanDriverHW::initializeLifecycleDevice(
     const std::string &device,
     bool loopback)
@@ -922,6 +957,11 @@ can_driver::OperationalCoordinator::Result CanDriverHW::initializeLifecycleDevic
         restoreSteadyRefresh();
         return rollbackPreparedDevice(
             {false, "Failed to synchronize startup position on " + device});
+    }
+    if (!applyPerAxisPpDefaultVelocities(device)) {
+        restoreSteadyRefresh();
+        return rollbackPreparedDevice(
+            {false, "Failed to configure PP default velocities on " + device});
     }
     if (!applyInitialModes(device)) {
         restoreSteadyRefresh();

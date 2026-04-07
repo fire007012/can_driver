@@ -134,8 +134,8 @@ private:
     int directCmdQueueSize_{1};
     bool debugBypassRosControl_{false};
     bool ppFastWriteEnabled_{false};
-    int ppPositionDefaultVelocityRaw_{EyouCan::kDefaultPositionVelocityRaw};
-    int ppCspDefaultVelocityRaw_{EyouCan::kDefaultPositionVelocityRaw};
+    double ppPositionDefaultVelocityRadS_{0.0};
+    double ppCspDefaultVelocityRadS_{0.0};
     double startupPositionSyncTimeoutSec_{1.0};
     double startupProbeQueryHz_{5.0};
     bool safetyStopOnFault_{true};
@@ -154,6 +154,7 @@ private:
     void loadJointLimits(const ros::NodeHandle &pnh);
     bool syncStartupPositionAndCommands(const std::string &deviceFilter = std::string());
     bool applyInitialModes(const std::string &deviceFilter = std::string());
+    bool applyPerAxisPpDefaultVelocities(const std::string &deviceFilter = std::string());
     void setupMaintenanceRosComm(ros::NodeHandle &pnh);
     void configureCommandGate();
     void configureLifecycleCoordinator();

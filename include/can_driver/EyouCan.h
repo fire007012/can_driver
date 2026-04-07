@@ -116,6 +116,10 @@ public:
     void setDefaultPositionVelocityRaw(int32_t velocityRaw);
     /// 设置 CSP 模式命令默认预配置速度（0x09，协议原始单位）。
     void setDefaultCspVelocityRaw(int32_t velocityRaw);
+    /// 为指定电机覆写 position 模式默认预配置速度（0x09，协议原始单位）。
+    void setMotorDefaultPositionVelocityRaw(MotorID motorId, int32_t velocityRaw);
+    /// 为指定电机覆写 CSP 模式默认预配置速度（0x09，协议原始单位）。
+    void setMotorDefaultCspVelocityRaw(MotorID motorId, int32_t velocityRaw);
     uint64_t fastWriteSentCount() const;
     uint64_t normalWriteSentCount() const;
     using RefreshQuery = can_driver::PpRefreshQuery;
@@ -164,6 +168,8 @@ private:
     std::vector<uint8_t> refreshMotorIds;
     mutable std::unordered_set<uint8_t> managedMotorIds;
     mutable std::unordered_map<uint8_t, MotorID> systemMotorIdsByNodeId_;
+    std::unordered_map<uint8_t, int32_t> positionVelocityRawByMotorId_;
+    std::unordered_map<uint8_t, int32_t> cspVelocityRawByMotorId_;
     mutable std::mutex refreshMutex;
     std::atomic<double> refreshRateHz_{0.0};
     std::atomic<bool> fastWriteEnabled_{false};

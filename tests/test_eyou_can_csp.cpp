@@ -179,6 +179,23 @@ TEST_F(EyouCanCSPTest, QuickSetPositionResendsVelocityWhenDefaultVelocityChanges
     EXPECT_EQ(transport->sentFrames[1].data[1], 0x0A);
 }
 
+TEST_F(EyouCanCSPTest, QuickSetPositionUsesPerMotorCspVelocityOverride)
+{
+    constexpr MotorID kMotorId = static_cast<MotorID>(0x05);
+
+    eyou.setDefaultCspVelocityRaw(0x00001234);
+    eyou.setMotorDefaultCspVelocityRaw(kMotorId, 0x00005678);
+
+    ASSERT_TRUE(eyou.quickSetPosition(kMotorId, 2000));
+    ASSERT_EQ(transport->sentFrames.size(), 2u);
+    EXPECT_EQ(transport->sentFrames[0].data[0], 0x01);
+    EXPECT_EQ(transport->sentFrames[0].data[1], 0x09);
+    EXPECT_EQ(transport->sentFrames[0].data[4], 0x56);
+    EXPECT_EQ(transport->sentFrames[0].data[5], 0x78);
+    EXPECT_EQ(transport->sentFrames[1].data[0], 0x05);
+    EXPECT_EQ(transport->sentFrames[1].data[1], 0x0A);
+}
+
 int main(int argc, char **argv)
 {
     testing::InitGoogleTest(&argc, argv);
