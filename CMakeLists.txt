@@ -139,11 +139,13 @@ include_directories(
 
 ## Declare a C++ library
 add_library(can_driver_transport
+  src/CanDriverRuntime.cpp
   src/DeviceManager.cpp
   src/DeviceRuntime.cpp
   src/JointConfigParser.cpp
   src/MtCan.cpp
   src/EyouCan.cpp
+  src/driver_ros_endpoints.cpp
   src/command_gate.cpp
   src/lifecycle_driver_ops.cpp
   src/lifecycle_service_gateway.cpp

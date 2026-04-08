@@ -45,24 +45,22 @@ bool decodeModeSelection(double value, ModeSelection *selection)
 
 void MotorMaintenanceService::configure(
     ActivityChecker isActive,
-    std::deque<JointConfig> *joints,
-    std::map<std::string, std::size_t> *jointIndexByName,
-    std::vector<uint8_t> *commandValidBuffer,
-    std::map<uint16_t, double> *jointZeroOffsetRadByMotorId,
-    std::mutex *jointStateMutex,
     MotorActionExecutor *motorActionExecutor,
+    JointLookup lookupJointByMotorId,
+    DirectCommandClearer clearDirectCommand,
+    ModeSwitchCommitter commitModeSwitch,
+    LimitCommitter commitLimits,
     FreshFeedbackGetter getFreshAxisFeedback,
     DisabledRequirementChecker requireAxisDisabledForConfiguration,
     ProtocolGetter getProtocol,
     DeviceMutexGetter getDeviceMutex)
 {
     isActive_ = std::move(isActive);
-    joints_ = joints;
-    jointIndexByName_ = jointIndexByName;
-    commandValidBuffer_ = commandValidBuffer;
-    jointZeroOffsetRadByMotorId_ = jointZeroOffsetRadByMotorId;
-    jointStateMutex_ = jointStateMutex;
     motorActionExecutor_ = motorActionExecutor;
+    lookupJointByMotorId_ = std::move(lookupJointByMotorId);
+    clearDirectCommand_ = std::move(clearDirectCommand);
+    commitModeSwitch_ = std::move(commitModeSwitch);
+    commitLimits_ = std::move(commitLimits);
     getFreshAxisFeedback_ = std::move(getFreshAxisFeedback);
     requireAxisDisabledForConfiguration_ = std::move(requireAxisDisabledForConfiguration);
     getProtocol_ = std::move(getProtocol);
@@ -83,51 +81,18 @@ void MotorMaintenanceService::shutdown()
     setZeroLimitSrv_.shutdown();
 }
 
-const MotorMaintenanceService::JointConfig *
-MotorMaintenanceService::findJointByMotorId(uint16_t motorId) const
+bool MotorMaintenanceService::lookupJointByMotorId(uint16_t motorId, JointConfig *joint) const
 {
-    if (joints_ == nullptr) {
-        return nullptr;
+    if (!lookupJointByMotorId_ || joint == nullptr) {
+        return false;
     }
-    for (const auto &joint : *joints_) {
-        if (static_cast<uint16_t>(joint.motorId) == motorId) {
-            return &joint;
-        }
-    }
-    return nullptr;
-}
-
-std::size_t MotorMaintenanceService::findJointIndexByMotorId(uint16_t motorId) const
-{
-    if (joints_ == nullptr) {
-        return 0;
-    }
-    for (std::size_t index = 0; index < joints_->size(); ++index) {
-        if (static_cast<uint16_t>((*joints_)[index].motorId) == motorId) {
-            return index;
-        }
-    }
-    return joints_->size();
+    return lookupJointByMotorId_(motorId, joint);
 }
 
 MotorActionExecutor::Target
 MotorMaintenanceService::makeMotorTarget(const JointConfig &joint) const
 {
     return MotorActionExecutor::Target{joint.name, joint.canDevice, joint.protocol, joint.motorId};
-}
-
-void MotorMaintenanceService::clearDirectCmd(const std::string &jointName)
-{
-    if (joints_ == nullptr || jointIndexByName_ == nullptr || jointStateMutex_ == nullptr) {
-        return;
-    }
-
-    std::lock_guard<std::mutex> lock(*jointStateMutex_);
-    const auto it = jointIndexByName_->find(jointName);
-    if (it != jointIndexByName_->end()) {
-        (*joints_)[it->second].hasDirectPosCmd = false;
-        (*joints_)[it->second].hasDirectVelCmd = false;
-    }
 }
 
 bool MotorMaintenanceService::waitForPpModeConfirmation(const JointConfig &joint,
@@ -177,8 +142,8 @@ bool MotorMaintenanceService::onMotorCommand(can_driver::MotorCommand::Request &
         return true;
     }
 
-    const auto *target = findJointByMotorId(req.motor_id);
-    if (!target) {
+    JointConfig target;
+    if (!lookupJointByMotorId(req.motor_id, &target)) {
         res.success = false;
         res.message = "Motor ID not found.";
         return true;
@@ -201,8 +166,7 @@ bool MotorMaintenanceService::onMotorCommand(can_driver::MotorCommand::Request &
     };
 
     if (req.command == can_driver::MotorCommand::Request::CMD_SET_MODE) {
-        if (!motorActionExecutor_ || joints_ == nullptr || jointStateMutex_ == nullptr ||
-            commandValidBuffer_ == nullptr) {
+        if (!motorActionExecutor_ || !commitModeSwitch_) {
             res.success = false;
             res.message = "Motor maintenance service not configured.";
             return true;
@@ -215,7 +179,7 @@ bool MotorMaintenanceService::onMotorCommand(can_driver::MotorCommand::Request &
             return true;
         }
         if (!requireAxisDisabledForConfiguration_ ||
-            !requireAxisDisabledForConfiguration_(*target, "Mode switch", &res.message)) {
+            !requireAxisDisabledForConfiguration_(target, "Mode switch", &res.message)) {
             res.success = false;
             if (res.message.empty()) {
                 res.message = "Mode switch requires the motor to be disabled first.";
@@ -224,7 +188,7 @@ bool MotorMaintenanceService::onMotorCommand(can_driver::MotorCommand::Request &
         }
 
         const auto status = motorActionExecutor_->execute(
-            makeMotorTarget(*target),
+            makeMotorTarget(target),
             [&selection](const std::shared_ptr<CanProtocol> &proto, MotorID id) {
                 return proto->setMode(id, selection.mode);
             },
@@ -233,21 +197,16 @@ bool MotorMaintenanceService::onMotorCommand(can_driver::MotorCommand::Request &
             handleFailure(status, "Set mode command rejected.");
             return true;
         }
-        if (!waitForPpModeConfirmation(*target, selection.mode, &res.message)) {
+        if (!waitForPpModeConfirmation(target, selection.mode, &res.message)) {
             res.success = false;
             return true;
         }
 
         JointConfig targetSnapshot;
-        const std::size_t targetIndex = findJointIndexByMotorId(req.motor_id);
-        {
-            std::lock_guard<std::mutex> lock(*jointStateMutex_);
-            if (targetIndex >= joints_->size()) {
-                res.success = false;
-                res.message = "Motor ID not found.";
-                return true;
-            }
-            targetSnapshot = (*joints_)[targetIndex];
+        if (!lookupJointByMotorId(req.motor_id, &targetSnapshot)) {
+            res.success = false;
+            res.message = "Motor ID not found.";
+            return true;
         }
 
         int32_t preloadRaw = 0;
@@ -285,16 +244,10 @@ bool MotorMaintenanceService::onMotorCommand(can_driver::MotorCommand::Request &
             return true;
         }
 
-        {
-            std::lock_guard<std::mutex> lock(*jointStateMutex_);
-            auto &joint = (*joints_)[targetIndex];
-            joint.controlMode = can_driver::axisControlModeName(selection.controlMode);
-            joint.hasDirectPosCmd = false;
-            joint.hasDirectVelCmd = false;
-            joint.posCmd = joint.pos;
-            joint.velCmd = 0.0;
-            joint.requireCommandAlignment = true;
-            (*commandValidBuffer_)[targetIndex] = 0;
+        if (!commitModeSwitch_(req.motor_id, selection.controlMode)) {
+            res.success = false;
+            res.message = "Failed to update local joint mode state.";
+            return true;
         }
         res.success = true;
         res.message = "OK";
@@ -332,14 +285,14 @@ bool MotorMaintenanceService::onMotorCommand(can_driver::MotorCommand::Request &
             return true;
         }
         const auto status =
-            motorActionExecutor_->execute(makeMotorTarget(*target), entry.action, entry.name);
+            motorActionExecutor_->execute(makeMotorTarget(target), entry.action, entry.name);
         if (status != MotorActionExecutor::Status::Ok) {
             const std::string rejectedMsg = std::string(entry.name) + " command rejected.";
             handleFailure(status, rejectedMsg.c_str());
             return true;
         }
-        if (entry.clearDirect) {
-            clearDirectCmd(target->name);
+        if (entry.clearDirect && clearDirectCommand_) {
+            clearDirectCommand_(target.name);
         }
         res.success = true;
         res.message = "OK";
@@ -360,13 +313,13 @@ bool MotorMaintenanceService::onSetZeroLimit(can_driver::SetZeroLimit::Request &
         return true;
     }
 
-    const JointConfig *target = findJointByMotorId(req.motor_id);
-    if (!target) {
+    JointConfig target;
+    if (!lookupJointByMotorId(req.motor_id, &target)) {
         res.success = false;
         res.message = "Motor ID not found.";
         return true;
     }
-    if (!can_driver::controlModeUsesPositionSemantics(target->controlMode)) {
+    if (!can_driver::controlModeUsesPositionSemantics(target.controlMode)) {
         res.success = false;
         res.message = "Only position-semantic joints support zero/position limits.";
         return true;
@@ -386,17 +339,17 @@ bool MotorMaintenanceService::onSetZeroLimit(can_driver::SetZeroLimit::Request &
             res.message = "robot_description not found; cannot read URDF limits.";
             return true;
         }
-        auto urdfJoint = urdf.getJoint(target->name);
+        auto urdfJoint = urdf.getJoint(target.name);
         if (!urdfJoint) {
             res.success = false;
-            res.message = "Joint not found in URDF: " + target->name;
+            res.message = "Joint not found in URDF: " + target.name;
             return true;
         }
         joint_limits_interface::JointLimits urdfLimits;
         if (!joint_limits_interface::getJointLimits(urdfJoint, urdfLimits) ||
             !urdfLimits.has_position_limits) {
             res.success = false;
-            res.message = "URDF has no position limits for joint: " + target->name;
+            res.message = "URDF has no position limits for joint: " + target.name;
             return true;
         }
         baseMin = urdfLimits.min_position;
@@ -408,8 +361,8 @@ bool MotorMaintenanceService::onSetZeroLimit(can_driver::SetZeroLimit::Request &
         res.message = "Protocol not available.";
         return true;
     }
-    auto proto = getProtocol_(target->canDevice, target->protocol);
-    auto devMutex = getDeviceMutex_(target->canDevice);
+    auto proto = getProtocol_(target.canDevice, target.protocol);
+    auto devMutex = getDeviceMutex_(target.canDevice);
     if (!proto || !devMutex) {
         res.success = false;
         res.message = "Protocol not available.";
@@ -419,19 +372,19 @@ bool MotorMaintenanceService::onSetZeroLimit(can_driver::SetZeroLimit::Request &
     int64_t rawPos = 0;
     bool hasFreshFeedback = false;
     can_driver::SharedDriverState::AxisFeedbackState feedback;
-    if (getFreshAxisFeedback_ && getFreshAxisFeedback_(*target, &feedback) &&
+    if (getFreshAxisFeedback_ && getFreshAxisFeedback_(target, &feedback) &&
         feedback.positionValid) {
         rawPos = feedback.position;
         hasFreshFeedback = true;
     } else {
         std::lock_guard<std::mutex> devLock(*devMutex);
         for (int i = 0; i < 5; ++i) {
-            rawPos = proto->getPosition(target->motorId);
+            rawPos = proto->getPosition(target.motorId);
             std::this_thread::sleep_for(std::chrono::milliseconds(15));
         }
     }
 
-    const double currentPosRad = static_cast<double>(rawPos) * target->positionScale;
+    const double currentPosRad = static_cast<double>(rawPos) * target.positionScale;
     res.current_position_rad = currentPosRad;
     if (req.use_current_position_as_zero && !hasFreshFeedback) {
         res.success = false;
@@ -460,7 +413,7 @@ bool MotorMaintenanceService::onSetZeroLimit(can_driver::SetZeroLimit::Request &
     if (req.apply_to_motor) {
         if (!requireAxisDisabledForConfiguration_ ||
             !requireAxisDisabledForConfiguration_(
-                *target, "Writing zero offset / hardware limits", &res.message)) {
+                target, "Writing zero offset / hardware limits", &res.message)) {
             res.success = false;
             if (res.message.empty()) {
                 res.message =
@@ -473,13 +426,13 @@ bool MotorMaintenanceService::onSetZeroLimit(can_driver::SetZeroLimit::Request &
         int32_t rawMax = 0;
         int32_t rawOffset = 0;
         if (!can_driver::safe_command::scaleAndClampToInt32(
-                appliedMin, target->positionScale, target->name + ".min_limit", rawMin) ||
+                appliedMin, target.positionScale, target.name + ".min_limit", rawMin) ||
             !can_driver::safe_command::scaleAndClampToInt32(
-                appliedMax, target->positionScale, target->name + ".max_limit", rawMax) ||
+                appliedMax, target.positionScale, target.name + ".max_limit", rawMax) ||
             !can_driver::safe_command::scaleAndClampToInt32(
                 resolvedZeroOffset,
-                target->positionScale,
-                target->name + ".zero_offset",
+                target.positionScale,
+                target.name + ".zero_offset",
                 rawOffset)) {
             res.success = false;
             res.message = "Failed to convert limits/offset to protocol raw values.";
@@ -492,7 +445,7 @@ bool MotorMaintenanceService::onSetZeroLimit(can_driver::SetZeroLimit::Request &
             return true;
         }
         const auto status = motorActionExecutor_->execute(
-            makeMotorTarget(*target),
+            makeMotorTarget(target),
             [rawMin, rawMax, rawOffset](const std::shared_ptr<CanProtocol> &p, MotorID id) {
                 const bool okOffset = p->setPositionOffset(id, rawOffset);
                 const bool okLimits = p->configurePositionLimits(id, rawMin, rawMax, true);
@@ -516,17 +469,10 @@ bool MotorMaintenanceService::onSetZeroLimit(can_driver::SetZeroLimit::Request &
         }
     }
 
-    if (joints_ && jointZeroOffsetRadByMotorId_ && jointStateMutex_) {
-        std::lock_guard<std::mutex> lock(*jointStateMutex_);
-        const auto targetIndex = findJointIndexByMotorId(req.motor_id);
-        if (targetIndex < joints_->size()) {
-            auto &joint = (*joints_)[targetIndex];
-            joint.hasLimits = true;
-            joint.limits.has_position_limits = true;
-            joint.limits.min_position = appliedMin;
-            joint.limits.max_position = appliedMax;
-            (*jointZeroOffsetRadByMotorId_)[req.motor_id] = resolvedZeroOffset;
-        }
+    if (!commitLimits_ || !commitLimits_(req.motor_id, appliedMin, appliedMax, resolvedZeroOffset)) {
+        res.success = false;
+        res.message = "Failed to update local zero/limit state.";
+        return true;
     }
 
     res.success = true;

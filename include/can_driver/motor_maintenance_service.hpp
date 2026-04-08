@@ -3,6 +3,7 @@
 
 #include "can_driver/CanDriverHwTypes.h"
 #include "can_driver/CanProtocol.h"
+#include "can_driver/AxisCommandSemantics.h"
 #include "can_driver/motor_action_executor.hpp"
 #include "can_driver/SharedDriverState.h"
 
@@ -26,6 +27,12 @@ public:
     using FreshFeedbackGetter = std::function<bool(
         const JointConfig &,
         can_driver::SharedDriverState::AxisFeedbackState *)>;
+    using JointLookup = std::function<bool(uint16_t, JointConfig *)>;
+    using DirectCommandClearer = std::function<void(const std::string &)>;
+    using ModeSwitchCommitter =
+        std::function<bool(uint16_t, can_driver::AxisControlMode)>;
+    using LimitCommitter =
+        std::function<bool(uint16_t, double, double, double)>;
     using DisabledRequirementChecker =
         std::function<bool(const JointConfig &, const char *, std::string *)>;
     using ProtocolGetter =
@@ -36,12 +43,11 @@ public:
     MotorMaintenanceService() = default;
 
     void configure(ActivityChecker isActive,
-                   std::deque<JointConfig> *joints,
-                   std::map<std::string, std::size_t> *jointIndexByName,
-                   std::vector<uint8_t> *commandValidBuffer,
-                   std::map<uint16_t, double> *jointZeroOffsetRadByMotorId,
-                   std::mutex *jointStateMutex,
                    MotorActionExecutor *motorActionExecutor,
+                   JointLookup lookupJointByMotorId,
+                   DirectCommandClearer clearDirectCommand,
+                   ModeSwitchCommitter commitModeSwitch,
+                   LimitCommitter commitLimits,
                    FreshFeedbackGetter getFreshAxisFeedback,
                    DisabledRequirementChecker requireAxisDisabledForConfiguration,
                    ProtocolGetter getProtocol,
@@ -51,10 +57,8 @@ public:
     void shutdown();
 
 private:
-    const JointConfig *findJointByMotorId(uint16_t motorId) const;
-    std::size_t findJointIndexByMotorId(uint16_t motorId) const;
+    bool lookupJointByMotorId(uint16_t motorId, JointConfig *joint) const;
     MotorActionExecutor::Target makeMotorTarget(const JointConfig &joint) const;
-    void clearDirectCmd(const std::string &jointName);
     bool waitForPpModeConfirmation(const JointConfig &joint,
                                    CanProtocol::MotorMode expectedMode,
                                    std::string *message) const;
@@ -65,12 +69,11 @@ private:
                         can_driver::SetZeroLimit::Response &res);
 
     ActivityChecker isActive_;
-    std::deque<JointConfig> *joints_{nullptr};
-    std::map<std::string, std::size_t> *jointIndexByName_{nullptr};
-    std::vector<uint8_t> *commandValidBuffer_{nullptr};
-    std::map<uint16_t, double> *jointZeroOffsetRadByMotorId_{nullptr};
-    std::mutex *jointStateMutex_{nullptr};
     MotorActionExecutor *motorActionExecutor_{nullptr};
+    JointLookup lookupJointByMotorId_;
+    DirectCommandClearer clearDirectCommand_;
+    ModeSwitchCommitter commitModeSwitch_;
+    LimitCommitter commitLimits_;
     FreshFeedbackGetter getFreshAxisFeedback_;
     DisabledRequirementChecker requireAxisDisabledForConfiguration_;
     ProtocolGetter getProtocol_;

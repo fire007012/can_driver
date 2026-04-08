@@ -4,6 +4,7 @@
 #include <ros/time.h>
 #include <std_srvs/Trigger.h>
 #include <std_msgs/Float64.h>
+#include <std_msgs/String.h>
 
 #include "can_driver/CanDriverHW.h"
 #include "can_driver/CanDriverIoRuntime.h"
@@ -88,6 +89,14 @@ public:
     {
         std::lock_guard<std::mutex> lock(mutex_);
         ++stopCalls_;
+        return true;
+    }
+
+    bool ResetFault(MotorID) override
+    {
+        std::lock_guard<std::mutex> lock(mutex_);
+        hasFault_ = false;
+        ++resetFaultCalls_;
         return true;
     }
 
@@ -272,6 +281,12 @@ public:
         return stopCalls_;
     }
 
+    int resetFaultCalls() const
+    {
+        std::lock_guard<std::mutex> lock(mutex_);
+        return resetFaultCalls_;
+    }
+
     int setOffsetCalls() const
     {
         std::lock_guard<std::mutex> lock(mutex_);
@@ -330,6 +345,7 @@ private:
     MotorID lastEnableMotor_{MotorID::LeftWheel};
     int enableCalls_{0};
     int stopCalls_{0};
+    int resetFaultCalls_{0};
     MotorID lastOffsetMotor_{MotorID::LeftWheel};
     int32_t lastOffsetRaw_{0};
     int setOffsetCalls_{0};
@@ -1049,6 +1065,146 @@ TEST_F(CanDriverHWSmokeTest, LifecycleServicesExposeCanonicalMessages)
     spinner.stop();
 }
 
+TEST_F(CanDriverHWSmokeTest, LifecycleStateTopicTracksCoordinatorMode)
+{
+    auto fakeDm = std::make_shared<FakeDeviceManager>();
+    CanDriverHW hw(fakeDm);
+
+    ros::NodeHandle nh;
+    ros::NodeHandle pnh(uniqueNs("can_driver_hw_smoke_lifecycle_topic"));
+
+    pnh.setParam("joints", makeSingleVelocityJoint());
+    pnh.setParam("motor_state_period_sec", 0.2);
+
+    ASSERT_TRUE(hw.init(nh, pnh));
+
+    std::mutex stateMutex;
+    std::string latestState;
+    ros::Subscriber stateSub = nh.subscribe<std_msgs::String>(
+        pnh.resolveName("lifecycle_state"), 1,
+        [&stateMutex, &latestState](const std_msgs::String::ConstPtr &msg) {
+            std::lock_guard<std::mutex> lock(stateMutex);
+            latestState = msg->data;
+        });
+
+    ros::AsyncSpinner spinner(1);
+    spinner.start();
+
+    auto waitForState = [&stateMutex, &latestState](const std::string &expected) {
+        for (int i = 0; i < 50; ++i) {
+            {
+                std::lock_guard<std::mutex> lock(stateMutex);
+                if (latestState == expected) {
+                    return true;
+                }
+            }
+            ros::Duration(0.02).sleep();
+        }
+        return false;
+    };
+
+    ASSERT_TRUE(waitForState("Configured"));
+
+    const auto initResult = hw.operationalCoordinator().RequestInit("fake0", false);
+    ASSERT_TRUE(initResult.ok) << initResult.message;
+    ASSERT_TRUE(waitForState("Armed"));
+
+    const auto releaseResult = hw.operationalCoordinator().RequestRelease();
+    ASSERT_TRUE(releaseResult.ok) << releaseResult.message;
+    ASSERT_TRUE(waitForState("Running"));
+
+    const auto haltResult = hw.operationalCoordinator().RequestHalt();
+    ASSERT_TRUE(haltResult.ok) << haltResult.message;
+    ASSERT_TRUE(waitForState("Armed"));
+
+    const auto shutdownResult = hw.operationalCoordinator().RequestShutdown(false);
+    ASSERT_TRUE(shutdownResult.ok) << shutdownResult.message;
+    ASSERT_TRUE(waitForState("Configured"));
+
+    spinner.stop();
+}
+
+TEST_F(CanDriverHWSmokeTest, InitRegistersRosControlInterfacesForJointMode)
+{
+    {
+        auto fakeDm = std::make_shared<FakeDeviceManager>();
+        CanDriverHW hw(fakeDm);
+
+        ros::NodeHandle nh;
+        ros::NodeHandle pnh(uniqueNs("can_driver_hw_smoke_velocity_interfaces"));
+
+        pnh.setParam("joints", makeSingleVelocityJoint());
+        ASSERT_TRUE(hw.init(nh, pnh));
+
+        auto *stateIface = hw.get<hardware_interface::JointStateInterface>();
+        auto *velIface = hw.get<hardware_interface::VelocityJointInterface>();
+        auto *posIface = hw.get<hardware_interface::PositionJointInterface>();
+
+        ASSERT_NE(stateIface, nullptr);
+        ASSERT_NE(velIface, nullptr);
+        ASSERT_NE(posIface, nullptr);
+
+        EXPECT_NO_THROW(stateIface->getHandle("test_wheel"));
+        EXPECT_NO_THROW(velIface->getHandle("test_wheel"));
+        EXPECT_THROW(posIface->getHandle("test_wheel"),
+                     hardware_interface::HardwareInterfaceException);
+    }
+
+    {
+        auto fakeDm = std::make_shared<FakeDeviceManager>();
+        fakeDm->protocol()->setFeedbackPosition(512);
+        CanDriverHW hw(fakeDm);
+
+        ros::NodeHandle nh;
+        ros::NodeHandle pnh(uniqueNs("can_driver_hw_smoke_position_interfaces"));
+
+        pnh.setParam("joints", makeSingleCspJoint());
+        ASSERT_TRUE(hw.init(nh, pnh));
+
+        auto *stateIface = hw.get<hardware_interface::JointStateInterface>();
+        auto *velIface = hw.get<hardware_interface::VelocityJointInterface>();
+        auto *posIface = hw.get<hardware_interface::PositionJointInterface>();
+
+        ASSERT_NE(stateIface, nullptr);
+        ASSERT_NE(velIface, nullptr);
+        ASSERT_NE(posIface, nullptr);
+
+        EXPECT_NO_THROW(stateIface->getHandle("test_arm"));
+        EXPECT_NO_THROW(posIface->getHandle("test_arm"));
+        EXPECT_THROW(velIface->getHandle("test_arm"),
+                     hardware_interface::HardwareInterfaceException);
+    }
+}
+
+TEST_F(CanDriverHWSmokeTest, InitCanDisableRosEndpointsForEmbeddedUse)
+{
+    auto fakeDm = std::make_shared<FakeDeviceManager>();
+    CanDriverHW hw(fakeDm);
+
+    ros::NodeHandle nh;
+    ros::NodeHandle pnh(uniqueNs("can_driver_hw_smoke_embedded_mode"));
+
+    pnh.setParam("joints", makeSingleVelocityJoint());
+    pnh.setParam("motor_state_period_sec", 0.05);
+
+    CanDriverHW::InitOptions options;
+    options.enable_ros_endpoints = false;
+    ASSERT_TRUE(hw.init(nh, pnh, options));
+
+    ros::AsyncSpinner spinner(1);
+    spinner.start();
+
+    EXPECT_FALSE(ros::service::exists(pnh.resolveName("motor_command"), false));
+    EXPECT_FALSE(ros::service::exists(pnh.resolveName("set_zero_limit"), false));
+
+    ros::Publisher pub = nh.advertise<std_msgs::Float64>(
+        pnh.resolveName("motor/test_wheel/cmd_velocity"), 1);
+    ros::Duration(0.05).sleep();
+    EXPECT_EQ(pub.getNumSubscribers(), 0u);
+
+    spinner.stop();
+}
+
 TEST_F(CanDriverHWSmokeTest, WriteAutoStopOnFaultAndBlockMotion)
 {
     auto fakeDm = std::make_shared<FakeDeviceManager>();
@@ -1196,7 +1352,7 @@ TEST_F(CanDriverHWSmokeTest, WriteFallsBackToProtocolSafetyStateWhenSharedFeedba
     spinner.stop();
 }
 
-TEST_F(CanDriverHWSmokeTest, WriteHoldAfterDeviceRecoverClearsStaleDirectCommand)
+TEST_F(CanDriverHWSmokeTest, DisconnectFaultsSystemAndRecoverClearsStaleDirectCommand)
 {
     auto fakeDm = std::make_shared<FakeDeviceManager>();
     CanDriverHW hw(fakeDm);
@@ -1236,12 +1392,21 @@ TEST_F(CanDriverHWSmokeTest, WriteHoldAfterDeviceRecoverClearsStaleDirectCommand
     ros::Duration(0.05).sleep();
     hw.write(ros::Time::now(), ros::Duration(0.01));
     EXPECT_EQ(fakeDm->protocol()->velocityCalls(), 1);
+    EXPECT_EQ(hw.lifecycleMode(), can_driver::SystemOpMode::Faulted);
 
     fakeDm->setReady(true);
-    hw.write(ros::Time::now(), ros::Duration(0.01));
-    EXPECT_EQ(fakeDm->protocol()->velocityCalls(), 1);
+    const auto recoverResult = hw.operationalCoordinator().RequestRecover();
+    ASSERT_TRUE(recoverResult.ok) << recoverResult.message;
+    EXPECT_EQ(hw.lifecycleMode(), can_driver::SystemOpMode::Standby);
+    EXPECT_EQ(fakeDm->initDeviceCalls(), 2);
+    EXPECT_EQ(fakeDm->protocol()->resetFaultCalls(), 1);
 
-    // 掉线期间积累的 direct 命令应被清空；恢复后需 fresh 命令才会再次下发。
+    const auto enableResult = hw.operationalCoordinator().RequestEnable();
+    ASSERT_TRUE(enableResult.ok) << enableResult.message;
+    const auto releaseResult = hw.operationalCoordinator().RequestRelease();
+    ASSERT_TRUE(releaseResult.ok) << releaseResult.message;
+
+    // 掉线前积累的 direct 命令应被清空；recover + enable + resume 后仍需 fresh 命令。
     hw.write(ros::Time::now(), ros::Duration(0.01));
     EXPECT_EQ(fakeDm->protocol()->velocityCalls(), 1);
 

@@ -3,6 +3,7 @@
 
 #include "can_driver/CanProtocol.h"
 #include "can_driver/CanDriverHwTypes.h"
+#include "can_driver/CanDriverRuntime.h"
 #include "can_driver/CanType.h"
 #include "can_driver/command_gate.hpp"
 #include "can_driver/DeviceManager.h"
@@ -40,6 +41,8 @@
 #include <deque>
 #include <functional>
 
+class DriverRosEndpoints;
+
 /**
  * @brief hardware_interface::RobotHW 实现，将 MtCan/EyouCan 协议层桥接到 ros_control。
  *
@@ -49,6 +52,15 @@
  */
 class CanDriverHW : public hardware_interface::RobotHW {
 public:
+    struct InitOptions {
+        bool enable_ros_endpoints{true};
+    };
+
+    struct DirectCommandEndpoint {
+        std::string jointName;
+        std::size_t jointIndex{0};
+    };
+
     CanDriverHW();
     explicit CanDriverHW(std::shared_ptr<IDeviceManager> deviceManager);
     ~CanDriverHW() override;
@@ -59,6 +71,7 @@ public:
      * @param pnh  私有 NodeHandle（读取参数并发布 ~/ 接口）
      */
     bool init(ros::NodeHandle &nh, ros::NodeHandle &pnh);
+    bool init(ros::NodeHandle &nh, ros::NodeHandle &pnh, const InitOptions &options);
 
     /**
      * @brief 从协议缓存拉取最新 pos/vel/eff，写入 ros_control 状态缓存。
@@ -80,6 +93,31 @@ public:
         return lifecycleCoordinator_;
     }
 
+    // 供 DriverRosEndpoints 使用的 ROS 装配辅助。
+    void configureMotorMaintenanceService(MotorMaintenanceService &service);
+    std::vector<DirectCommandEndpoint> directCommandEndpoints() const;
+    void acceptDirectCommand(std::size_t jointIndex,
+                             bool isVelocity,
+                             double value,
+                             const ros::Time &stamp);
+    bool lookupJointByMotorId(uint16_t motorId, can_driver::CanDriverJointConfig *joint) const;
+    void clearDirectCommand(const std::string &jointName);
+    bool commitModeSwitch(uint16_t motorId, can_driver::AxisControlMode mode);
+    bool commitZeroLimit(uint16_t motorId,
+                         double appliedMin,
+                         double appliedMax,
+                         double zeroOffset);
+    void publishMotorStates(ros::Publisher &publisher);
+    void publishLifecycleState(ros::Publisher &publisher);
+    double motorStatePeriodSec() const
+    {
+        return statePublishPeriodSec_;
+    }
+    int directCommandQueueSize() const
+    {
+        return directCmdQueueSize_;
+    }
+
 private:
     // -----------------------------------------------------------------------
     // 关节配置
@@ -94,10 +132,14 @@ private:
     std::vector<can_driver::CanDriverPreparedCommand> preparedCommandBuffer_;
     std::map<uint16_t, double>       jointZeroOffsetRadByMotorId_;
 
-    std::shared_ptr<IDeviceManager> deviceManager_;
-    MotorActionExecutor motorActionExecutor_;
-    can_driver::LifecycleDriverOps lifecycleDriverOps_;
-    CommandGate commandGate_;
+    can_driver::CanDriverRuntime runtime_;
+    std::shared_ptr<IDeviceManager> &deviceManager_;
+    MotorActionExecutor &motorActionExecutor_;
+    can_driver::LifecycleDriverOps &lifecycleDriverOps_;
+    CommandGate &commandGate_;
+    std::atomic<bool> &active_;
+    can_driver::OperationalCoordinator &lifecycleCoordinator_;
+    std::map<std::string, bool> &deviceLoopbackByName_;
 
     // -----------------------------------------------------------------------
     // ros_control 接口对象
@@ -110,23 +152,9 @@ private:
     joint_limits_interface::PositionJointSaturationInterface posLimitsIface_;
     joint_limits_interface::VelocityJointSaturationInterface velLimitsIface_;
 
-    // -----------------------------------------------------------------------
-    // ROS 通信
-    // -----------------------------------------------------------------------
-    std::unique_ptr<MotorMaintenanceService> maintenanceService_;
-
-    // 直接命令订阅者（per joint，绕过控制器，测试/调试用）
-    std::map<std::string, ros::Subscriber> cmdVelSubs_;
-    std::map<std::string, ros::Subscriber> cmdPosSubs_;
-
-    ros::Publisher motorStatesPub_;
-    ros::Publisher lifecycleStatePub_;
-    ros::Timer     stateTimer_;
-    ros::Timer     lifecycleStateTimer_;
+    std::unique_ptr<DriverRosEndpoints> rosEndpoints_;
 
     // 生命周期与并发控制
-    std::atomic<bool> active_{false};
-    can_driver::OperationalCoordinator lifecycleCoordinator_;
     mutable std::mutex        jointStateMutex_;
     double directCmdTimeoutSec_{0.5};
     double statePublishPeriodSec_{0.1};
@@ -155,17 +183,12 @@ private:
     bool syncStartupPositionAndCommands(const std::string &deviceFilter = std::string());
     bool applyInitialModes(const std::string &deviceFilter = std::string());
     bool applyPerAxisPpDefaultVelocities(const std::string &deviceFilter = std::string());
-    void setupMaintenanceRosComm(ros::NodeHandle &pnh);
     void configureCommandGate();
     void configureLifecycleCoordinator();
     void holdCommandsForLifecycleTransition();
     std::vector<CommandGate::Snapshot> captureCommandSnapshots() const;
     void syncLifecycleTargets();
-    const JointConfig *findJointByMotorId(uint16_t motorId) const;
     MotorActionExecutor::Target makeMotorTarget(const JointConfig &jc) const;
-    can_driver::OperationalCoordinator::Result initializeLifecycleDevice(const std::string &device,
-                                                                         bool loopback);
-    can_driver::OperationalCoordinator::Result shutdownLifecycleDriver(bool force);
 
     /**
      * @brief 初始化（或重新初始化）指定 CAN 通道。
@@ -184,12 +207,8 @@ private:
     bool requireAxisDisabledForConfiguration(const JointConfig &joint,
                                              const char *operation,
                                              std::string *message) const;
+    bool lifecycleHealthHealthy(std::string *detail) const;
 
-    /**
-     * @brief 定时发布 ~/motor_states（10 Hz）。
-     */
-    void publishMotorStates(const ros::TimerEvent &);
-    void publishLifecycleState(const ros::TimerEvent &);
 };
 
 #endif // CAN_DRIVER_CAN_DRIVER_HW_H

@@ -3,6 +3,7 @@
 #include "can_driver/CanDriverHW.h"
 #include "can_driver/CanDriverIoRuntime.h"
 #include "can_driver/SafeCommand.h"
+#include "can_driver/driver_ros_endpoints.hpp"
 
 #include <algorithm>
 #include <chrono>
@@ -47,22 +48,29 @@ bool sharedFeedbackFresh(const can_driver::SharedDriverState::AxisFeedbackState 
 } // namespace
 
 CanDriverHW::CanDriverHW()
-    : deviceManager_(std::make_shared<DeviceManager>())
+    : runtime_(),
+      deviceManager_(runtime_.deviceManager()),
+      motorActionExecutor_(runtime_.motorActionExecutor()),
+      lifecycleDriverOps_(runtime_.lifecycleDriverOps()),
+      commandGate_(runtime_.commandGate()),
+      active_(runtime_.activeFlag()),
+      lifecycleCoordinator_(runtime_.lifecycleCoordinator()),
+      deviceLoopbackByName_(runtime_.deviceLoopbackByName())
 {
-    motorActionExecutor_.setDeviceManager(deviceManager_);
-    lifecycleDriverOps_.configure(deviceManager_, &motorActionExecutor_);
     configureCommandGate();
     configureLifecycleCoordinator();
 }
 
 CanDriverHW::CanDriverHW(std::shared_ptr<IDeviceManager> deviceManager)
-    : deviceManager_(std::move(deviceManager))
+    : runtime_(std::move(deviceManager)),
+      deviceManager_(runtime_.deviceManager()),
+      motorActionExecutor_(runtime_.motorActionExecutor()),
+      lifecycleDriverOps_(runtime_.lifecycleDriverOps()),
+      commandGate_(runtime_.commandGate()),
+      active_(runtime_.activeFlag()),
+      lifecycleCoordinator_(runtime_.lifecycleCoordinator()),
+      deviceLoopbackByName_(runtime_.deviceLoopbackByName())
 {
-    if (!deviceManager_) {
-        deviceManager_ = std::make_shared<DeviceManager>();
-    }
-    motorActionExecutor_.setDeviceManager(deviceManager_);
-    lifecycleDriverOps_.configure(deviceManager_, &motorActionExecutor_);
     configureCommandGate();
     configureLifecycleCoordinator();
 }
@@ -80,6 +88,13 @@ CanDriverHW::~CanDriverHW()
 // ---------------------------------------------------------------------------
 bool CanDriverHW::init(ros::NodeHandle &nh, ros::NodeHandle &pnh)
 {
+    return init(nh, pnh, InitOptions{});
+}
+
+bool CanDriverHW::init(ros::NodeHandle &nh,
+                       ros::NodeHandle &pnh,
+                       const InitOptions &options)
+{
     (void)nh;
     resetInternalState();
     if (!loadRuntimeParams(pnh)) {
@@ -91,7 +106,9 @@ bool CanDriverHW::init(ros::NodeHandle &nh, ros::NodeHandle &pnh)
     }
     registerJointInterfaces();
     loadJointLimits(pnh);
-    setupMaintenanceRosComm(pnh);
+    if (options.enable_ros_endpoints) {
+        rosEndpoints_ = std::make_unique<DriverRosEndpoints>(*this, pnh);
+    }
 
     std::set<std::string> configuredDevices;
     for (const auto &jc : joints_) {
@@ -101,28 +118,18 @@ bool CanDriverHW::init(ros::NodeHandle &nh, ros::NodeHandle &pnh)
     ROS_INFO("[CanDriverHW] Initialized with %zu joints on %zu configured CAN device(s).",
              joints_.size(), configuredDevices.size());
     lifecycleCoordinator_.SetConfigured();
-    publishLifecycleState(ros::TimerEvent{});
+    if (rosEndpoints_) {
+        rosEndpoints_->publishLifecycleStateNow();
+    }
     return true;
 }
 
 void CanDriverHW::resetInternalState()
 {
-    active_.store(false, std::memory_order_release);
-    lifecycleCoordinator_.SetInactive();
-    stateTimer_.stop();
-    lifecycleStateTimer_.stop();
-    if (maintenanceService_) {
-        maintenanceService_->shutdown();
+    if (rosEndpoints_) {
+        rosEndpoints_->shutdown();
+        rosEndpoints_.reset();
     }
-
-    for (auto &kv : cmdVelSubs_) {
-        kv.second.shutdown();
-    }
-    for (auto &kv : cmdPosSubs_) {
-        kv.second.shutdown();
-    }
-    cmdVelSubs_.clear();
-    cmdPosSubs_.clear();
 
     joints_.clear();
     jointIndexByName_.clear();
@@ -131,9 +138,7 @@ void CanDriverHW::resetInternalState()
     commandValidBuffer_.clear();
     preparedCommandBuffer_.clear();
     jointZeroOffsetRadByMotorId_.clear();
-    commandGate_.reset();
-    lifecycleDriverOps_.setTargets({});
-    deviceManager_->shutdownAll();
+    runtime_.reset();
 }
 
 bool CanDriverHW::loadRuntimeParams(const ros::NodeHandle &pnh)
@@ -666,46 +671,51 @@ void CanDriverHW::loadJointLimits(const ros::NodeHandle &pnh)
 
 void CanDriverHW::configureLifecycleCoordinator()
 {
-    can_driver::OperationalCoordinator::DriverOps ops;
-    ops.init_device = [this](const std::string &device, bool loopback) {
-        return initializeLifecycleDevice(device, loopback);
-    };
-    ops.enable_all = [this]() {
-        return lifecycleDriverOps_.enableAll();
-    };
-    ops.enable_healthy = [this](std::string *detail) {
-        return lifecycleDriverOps_.enableHealthy(detail);
-    };
-    ops.disable_all = [this]() {
-        return lifecycleDriverOps_.disableAll();
-    };
-    ops.halt_all = [this]() {
-        return lifecycleDriverOps_.haltAll();
-    };
-    ops.recover_all = [this]() {
-        return lifecycleDriverOps_.recoverAll();
-    };
-    ops.shutdown_all = [this](bool force) {
-        return shutdownLifecycleDriver(force);
-    };
-    ops.motion_healthy = [this](std::string *detail) {
-        return lifecycleDriverOps_.motionHealthy(detail);
-    };
-    ops.any_fault_active = [this]() {
-        return lifecycleDriverOps_.anyFaultActive();
-    };
-    ops.hold_commands = [this]() {
-        commandGate_.holdCommands();
-    };
-    ops.arm_fresh_command_latch = [this]() {
-        commandGate_.armFreshCommandLatch();
-    };
-    lifecycleCoordinator_.SetDriverOps(std::move(ops));
+    runtime_.configureLifecycleCoordinator({
+        [this]() {
+            std::set<std::string> devices;
+            for (const auto &joint : joints_) {
+                devices.insert(joint.canDevice);
+            }
+            return std::vector<std::string>(devices.begin(), devices.end());
+        },
+        [this]() {
+            std::lock_guard<std::mutex> stateLock(jointStateMutex_);
+            for (auto &jc : joints_) {
+                jc.hasDirectPosCmd = false;
+                jc.hasDirectVelCmd = false;
+                jc.stopIssuedOnFault = false;
+            }
+        },
+        [this](std::string *detail) {
+            return lifecycleDriverOps_.enableHealthy(detail);
+        },
+        [this](std::string *detail) {
+            return lifecycleDriverOps_.motionHealthy(detail);
+        },
+        [this]() {
+            return (motorQueryHz_ > 0.0)
+                       ? std::min(startupProbeQueryHz_, motorQueryHz_)
+                       : startupProbeQueryHz_;
+        },
+        [this](const std::string &device, double refreshRateHz) {
+            deviceManager_->setDeviceRefreshRateHz(device, refreshRateHz);
+        },
+        [this](const std::string &device) {
+            return syncStartupPositionAndCommands(device);
+        },
+        [this](const std::string &device) {
+            return applyPerAxisPpDefaultVelocities(device);
+        },
+        [this](const std::string &device) {
+            return applyInitialModes(device);
+        },
+    });
 }
 
 void CanDriverHW::configureCommandGate()
 {
-    commandGate_.configure(
+    runtime_.configureCommandGate(
         [this]() {
             return captureCommandSnapshots();
         },
@@ -714,21 +724,25 @@ void CanDriverHW::configureCommandGate()
         });
 }
 
-void CanDriverHW::setupMaintenanceRosComm(ros::NodeHandle &pnh)
+void CanDriverHW::configureMotorMaintenanceService(MotorMaintenanceService &service)
 {
-    if (!maintenanceService_) {
-        maintenanceService_ = std::make_unique<MotorMaintenanceService>();
-    }
-    maintenanceService_->configure(
+    service.configure(
         [this]() {
             return active_.load(std::memory_order_acquire);
         },
-        &joints_,
-        &jointIndexByName_,
-        &commandValidBuffer_,
-        &jointZeroOffsetRadByMotorId_,
-        &jointStateMutex_,
         &motorActionExecutor_,
+        [this](uint16_t motorId, JointConfig *joint) {
+            return lookupJointByMotorId(motorId, joint);
+        },
+        [this](const std::string &jointName) {
+            clearDirectCommand(jointName);
+        },
+        [this](uint16_t motorId, can_driver::AxisControlMode mode) {
+            return commitModeSwitch(motorId, mode);
+        },
+        [this](uint16_t motorId, double appliedMin, double appliedMax, double zeroOffset) {
+            return commitZeroLimit(motorId, appliedMin, appliedMax, zeroOffset);
+        },
         [this](const JointConfig &joint, can_driver::SharedDriverState::AxisFeedbackState *feedback) {
             return getFreshAxisFeedback(joint, feedback);
         },
@@ -741,49 +755,104 @@ void CanDriverHW::setupMaintenanceRosComm(ros::NodeHandle &pnh)
         [this](const std::string &device) {
             return getDeviceMutex(device);
         });
-    maintenanceService_->initialize(pnh);
-    lifecycleStatePub_ = pnh.advertise<std_msgs::String>("lifecycle_state", 1, true);
-    lifecycleStateTimer_ = pnh.createTimer(ros::Duration(0.1),
-                                           &CanDriverHW::publishLifecycleState,
-                                           this);
+}
 
-    const auto makeDirectCmdCallback =
-        [this](std::size_t idx, bool isVelocity) {
-            return [this, idx, isVelocity](const std_msgs::Float64::ConstPtr &msg) {
-                if (!active_.load(std::memory_order_acquire)) {
-                    return;
-                }
-                std::lock_guard<std::mutex> lock(jointStateMutex_);
-                auto &jc = joints_[idx];
-                if (isVelocity) {
-                    jc.directVelCmd = msg->data;
-                    jc.hasDirectVelCmd = true;
-                    jc.lastDirectVelTime = ros::Time::now();
-                } else {
-                    jc.directPosCmd = msg->data;
-                    jc.hasDirectPosCmd = true;
-                    jc.lastDirectPosTime = ros::Time::now();
-                }
-            };
-        };
+std::vector<CanDriverHW::DirectCommandEndpoint> CanDriverHW::directCommandEndpoints() const
+{
+    std::vector<DirectCommandEndpoint> endpoints;
+    endpoints.reserve(joints_.size());
+    for (std::size_t i = 0; i < joints_.size(); ++i) {
+        endpoints.push_back(DirectCommandEndpoint{joints_[i].name, i});
+    }
+    return endpoints;
+}
 
-    for (auto &jc : joints_) {
-        const std::string velTopic = "motor/" + jc.name + "/cmd_velocity";
-        const std::string posTopic = "motor/" + jc.name + "/cmd_position";
-        const std::size_t idx = jointIndexByName_[jc.name];
-        cmdVelSubs_[jc.name] = pnh.subscribe<std_msgs::Float64>(
-            velTopic, static_cast<uint32_t>(directCmdQueueSize_),
-            makeDirectCmdCallback(idx, true));
-
-        cmdPosSubs_[jc.name] = pnh.subscribe<std_msgs::Float64>(
-            posTopic, static_cast<uint32_t>(directCmdQueueSize_),
-            makeDirectCmdCallback(idx, false));
+void CanDriverHW::acceptDirectCommand(std::size_t jointIndex,
+                                      bool isVelocity,
+                                      double value,
+                                      const ros::Time &stamp)
+{
+    if (!active_.load(std::memory_order_acquire) || jointIndex >= joints_.size()) {
+        return;
     }
 
-    motorStatesPub_ = pnh.advertise<can_driver::MotorState>("motor_states", 10);
-    stateTimer_ = pnh.createTimer(ros::Duration(statePublishPeriodSec_),
-                                  &CanDriverHW::publishMotorStates, this);
-    stateTimer_.stop();
+    std::lock_guard<std::mutex> lock(jointStateMutex_);
+    auto &jc = joints_[jointIndex];
+    if (isVelocity) {
+        jc.directVelCmd = value;
+        jc.hasDirectVelCmd = true;
+        jc.lastDirectVelTime = stamp;
+    } else {
+        jc.directPosCmd = value;
+        jc.hasDirectPosCmd = true;
+        jc.lastDirectPosTime = stamp;
+    }
+}
+
+bool CanDriverHW::lookupJointByMotorId(uint16_t motorId,
+                                       can_driver::CanDriverJointConfig *joint) const
+{
+    if (joint == nullptr) {
+        return false;
+    }
+    for (const auto &candidate : joints_) {
+        if (static_cast<uint16_t>(candidate.motorId) == motorId) {
+            *joint = candidate;
+            return true;
+        }
+    }
+    return false;
+}
+
+void CanDriverHW::clearDirectCommand(const std::string &jointName)
+{
+    std::lock_guard<std::mutex> lock(jointStateMutex_);
+    const auto it = jointIndexByName_.find(jointName);
+    if (it == jointIndexByName_.end()) {
+        return;
+    }
+    joints_[it->second].hasDirectPosCmd = false;
+    joints_[it->second].hasDirectVelCmd = false;
+}
+
+bool CanDriverHW::commitModeSwitch(uint16_t motorId, can_driver::AxisControlMode mode)
+{
+    std::lock_guard<std::mutex> lock(jointStateMutex_);
+    for (std::size_t i = 0; i < joints_.size(); ++i) {
+        auto &joint = joints_[i];
+        if (static_cast<uint16_t>(joint.motorId) != motorId) {
+            continue;
+        }
+        joint.controlMode = can_driver::axisControlModeName(mode);
+        joint.hasDirectPosCmd = false;
+        joint.hasDirectVelCmd = false;
+        joint.posCmd = joint.pos;
+        joint.velCmd = 0.0;
+        joint.requireCommandAlignment = true;
+        commandValidBuffer_[i] = 0;
+        return true;
+    }
+    return false;
+}
+
+bool CanDriverHW::commitZeroLimit(uint16_t motorId,
+                                  double appliedMin,
+                                  double appliedMax,
+                                  double zeroOffset)
+{
+    std::lock_guard<std::mutex> lock(jointStateMutex_);
+    for (auto &joint : joints_) {
+        if (static_cast<uint16_t>(joint.motorId) != motorId) {
+            continue;
+        }
+        joint.hasLimits = true;
+        joint.limits.has_position_limits = true;
+        joint.limits.min_position = appliedMin;
+        joint.limits.max_position = appliedMax;
+        jointZeroOffsetRadByMotorId_[motorId] = zeroOffset;
+        return true;
+    }
+    return false;
 }
 
 void CanDriverHW::holdCommandsForLifecycleTransition()
@@ -827,16 +896,6 @@ void CanDriverHW::syncLifecycleTargets()
         targets.push_back(MotorActionExecutor::Target{jc.name, jc.canDevice, jc.protocol, jc.motorId});
     }
     lifecycleDriverOps_.setTargets(std::move(targets));
-}
-
-const CanDriverHW::JointConfig *CanDriverHW::findJointByMotorId(uint16_t motorId) const
-{
-    for (const auto &jc : joints_) {
-        if (static_cast<uint16_t>(jc.motorId) == motorId) {
-            return &jc;
-        }
-    }
-    return nullptr;
 }
 
 MotorActionExecutor::Target CanDriverHW::makeMotorTarget(const JointConfig &jc) const
@@ -922,84 +981,6 @@ bool CanDriverHW::applyPerAxisPpDefaultVelocities(const std::string &deviceFilte
     return true;
 }
 
-can_driver::OperationalCoordinator::Result CanDriverHW::initializeLifecycleDevice(
-    const std::string &device,
-    bool loopback)
-{
-    const auto rollbackPreparedDevice =
-        [this, &device](const can_driver::OperationalCoordinator::Result &failure) {
-            const auto rollback = lifecycleDriverOps_.shutdownDevice(device);
-            if (!rollback.ok) {
-                ROS_ERROR("[CanDriverHW] Failed to roll back prepared device '%s' after init "
-                          "failure: %s",
-                          device.c_str(),
-                          rollback.message.c_str());
-            }
-            return failure;
-        };
-
-    const double startupQueryHz =
-        (motorQueryHz_ > 0.0)
-            ? std::min(startupProbeQueryHz_, motorQueryHz_)
-            : startupProbeQueryHz_;
-    const auto restoreSteadyRefresh = [this, &device]() {
-        deviceManager_->setDeviceRefreshRateHz(device, 0.0);
-    };
-    deviceManager_->setDeviceRefreshRateHz(device, startupQueryHz);
-
-    const auto prepareResult = lifecycleDriverOps_.prepareDevice(device, loopback);
-    if (!prepareResult.ok) {
-        restoreSteadyRefresh();
-        return prepareResult;
-    }
-
-    if (!syncStartupPositionAndCommands(device)) {
-        restoreSteadyRefresh();
-        return rollbackPreparedDevice(
-            {false, "Failed to synchronize startup position on " + device});
-    }
-    if (!applyPerAxisPpDefaultVelocities(device)) {
-        restoreSteadyRefresh();
-        return rollbackPreparedDevice(
-            {false, "Failed to configure PP default velocities on " + device});
-    }
-    if (!applyInitialModes(device)) {
-        restoreSteadyRefresh();
-        return rollbackPreparedDevice({false, "Failed to apply initial modes on " + device});
-    }
-
-    const auto enableResult = lifecycleDriverOps_.enableDevice(device);
-    if (!enableResult.ok) {
-        restoreSteadyRefresh();
-        return rollbackPreparedDevice(enableResult);
-    }
-    restoreSteadyRefresh();
-    active_.store(true, std::memory_order_release);
-    stateTimer_.start();
-    return {true, "initialized (armed)"};
-}
-
-can_driver::OperationalCoordinator::Result CanDriverHW::shutdownLifecycleDriver(bool force)
-{
-    active_.store(false, std::memory_order_release);
-    stateTimer_.stop();
-    const auto result = lifecycleDriverOps_.shutdownAll(force);
-
-    {
-        std::lock_guard<std::mutex> stateLock(jointStateMutex_);
-        for (auto &jc : joints_) {
-            jc.hasDirectPosCmd = false;
-            jc.hasDirectVelCmd = false;
-            jc.stopIssuedOnFault = false;
-        }
-    }
-
-    if (result.ok) {
-        ROS_INFO("[CanDriverHW] All devices shut down.");
-    }
-    return result;
-}
-
 // ---------------------------------------------------------------------------
 // read
 // ---------------------------------------------------------------------------
@@ -1068,7 +1049,15 @@ void CanDriverHW::write(const ros::Time & /*time*/, const ros::Duration &period)
                                                              &commandGate_,
                                                              writeConfig,
                                                              &anyFaultObserved);
-    lifecycleCoordinator_.UpdateFromFeedback(anyFaultObserved);
+    bool unhealthy = anyFaultObserved;
+    std::string healthDetail;
+    if (!unhealthy && !lifecycleHealthHealthy(&healthDetail)) {
+        unhealthy = true;
+        ROS_WARN_THROTTLE(1.0,
+                          "[CanDriverHW] Auto-fault because lifecycle health check failed: %s",
+                          healthDetail.empty() ? "unknown reason" : healthDetail.c_str());
+    }
+    lifecycleCoordinator_.UpdateFromFeedback(unhealthy);
 #endif
 }
 
@@ -1147,29 +1136,49 @@ bool CanDriverHW::requireAxisDisabledForConfiguration(const JointConfig &joint,
     return true;
 }
 
-void CanDriverHW::publishMotorStates(const ros::TimerEvent & /*e*/)
+bool CanDriverHW::lifecycleHealthHealthy(std::string *detail) const
+{
+    const auto mode = lifecycleCoordinator_.mode();
+    if (mode == can_driver::SystemOpMode::Armed) {
+        return lifecycleDriverOps_.enableHealthy(detail);
+    }
+    if (mode == can_driver::SystemOpMode::Running) {
+        return lifecycleDriverOps_.motionHealthy(detail);
+    }
+    return true;
+}
+
+void CanDriverHW::publishMotorStates(ros::Publisher &publisher)
 {
     if (!active_.load(std::memory_order_acquire)) {
         return;
     }
     auto publishResult = can_driver::CanDriverIoRuntime::BuildMotorStateMessages(
         *deviceManager_, jointGroups_, joints_, &jointStateMutex_);
-    lifecycleCoordinator_.UpdateFromFeedback(publishResult.anyFault);
+    bool unhealthy = publishResult.anyFault;
+    std::string healthDetail;
+    if (!unhealthy && !lifecycleHealthHealthy(&healthDetail)) {
+        unhealthy = true;
+        ROS_WARN_THROTTLE(1.0,
+                          "[CanDriverHW] Auto-fault because lifecycle health check failed: %s",
+                          healthDetail.empty() ? "unknown reason" : healthDetail.c_str());
+    }
+    lifecycleCoordinator_.UpdateFromFeedback(unhealthy);
     if (!active_.load(std::memory_order_acquire)) {
         return;
     }
     for (const auto &msg : publishResult.messages) {
-        motorStatesPub_.publish(msg);
+        publisher.publish(msg);
     }
 }
 
-void CanDriverHW::publishLifecycleState(const ros::TimerEvent & /*e*/)
+void CanDriverHW::publishLifecycleState(ros::Publisher &publisher)
 {
-    if (!lifecycleStatePub_) {
+    if (!publisher) {
         return;
     }
 
     std_msgs::String msg;
     msg.data = can_driver::SystemOpModeName(lifecycleCoordinator_.mode());
-    lifecycleStatePub_.publish(msg);
+    publisher.publish(msg);
 }
