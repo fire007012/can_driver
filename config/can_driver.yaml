@@ -57,6 +57,10 @@ can_driver_node:
   # false : 恢复后立即按当前命令继续下发
   safety_hold_after_device_recover: true
 
+  # lifecycle init 时当前 socket 是否接收自己发出的帧。
+  # 默认 false；仅在 vcan/loopback 测试场景下建议打开。
+  init_loopback: false
+
   # --------------------------------------------------------------------------
   # joints：关节列表
   # --------------------------------------------------------------------------
