@@ -103,10 +103,14 @@ public:
     bool lookupJointByMotorId(uint16_t motorId, can_driver::CanDriverJointConfig *joint) const;
     void clearDirectCommand(const std::string &jointName);
     bool commitModeSwitch(uint16_t motorId, can_driver::AxisControlMode mode);
-    bool commitZeroLimit(uint16_t motorId,
-                         double appliedMin,
-                         double appliedMax,
-                         double zeroOffset);
+    bool getZeroOffset(uint16_t motorId, double* zeroOffset) const;
+    bool commitZero(uint16_t motorId,
+                    double zeroOffset,
+                    double previousZeroOffset);
+    bool commitLimits(uint16_t motorId,
+                      double appliedMin,
+                      double appliedMax,
+                      double zeroOffset);
     void publishMotorStates(ros::Publisher &publisher);
     void publishLifecycleState(ros::Publisher &publisher);
     double motorStatePeriodSec() const

@@ -105,6 +105,7 @@ public:
                                  int32_t maxPositionRaw,
                                  bool enable) override;
     bool setPositionOffset(MotorID motorId, int32_t offsetRaw) override;
+    bool readPositionOffset(MotorID motorId, int32_t* offsetRaw) override;
     void initializeMotorRefresh(const std::vector<MotorID> &motorIds) override;
     /// 设置状态轮询频率（Hz）；<=0 表示使用默认自适应周期。
     void setRefreshRateHz(double hz);
@@ -141,12 +142,14 @@ private:
         bool enabled = false;
         bool fault = false;
         bool positionReceived = false;
+        bool positionOffsetReceived = false;
         bool velocityReceived = false;
         bool currentReceived = false;
         bool modeReceived = false;
         bool enabledReceived = false;
         bool faultReceived = false;
         bool positionVelocityConfigured = false;
+        int32_t positionOffset = 0;
         MotorMode mode = MotorMode::Position;
     };
     struct PendingReadRequest {
@@ -177,6 +180,7 @@ private:
     std::atomic<int32_t> defaultCspVelocityRaw_{kDefaultPositionVelocityRaw};
     std::atomic<uint64_t> fastWriteSentCount_{0};
     std::atomic<uint64_t> normalWriteSentCount_{0};
+    std::atomic<bool> shuttingDown_{false};
     mutable std::mutex pendingReadMutex_;
     std::unordered_map<uint16_t, PendingReadRequest> pendingReadRequests_;
 
@@ -197,6 +201,7 @@ private:
      */
     void handleResponse(const CanTransport::Frame &data);
     bool requestPosition(uint8_t motorId);
+    bool requestPositionOffset(uint8_t motorId);
     bool requestMode(uint8_t motorId);
     bool requestEnable(uint8_t motorId);
     bool requestFault(uint8_t motorId);

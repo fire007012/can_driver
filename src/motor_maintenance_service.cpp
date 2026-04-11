@@ -49,6 +49,8 @@ void MotorMaintenanceService::configure(
     JointLookup lookupJointByMotorId,
     DirectCommandClearer clearDirectCommand,
     ModeSwitchCommitter commitModeSwitch,
+    ZeroCommitter commitZero,
+    ZeroOffsetGetter getZeroOffset,
     LimitCommitter commitLimits,
     FreshFeedbackGetter getFreshAxisFeedback,
     DisabledRequirementChecker requireAxisDisabledForConfiguration,
@@ -60,6 +62,8 @@ void MotorMaintenanceService::configure(
     lookupJointByMotorId_ = std::move(lookupJointByMotorId);
     clearDirectCommand_ = std::move(clearDirectCommand);
     commitModeSwitch_ = std::move(commitModeSwitch);
+    commitZero_ = std::move(commitZero);
+    getZeroOffset_ = std::move(getZeroOffset);
     commitLimits_ = std::move(commitLimits);
     getFreshAxisFeedback_ = std::move(getFreshAxisFeedback);
     requireAxisDisabledForConfiguration_ = std::move(requireAxisDisabledForConfiguration);
@@ -69,15 +73,36 @@ void MotorMaintenanceService::configure(
 
 void MotorMaintenanceService::initialize(ros::NodeHandle &pnh)
 {
+    initialize(pnh, AdvertiseOptions{});
+}
+
+void MotorMaintenanceService::initialize(ros::NodeHandle &pnh,
+                                         const AdvertiseOptions &options)
+{
     shutdown();
-    motorCmdSrv_ = pnh.advertiseService("motor_command", &MotorMaintenanceService::onMotorCommand, this);
-    setZeroLimitSrv_ =
-        pnh.advertiseService("set_zero_limit", &MotorMaintenanceService::onSetZeroLimit, this);
+    if (options.motorCommand) {
+        motorCmdSrv_ =
+            pnh.advertiseService("motor_command", &MotorMaintenanceService::onMotorCommand, this);
+    }
+    if (options.setZero) {
+        setZeroSrv_ =
+            pnh.advertiseService("set_zero", &MotorMaintenanceService::onSetZero, this);
+    }
+    if (options.applyLimits) {
+        applyLimitsSrv_ =
+            pnh.advertiseService("apply_limits", &MotorMaintenanceService::onApplyLimits, this);
+    }
+    if (options.setZeroLimit) {
+        setZeroLimitSrv_ =
+            pnh.advertiseService("set_zero_limit", &MotorMaintenanceService::onSetZeroLimit, this);
+    }
 }
 
 void MotorMaintenanceService::shutdown()
 {
     motorCmdSrv_.shutdown();
+    setZeroSrv_.shutdown();
+    applyLimitsSrv_.shutdown();
     setZeroLimitSrv_.shutdown();
 }
 
@@ -93,6 +118,589 @@ MotorActionExecutor::Target
 MotorMaintenanceService::makeMotorTarget(const JointConfig &joint) const
 {
     return MotorActionExecutor::Target{joint.name, joint.canDevice, joint.protocol, joint.motorId};
+}
+
+bool MotorMaintenanceService::handleSetModeRequest(const JointConfig &target,
+                                                   uint16_t motorId,
+                                                   double modeValue,
+                                                   std::string *message)
+{
+    if (!motorActionExecutor_ || !commitModeSwitch_) {
+        if (message != nullptr) {
+            *message = "Motor maintenance service not configured.";
+        }
+        return false;
+    }
+
+    ModeSelection selection;
+    if (!decodeModeSelection(modeValue, &selection)) {
+        if (message != nullptr) {
+            *message = "CMD_SET_MODE value must be 0 (position), 1 (velocity) or 2 (csp).";
+        }
+        return false;
+    }
+    if (!requireAxisDisabledForConfiguration_ ||
+        !requireAxisDisabledForConfiguration_(target, "Mode switch", message)) {
+        if (message != nullptr && message->empty()) {
+            *message = "Mode switch requires the motor to be disabled first.";
+        }
+        return false;
+    }
+
+    const auto status = motorActionExecutor_->execute(
+        makeMotorTarget(target),
+        [&selection](const std::shared_ptr<CanProtocol> &proto, MotorID id) {
+            return proto->setMode(id, selection.mode);
+        },
+        "Set mode");
+    if (status != MotorActionExecutor::Status::Ok) {
+        if (message != nullptr) {
+            if (status == MotorActionExecutor::Status::DeviceNotReady) {
+                *message = "CAN device not ready.";
+            } else if (status == MotorActionExecutor::Status::ProtocolUnavailable) {
+                *message = "Protocol not available.";
+            } else if (status == MotorActionExecutor::Status::Rejected) {
+                *message = "Set mode command rejected.";
+            } else {
+                *message = "Command execution failed.";
+            }
+        }
+        return false;
+    }
+    if (!waitForPpModeConfirmation(target, selection.mode, message)) {
+        return false;
+    }
+
+    JointConfig targetSnapshot;
+    if (!lookupJointByMotorId(motorId, &targetSnapshot)) {
+        if (message != nullptr) {
+            *message = "Motor ID not found.";
+        }
+        return false;
+    }
+
+    int32_t preloadRaw = 0;
+    if (selection.mode != CanProtocol::MotorMode::Velocity) {
+        if (!getFreshAxisFeedback_) {
+            if (message != nullptr) {
+                *message = "Current position feedback unavailable or stale for mode preload.";
+            }
+            return false;
+        }
+        can_driver::SharedDriverState::AxisFeedbackState feedback;
+        if (!getFreshAxisFeedback_(targetSnapshot, &feedback) || !feedback.positionValid) {
+            if (message != nullptr) {
+                *message = "Current position feedback unavailable or stale for mode preload.";
+            }
+            return false;
+        }
+        preloadRaw = can_driver::safe_command::clampToInt32(feedback.position);
+    }
+
+    const auto preloadStatus = motorActionExecutor_->execute(
+        makeMotorTarget(targetSnapshot),
+        [selection, preloadRaw](const std::shared_ptr<CanProtocol> &proto, MotorID id) {
+            switch (selection.mode) {
+            case CanProtocol::MotorMode::Position:
+                return proto->setPosition(id, preloadRaw);
+            case CanProtocol::MotorMode::Velocity:
+                return proto->setVelocity(id, 0);
+            case CanProtocol::MotorMode::CSP:
+                return proto->quickSetPosition(id, preloadRaw);
+            }
+            return false;
+        },
+        "Preload mode command");
+    if (preloadStatus != MotorActionExecutor::Status::Ok) {
+        if (message != nullptr) {
+            if (preloadStatus == MotorActionExecutor::Status::DeviceNotReady) {
+                *message = "CAN device not ready.";
+            } else if (preloadStatus == MotorActionExecutor::Status::ProtocolUnavailable) {
+                *message = "Protocol not available.";
+            } else if (preloadStatus == MotorActionExecutor::Status::Rejected) {
+                *message = "Set mode preload command rejected.";
+            } else {
+                *message = "Command execution failed.";
+            }
+        }
+        return false;
+    }
+
+    if (!commitModeSwitch_(motorId, selection.controlMode)) {
+        if (message != nullptr) {
+            *message = "Failed to update local joint mode state.";
+        }
+        return false;
+    }
+    if (message != nullptr) {
+        *message = "OK";
+    }
+    return true;
+}
+
+bool MotorMaintenanceService::SetModeByMotorId(uint16_t motorId,
+                                               double modeValue,
+                                               std::string *message)
+{
+    if (message != nullptr) {
+        message->clear();
+    }
+    if (!isActive_ || !isActive_()) {
+        if (message != nullptr) {
+            *message = "Driver inactive.";
+        }
+        return false;
+    }
+
+    JointConfig target;
+    if (!lookupJointByMotorId(motorId, &target)) {
+        if (message != nullptr) {
+            *message = "Motor ID not found.";
+        }
+        return false;
+    }
+
+    return handleSetModeRequest(target, motorId, modeValue, message);
+}
+
+bool MotorMaintenanceService::resolveBaseLimits(const JointConfig& target,
+                                                bool useUrdfLimits,
+                                                double requestedMinRad,
+                                                double requestedMaxRad,
+                                                ResolvedLimits* out,
+                                                std::string* message) const
+{
+    if (out == nullptr) {
+        if (message != nullptr) {
+            *message = "Resolved limit output is null.";
+        }
+        return false;
+    }
+
+    out->baseMin = requestedMinRad;
+    out->baseMax = requestedMaxRad;
+    if (!useUrdfLimits) {
+        return true;
+    }
+
+    urdf::Model urdf;
+    if (!urdf.initParam("robot_description")) {
+        if (message != nullptr) {
+            *message = "robot_description not found; cannot read URDF limits.";
+        }
+        return false;
+    }
+    auto urdfJoint = urdf.getJoint(target.name);
+    if (!urdfJoint) {
+        if (message != nullptr) {
+            *message = "Joint not found in URDF: " + target.name;
+        }
+        return false;
+    }
+    joint_limits_interface::JointLimits urdfLimits;
+    if (!joint_limits_interface::getJointLimits(urdfJoint, urdfLimits) ||
+        !urdfLimits.has_position_limits) {
+        if (message != nullptr) {
+            *message = "URDF has no position limits for joint: " + target.name;
+        }
+        return false;
+    }
+    out->baseMin = urdfLimits.min_position;
+    out->baseMax = urdfLimits.max_position;
+    return true;
+}
+
+bool MotorMaintenanceService::resolveCurrentReportedPosition(
+    const JointConfig& target,
+    double* currentPositionRad,
+    bool* hasFreshFeedback,
+    std::string* message) const
+{
+    if (currentPositionRad == nullptr || hasFreshFeedback == nullptr) {
+        if (message != nullptr) {
+            *message = "Current position output is null.";
+        }
+        return false;
+    }
+
+    *currentPositionRad = 0.0;
+    *hasFreshFeedback = false;
+
+    if (!getProtocol_ || !getDeviceMutex_) {
+        if (message != nullptr) {
+            *message = "Protocol not available.";
+        }
+        return false;
+    }
+    auto proto = getProtocol_(target.canDevice, target.protocol);
+    auto devMutex = getDeviceMutex_(target.canDevice);
+    if (!proto || !devMutex) {
+        if (message != nullptr) {
+            *message = "Protocol not available.";
+        }
+        return false;
+    }
+
+    int64_t rawPos = 0;
+    can_driver::SharedDriverState::AxisFeedbackState feedback;
+    if (getFreshAxisFeedback_ && getFreshAxisFeedback_(target, &feedback) &&
+        feedback.positionValid) {
+        rawPos = feedback.position;
+        *hasFreshFeedback = true;
+    } else {
+        std::lock_guard<std::mutex> devLock(*devMutex);
+        for (int i = 0; i < 5; ++i) {
+            rawPos = proto->getPosition(target.motorId);
+            std::this_thread::sleep_for(std::chrono::milliseconds(15));
+        }
+    }
+
+    *currentPositionRad = static_cast<double>(rawPos) * target.positionScale;
+    return true;
+}
+
+bool MotorMaintenanceService::resolveCurrentZeroOffset(const JointConfig& target,
+                                                       bool applyToMotor,
+                                                       double* zeroOffsetRad,
+                                                       std::string* message) const
+{
+    if (zeroOffsetRad == nullptr) {
+        if (message != nullptr) {
+            *message = "Zero offset output is null.";
+        }
+        return false;
+    }
+    *zeroOffsetRad = 0.0;
+
+    if (applyToMotor && getProtocol_) {
+        auto proto = getProtocol_(target.canDevice, target.protocol);
+        int32_t offsetRaw = 0;
+        if (proto && proto->readPositionOffset(target.motorId, &offsetRaw)) {
+            *zeroOffsetRad = static_cast<double>(offsetRaw) * target.positionScale;
+            return true;
+        }
+    }
+
+    if (getZeroOffset_ && getZeroOffset_(static_cast<uint16_t>(target.motorId), zeroOffsetRad)) {
+        return true;
+    }
+
+    *zeroOffsetRad = 0.0;
+    return true;
+}
+
+bool MotorMaintenanceService::SetZeroByMotorId(uint16_t motorId,
+                                               double zeroOffsetRad,
+                                               bool useCurrentPositionAsZero,
+                                               bool applyToMotor,
+                                               double* previousZeroOffsetRad,
+                                               double* currentPositionRad,
+                                               double* appliedZeroOffsetRad,
+                                               std::string* message)
+{
+    if (message != nullptr) {
+        message->clear();
+    }
+    if (previousZeroOffsetRad != nullptr) {
+        *previousZeroOffsetRad = 0.0;
+    }
+    if (currentPositionRad != nullptr) {
+        *currentPositionRad = 0.0;
+    }
+    if (appliedZeroOffsetRad != nullptr) {
+        *appliedZeroOffsetRad = 0.0;
+    }
+
+    if (!isActive_ || !isActive_()) {
+        if (message != nullptr) {
+            *message = "Driver inactive.";
+        }
+        return false;
+    }
+
+    JointConfig target;
+    if (!lookupJointByMotorId(motorId, &target)) {
+        if (message != nullptr) {
+            *message = "Motor ID not found.";
+        }
+        return false;
+    }
+    if (!can_driver::controlModeUsesPositionSemantics(target.controlMode)) {
+        if (message != nullptr) {
+            *message = "Only position-semantic joints support zero/position limits.";
+        }
+        return false;
+    }
+    if (useCurrentPositionAsZero && !applyToMotor) {
+        if (message != nullptr) {
+            *message = "Automatic zeroing requires apply_to_motor=true.";
+        }
+        return false;
+    }
+
+    double currentReportedPositionRad = 0.0;
+    bool hasFreshFeedback = false;
+    if (!resolveCurrentReportedPosition(target,
+                                        &currentReportedPositionRad,
+                                        &hasFreshFeedback,
+                                        message)) {
+        return false;
+    }
+    if (currentPositionRad != nullptr) {
+        *currentPositionRad = currentReportedPositionRad;
+    }
+    if (useCurrentPositionAsZero && !hasFreshFeedback) {
+        if (message != nullptr) {
+            *message = "Current position feedback unavailable or stale; cannot auto-zero.";
+        }
+        return false;
+    }
+
+    double previousZeroOffset = 0.0;
+    if (!resolveCurrentZeroOffset(target, applyToMotor, &previousZeroOffset, message)) {
+        return false;
+    }
+    if (previousZeroOffsetRad != nullptr) {
+        *previousZeroOffsetRad = previousZeroOffset;
+    }
+
+    const double currentPhysicalPositionRad =
+        currentReportedPositionRad - previousZeroOffset;
+    const double resolvedZeroOffset =
+        useCurrentPositionAsZero ? -currentPhysicalPositionRad : zeroOffsetRad;
+    if (appliedZeroOffsetRad != nullptr) {
+        *appliedZeroOffsetRad = resolvedZeroOffset;
+    }
+
+    if (applyToMotor) {
+        if (!requireAxisDisabledForConfiguration_ ||
+            !requireAxisDisabledForConfiguration_(
+                target, "Writing zero offset", message)) {
+            if (message != nullptr && message->empty()) {
+                *message = "Writing zero offset requires the motor to be disabled first.";
+            }
+            return false;
+        }
+
+        int32_t rawOffset = 0;
+        if (!can_driver::safe_command::scaleAndClampToInt32(
+                resolvedZeroOffset,
+                target.positionScale,
+                target.name + ".zero_offset",
+                rawOffset)) {
+            if (message != nullptr) {
+                *message = "Failed to convert zero offset to protocol raw value.";
+            }
+            return false;
+        }
+
+        if (!motorActionExecutor_) {
+            if (message != nullptr) {
+                *message = "Motor maintenance service not configured.";
+            }
+            return false;
+        }
+        const auto status = motorActionExecutor_->execute(
+            makeMotorTarget(target),
+            [rawOffset](const std::shared_ptr<CanProtocol>& p, MotorID id) {
+                return p->setPositionOffset(id, rawOffset);
+            },
+            "Set zero offset");
+        if (status != MotorActionExecutor::Status::Ok) {
+            if (message != nullptr) {
+                if (status == MotorActionExecutor::Status::DeviceNotReady) {
+                    *message = "CAN device not ready.";
+                } else if (status == MotorActionExecutor::Status::ProtocolUnavailable) {
+                    *message = "Protocol not available.";
+                } else if (status == MotorActionExecutor::Status::Rejected) {
+                    *message = "Protocol rejected zero offset setting.";
+                } else {
+                    *message = "Set zero execution failed.";
+                }
+            }
+            return false;
+        }
+    }
+
+    if (!commitZero_ || !commitZero_(motorId, resolvedZeroOffset, previousZeroOffset)) {
+        if (message != nullptr) {
+            *message = "Failed to update local zero state.";
+        }
+        return false;
+    }
+    if (message != nullptr) {
+        *message = "OK";
+    }
+    return true;
+}
+
+bool MotorMaintenanceService::ApplyLimitsByMotorId(uint16_t motorId,
+                                                   double minPositionRad,
+                                                   double maxPositionRad,
+                                                   bool useUrdfLimits,
+                                                   bool applyToMotor,
+                                                   bool requireCurrentInsideLimits,
+                                                   double* currentPositionRad,
+                                                   double* activeZeroOffsetRad,
+                                                   double* appliedMinRad,
+                                                   double* appliedMaxRad,
+                                                   std::string* message)
+{
+    if (message != nullptr) {
+        message->clear();
+    }
+    if (currentPositionRad != nullptr) {
+        *currentPositionRad = 0.0;
+    }
+    if (activeZeroOffsetRad != nullptr) {
+        *activeZeroOffsetRad = 0.0;
+    }
+    if (appliedMinRad != nullptr) {
+        *appliedMinRad = 0.0;
+    }
+    if (appliedMaxRad != nullptr) {
+        *appliedMaxRad = 0.0;
+    }
+
+    if (!isActive_ || !isActive_()) {
+        if (message != nullptr) {
+            *message = "Driver inactive.";
+        }
+        return false;
+    }
+
+    JointConfig target;
+    if (!lookupJointByMotorId(motorId, &target)) {
+        if (message != nullptr) {
+            *message = "Motor ID not found.";
+        }
+        return false;
+    }
+    if (!can_driver::controlModeUsesPositionSemantics(target.controlMode)) {
+        if (message != nullptr) {
+            *message = "Only position-semantic joints support zero/position limits.";
+        }
+        return false;
+    }
+
+    ResolvedLimits limits;
+    if (!resolveBaseLimits(target,
+                           useUrdfLimits,
+                           minPositionRad,
+                           maxPositionRad,
+                           &limits,
+                           message)) {
+        return false;
+    }
+
+    double currentReportedPositionRad = 0.0;
+    bool hasFreshFeedback = false;
+    if (!resolveCurrentReportedPosition(target,
+                                        &currentReportedPositionRad,
+                                        &hasFreshFeedback,
+                                        message)) {
+        return false;
+    }
+    (void)hasFreshFeedback;
+    if (currentPositionRad != nullptr) {
+        *currentPositionRad = currentReportedPositionRad;
+    }
+
+    double activeZeroOffset = 0.0;
+    if (!resolveCurrentZeroOffset(target, applyToMotor, &activeZeroOffset, message)) {
+        return false;
+    }
+    if (activeZeroOffsetRad != nullptr) {
+        *activeZeroOffsetRad = activeZeroOffset;
+    }
+
+    const double resolvedMin = limits.baseMin + activeZeroOffset;
+    const double resolvedMax = limits.baseMax + activeZeroOffset;
+    if (!std::isfinite(resolvedMin) || !std::isfinite(resolvedMax) ||
+        resolvedMin >= resolvedMax) {
+        if (message != nullptr) {
+            *message = "Invalid limit range after zero offset.";
+        }
+        return false;
+    }
+    if (appliedMinRad != nullptr) {
+        *appliedMinRad = resolvedMin;
+    }
+    if (appliedMaxRad != nullptr) {
+        *appliedMaxRad = resolvedMax;
+    }
+
+    if (requireCurrentInsideLimits &&
+        (currentReportedPositionRad < resolvedMin ||
+         currentReportedPositionRad > resolvedMax)) {
+        if (message != nullptr) {
+            *message = "Current position is outside requested limit range.";
+        }
+        return false;
+    }
+
+    if (applyToMotor) {
+        if (!requireAxisDisabledForConfiguration_ ||
+            !requireAxisDisabledForConfiguration_(
+                target, "Writing hardware limits", message)) {
+            if (message != nullptr && message->empty()) {
+                *message = "Writing hardware limits requires the motor to be disabled first.";
+            }
+            return false;
+        }
+
+        int32_t rawMin = 0;
+        int32_t rawMax = 0;
+        if (!can_driver::safe_command::scaleAndClampToInt32(
+                resolvedMin, target.positionScale, target.name + ".min_limit", rawMin) ||
+            !can_driver::safe_command::scaleAndClampToInt32(
+                resolvedMax, target.positionScale, target.name + ".max_limit", rawMax)) {
+            if (message != nullptr) {
+                *message = "Failed to convert limits to protocol raw values.";
+            }
+            return false;
+        }
+
+        if (!motorActionExecutor_) {
+            if (message != nullptr) {
+                *message = "Motor maintenance service not configured.";
+            }
+            return false;
+        }
+        const auto status = motorActionExecutor_->execute(
+            makeMotorTarget(target),
+            [rawMin, rawMax](const std::shared_ptr<CanProtocol>& p, MotorID id) {
+                return p->configurePositionLimits(id, rawMin, rawMax, true);
+            },
+            "Set position limits");
+        if (status != MotorActionExecutor::Status::Ok) {
+            if (message != nullptr) {
+                if (status == MotorActionExecutor::Status::DeviceNotReady) {
+                    *message = "CAN device not ready.";
+                } else if (status == MotorActionExecutor::Status::ProtocolUnavailable) {
+                    *message = "Protocol not available.";
+                } else if (status == MotorActionExecutor::Status::Rejected) {
+                    *message = "Protocol rejected position limit setting.";
+                } else {
+                    *message = "Set limits execution failed.";
+                }
+            }
+            return false;
+        }
+    }
+
+    if (!commitLimits_ ||
+        !commitLimits_(motorId, resolvedMin, resolvedMax, activeZeroOffset)) {
+        if (message != nullptr) {
+            *message = "Failed to update local limit state.";
+        }
+        return false;
+    }
+
+    if (message != nullptr) {
+        *message = "OK";
+    }
+    return true;
 }
 
 bool MotorMaintenanceService::waitForPpModeConfirmation(const JointConfig &joint,
@@ -166,91 +774,7 @@ bool MotorMaintenanceService::onMotorCommand(can_driver::MotorCommand::Request &
     };
 
     if (req.command == can_driver::MotorCommand::Request::CMD_SET_MODE) {
-        if (!motorActionExecutor_ || !commitModeSwitch_) {
-            res.success = false;
-            res.message = "Motor maintenance service not configured.";
-            return true;
-        }
-
-        ModeSelection selection;
-        if (!decodeModeSelection(req.value, &selection)) {
-            res.success = false;
-            res.message = "CMD_SET_MODE value must be 0 (position), 1 (velocity) or 2 (csp).";
-            return true;
-        }
-        if (!requireAxisDisabledForConfiguration_ ||
-            !requireAxisDisabledForConfiguration_(target, "Mode switch", &res.message)) {
-            res.success = false;
-            if (res.message.empty()) {
-                res.message = "Mode switch requires the motor to be disabled first.";
-            }
-            return true;
-        }
-
-        const auto status = motorActionExecutor_->execute(
-            makeMotorTarget(target),
-            [&selection](const std::shared_ptr<CanProtocol> &proto, MotorID id) {
-                return proto->setMode(id, selection.mode);
-            },
-            "Set mode");
-        if (status != MotorActionExecutor::Status::Ok) {
-            handleFailure(status, "Set mode command rejected.");
-            return true;
-        }
-        if (!waitForPpModeConfirmation(target, selection.mode, &res.message)) {
-            res.success = false;
-            return true;
-        }
-
-        JointConfig targetSnapshot;
-        if (!lookupJointByMotorId(req.motor_id, &targetSnapshot)) {
-            res.success = false;
-            res.message = "Motor ID not found.";
-            return true;
-        }
-
-        int32_t preloadRaw = 0;
-        if (selection.mode != CanProtocol::MotorMode::Velocity) {
-            if (!getFreshAxisFeedback_) {
-                res.success = false;
-                res.message = "Current position feedback unavailable or stale for mode preload.";
-                return true;
-            }
-            can_driver::SharedDriverState::AxisFeedbackState feedback;
-            if (!getFreshAxisFeedback_(targetSnapshot, &feedback) || !feedback.positionValid) {
-                res.success = false;
-                res.message = "Current position feedback unavailable or stale for mode preload.";
-                return true;
-            }
-            preloadRaw = can_driver::safe_command::clampToInt32(feedback.position);
-        }
-
-        const auto preloadStatus = motorActionExecutor_->execute(
-            makeMotorTarget(targetSnapshot),
-            [selection, preloadRaw](const std::shared_ptr<CanProtocol> &proto, MotorID id) {
-                switch (selection.mode) {
-                case CanProtocol::MotorMode::Position:
-                    return proto->setPosition(id, preloadRaw);
-                case CanProtocol::MotorMode::Velocity:
-                    return proto->setVelocity(id, 0);
-                case CanProtocol::MotorMode::CSP:
-                    return proto->quickSetPosition(id, preloadRaw);
-                }
-                return false;
-            },
-            "Preload mode command");
-        if (preloadStatus != MotorActionExecutor::Status::Ok) {
-            handleFailure(preloadStatus, "Set mode preload command rejected.");
-            return true;
-        }
-
-        if (!commitModeSwitch_(req.motor_id, selection.controlMode)) {
-            res.success = false;
-            res.message = "Failed to update local joint mode state.";
-            return true;
-        }
-        res.success = true;
-        res.message = "OK";
+        res.success = handleSetModeRequest(target, req.motor_id, req.value, &res.message);
         return true;
     }
 
@@ -304,180 +828,63 @@ bool MotorMaintenanceService::onMotorCommand(can_driver::MotorCommand::Request &
     return true;
 }
 
+bool MotorMaintenanceService::onSetZero(can_driver::SetZero::Request &req,
+                                        can_driver::SetZero::Response &res)
+{
+    res.success = SetZeroByMotorId(req.motor_id,
+                                   req.zero_offset_rad,
+                                   req.use_current_position_as_zero,
+                                   req.apply_to_motor,
+                                   &res.previous_zero_offset_rad,
+                                   &res.current_position_rad,
+                                   &res.applied_zero_offset_rad,
+                                   &res.message);
+    return true;
+}
+
+bool MotorMaintenanceService::onApplyLimits(can_driver::ApplyLimits::Request &req,
+                                            can_driver::ApplyLimits::Response &res)
+{
+    res.success = ApplyLimitsByMotorId(req.motor_id,
+                                       req.min_position_rad,
+                                       req.max_position_rad,
+                                       req.use_urdf_limits,
+                                       req.apply_to_motor,
+                                       req.require_current_inside_limits,
+                                       &res.current_position_rad,
+                                       &res.active_zero_offset_rad,
+                                       &res.applied_min_rad,
+                                       &res.applied_max_rad,
+                                       &res.message);
+    return true;
+}
+
 bool MotorMaintenanceService::onSetZeroLimit(can_driver::SetZeroLimit::Request &req,
                                              can_driver::SetZeroLimit::Response &res)
 {
-    if (!isActive_ || !isActive_()) {
-        res.success = false;
-        res.message = "Driver inactive.";
+    double previousZeroOffset = 0.0;
+    res.success = SetZeroByMotorId(req.motor_id,
+                                   req.zero_offset_rad,
+                                   req.use_current_position_as_zero,
+                                   req.apply_to_motor,
+                                   &previousZeroOffset,
+                                   &res.current_position_rad,
+                                   &res.applied_zero_offset_rad,
+                                   &res.message);
+    if (!res.success) {
         return true;
     }
 
-    JointConfig target;
-    if (!lookupJointByMotorId(req.motor_id, &target)) {
-        res.success = false;
-        res.message = "Motor ID not found.";
-        return true;
-    }
-    if (!can_driver::controlModeUsesPositionSemantics(target.controlMode)) {
-        res.success = false;
-        res.message = "Only position-semantic joints support zero/position limits.";
-        return true;
-    }
-    if (req.use_current_position_as_zero && !req.apply_to_motor) {
-        res.success = false;
-        res.message = "Automatic zeroing requires apply_to_motor=true.";
-        return true;
-    }
-
-    double baseMin = req.min_position_rad;
-    double baseMax = req.max_position_rad;
-    if (req.use_urdf_limits) {
-        urdf::Model urdf;
-        if (!urdf.initParam("robot_description")) {
-            res.success = false;
-            res.message = "robot_description not found; cannot read URDF limits.";
-            return true;
-        }
-        auto urdfJoint = urdf.getJoint(target.name);
-        if (!urdfJoint) {
-            res.success = false;
-            res.message = "Joint not found in URDF: " + target.name;
-            return true;
-        }
-        joint_limits_interface::JointLimits urdfLimits;
-        if (!joint_limits_interface::getJointLimits(urdfJoint, urdfLimits) ||
-            !urdfLimits.has_position_limits) {
-            res.success = false;
-            res.message = "URDF has no position limits for joint: " + target.name;
-            return true;
-        }
-        baseMin = urdfLimits.min_position;
-        baseMax = urdfLimits.max_position;
-    }
-
-    if (!getProtocol_ || !getDeviceMutex_) {
-        res.success = false;
-        res.message = "Protocol not available.";
-        return true;
-    }
-    auto proto = getProtocol_(target.canDevice, target.protocol);
-    auto devMutex = getDeviceMutex_(target.canDevice);
-    if (!proto || !devMutex) {
-        res.success = false;
-        res.message = "Protocol not available.";
-        return true;
-    }
-
-    int64_t rawPos = 0;
-    bool hasFreshFeedback = false;
-    can_driver::SharedDriverState::AxisFeedbackState feedback;
-    if (getFreshAxisFeedback_ && getFreshAxisFeedback_(target, &feedback) &&
-        feedback.positionValid) {
-        rawPos = feedback.position;
-        hasFreshFeedback = true;
-    } else {
-        std::lock_guard<std::mutex> devLock(*devMutex);
-        for (int i = 0; i < 5; ++i) {
-            rawPos = proto->getPosition(target.motorId);
-            std::this_thread::sleep_for(std::chrono::milliseconds(15));
-        }
-    }
-
-    const double currentPosRad = static_cast<double>(rawPos) * target.positionScale;
-    res.current_position_rad = currentPosRad;
-    if (req.use_current_position_as_zero && !hasFreshFeedback) {
-        res.success = false;
-        res.message = "Current position feedback unavailable or stale; cannot auto-zero.";
-        return true;
-    }
-
-    const double resolvedZeroOffset =
-        req.use_current_position_as_zero ? -currentPosRad : req.zero_offset_rad;
-    res.applied_zero_offset_rad = resolvedZeroOffset;
-    const double appliedMin = baseMin + resolvedZeroOffset;
-    const double appliedMax = baseMax + resolvedZeroOffset;
-    if (!std::isfinite(appliedMin) || !std::isfinite(appliedMax) || appliedMin >= appliedMax) {
-        res.success = false;
-        res.message = "Invalid limit range after zero offset.";
-        return true;
-    }
-    if (currentPosRad < appliedMin || currentPosRad > appliedMax) {
-        res.success = false;
-        res.applied_min_rad = appliedMin;
-        res.applied_max_rad = appliedMax;
-        res.message = "Current position is outside requested limit range.";
-        return true;
-    }
-
-    if (req.apply_to_motor) {
-        if (!requireAxisDisabledForConfiguration_ ||
-            !requireAxisDisabledForConfiguration_(
-                target, "Writing zero offset / hardware limits", &res.message)) {
-            res.success = false;
-            if (res.message.empty()) {
-                res.message =
-                    "Writing zero offset / hardware limits requires the motor to be disabled first.";
-            }
-            return true;
-        }
-
-        int32_t rawMin = 0;
-        int32_t rawMax = 0;
-        int32_t rawOffset = 0;
-        if (!can_driver::safe_command::scaleAndClampToInt32(
-                appliedMin, target.positionScale, target.name + ".min_limit", rawMin) ||
-            !can_driver::safe_command::scaleAndClampToInt32(
-                appliedMax, target.positionScale, target.name + ".max_limit", rawMax) ||
-            !can_driver::safe_command::scaleAndClampToInt32(
-                resolvedZeroOffset,
-                target.positionScale,
-                target.name + ".zero_offset",
-                rawOffset)) {
-            res.success = false;
-            res.message = "Failed to convert limits/offset to protocol raw values.";
-            return true;
-        }
-
-        if (!motorActionExecutor_) {
-            res.success = false;
-            res.message = "Motor maintenance service not configured.";
-            return true;
-        }
-        const auto status = motorActionExecutor_->execute(
-            makeMotorTarget(target),
-            [rawMin, rawMax, rawOffset](const std::shared_ptr<CanProtocol> &p, MotorID id) {
-                const bool okOffset = p->setPositionOffset(id, rawOffset);
-                const bool okLimits = p->configurePositionLimits(id, rawMin, rawMax, true);
-                return okOffset && okLimits;
-            },
-            "Set zero/position limits");
-
-        if (status != MotorActionExecutor::Status::Ok) {
-            res.success = false;
-            if (status == MotorActionExecutor::Status::DeviceNotReady) {
-                res.message = "CAN device not ready.";
-            } else if (status == MotorActionExecutor::Status::ProtocolUnavailable) {
-                res.message = "Protocol not available.";
-            } else if (status == MotorActionExecutor::Status::Rejected) {
-                res.message =
-                    "Protocol rejected zero/limit settings (or unsupported by this protocol).";
-            } else {
-                res.message = "Set zero/limit execution failed.";
-            }
-            return true;
-        }
-    }
-
-    if (!commitLimits_ || !commitLimits_(req.motor_id, appliedMin, appliedMax, resolvedZeroOffset)) {
-        res.success = false;
-        res.message = "Failed to update local zero/limit state.";
-        return true;
-    }
-
-    res.success = true;
-    res.applied_min_rad = appliedMin;
-    res.applied_max_rad = appliedMax;
-    res.message = "OK";
+    res.success = ApplyLimitsByMotorId(req.motor_id,
+                                       req.min_position_rad,
+                                       req.max_position_rad,
+                                       req.use_urdf_limits,
+                                       req.apply_to_motor,
+                                       true,
+                                       &res.current_position_rad,
+                                       &res.applied_zero_offset_rad,
+                                       &res.applied_min_rad,
+                                       &res.applied_max_rad,
+                                       &res.message);
     return true;
 }

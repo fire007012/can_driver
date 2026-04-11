@@ -72,6 +72,7 @@ public:
     int64_t getPosition(MotorID) const override { return 0; }
     int16_t getCurrent(MotorID) const override { return 0; }
     int32_t getVelocity(MotorID) const override { return 0; }
+    bool readPositionOffset(MotorID, int32_t*) override { return false; }
     void initializeMotorRefresh(const std::vector<MotorID> &) override {}
 
     bool isEnabled(MotorID motorId) const override

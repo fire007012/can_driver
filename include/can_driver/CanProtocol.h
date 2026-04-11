@@ -187,6 +187,19 @@ public:
     }
 
     /**
+     * @brief 读取设备侧位置零偏（协议原始单位）
+     * @param motorId 目标电机 ID
+     * @param offsetRaw 输出偏置值
+     * @return 读取成功返回 true，否则 false
+     */
+    virtual bool readPositionOffset(MotorID motorId, int32_t* offsetRaw)
+    {
+        (void)motorId;
+        (void)offsetRaw;
+        return false;
+    }
+
+    /**
      * @brief 初始化电机信息刷新机制
      * @param motorIds 需要周期刷新状态的电机 ID 列表
      *

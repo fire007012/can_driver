@@ -1,4 +1,5 @@
 #include "can_driver/EyouCan.h"
+#include "can_driver/DeviceRuntime.h"
 
 #include <algorithm>
 #include <chrono>
@@ -105,10 +106,16 @@ EyouCan::EyouCan(std::shared_ptr<CanTransport> controller,
 
 EyouCan::~EyouCan()
 {
+    shuttingDown_.store(true, std::memory_order_release);
     stopRefreshLoop();
     if (canController && receiveHandlerId != 0) {
         canController->removeReceiveHandler(receiveHandlerId);
+        receiveHandlerId = 0;
     }
+    if (const auto runtime = std::dynamic_pointer_cast<DeviceRuntime>(txDispatcher_)) {
+        runtime->shutdown();
+    }
+    txDispatcher_.reset();
 }
 
 void EyouCan::initializeMotorRefresh(const std::vector<MotorID> &motorIds)
@@ -437,6 +444,14 @@ bool EyouCan::Enable(MotorID Id)
     }
     uint8_t motorId = toProtocolNodeId(Id);
     registerManagedMotorId(Id);
+    {
+        std::lock_guard<std::mutex> stateLock(stateMutex);
+        auto &state = motorStates[motorId];
+        // Mode-switch preload may write 0x09 while the axis is disabled. Some PP firmware
+        // does not retain/apply that velocity preconfiguration until the drive is enabled
+        // again, so force the first post-enable position/CSP command path to resend 0x09.
+        state.positionVelocityConfigured = false;
+    }
     syncSharedIntent(motorId, can_driver::AxisIntent::Enable);
     sendWriteCommand(motorId, 0x10, 0x00000001, 4);
     return true;
@@ -577,6 +592,39 @@ bool EyouCan::setPositionOffset(MotorID Id, int32_t offsetRaw)
     return true;
 }
 
+bool EyouCan::readPositionOffset(MotorID Id, int32_t* offsetRaw)
+{
+    if (!canController || offsetRaw == nullptr) {
+        return false;
+    }
+
+    const uint8_t motorId = toProtocolNodeId(Id);
+    registerManagedMotorId(Id);
+    {
+        std::lock_guard<std::mutex> stateLock(stateMutex);
+        motorStates[motorId].positionOffsetReceived = false;
+    }
+
+    if (!requestPositionOffset(motorId)) {
+        return false;
+    }
+
+    const auto deadline =
+        std::chrono::steady_clock::now() + std::chrono::milliseconds(200);
+    while (std::chrono::steady_clock::now() < deadline) {
+        {
+            std::lock_guard<std::mutex> stateLock(stateMutex);
+            const auto it = motorStates.find(motorId);
+            if (it != motorStates.end() && it->second.positionOffsetReceived) {
+                *offsetRaw = it->second.positionOffset;
+                return true;
+            }
+        }
+        std::this_thread::sleep_for(std::chrono::milliseconds(10));
+    }
+    return false;
+}
+
 void EyouCan::sendWriteCommand(uint8_t motorId,
                                uint8_t subCommand,
                                uint32_t value,
@@ -708,7 +756,7 @@ bool EyouCan::submitTx(const CanTransport::Frame &frame,
 
 bool EyouCan::tryIssueReadCommand(uint8_t motorId, uint8_t subCommand)
 {
-    if (!canController) {
+    if (shuttingDown_.load(std::memory_order_acquire) || !canController) {
         return false;
     }
 
@@ -733,6 +781,9 @@ void EyouCan::onReadDispatchResult(uint8_t motorId,
                                    CanTransport::SendResult sendResult,
                                    std::chrono::steady_clock::time_point eventTime)
 {
+    if (shuttingDown_.load(std::memory_order_acquire)) {
+        return;
+    }
     std::lock_guard<std::mutex> lock(pendingReadMutex_);
     auto it = pendingReadRequests_.find(pendingReadKey(motorId, subCommand));
     if (it == pendingReadRequests_.end()) {
@@ -949,6 +1000,9 @@ std::chrono::milliseconds EyouCan::feedbackStaleWarnThreshold(uint8_t subCommand
 // [FIX #2, #3, #4] 重写 handleResponse，修正写返回解析和读返回偏移
 void EyouCan::handleResponse(const CanTransport::Frame &frame)
 {
+    if (shuttingDown_.load(std::memory_order_acquire)) {
+        return;
+    }
     if (frame.isExtended || frame.dlc < 2) {
         return;
     }
@@ -1027,6 +1081,11 @@ void EyouCan::handleResponse(const CanTransport::Frame &frame)
                 // 当前位置值
                 state.position = readInt32BE(frame, 2);
                 state.positionReceived = true;  // [FIX #9]
+                break;
+            case 0x3B:
+                // 位置偏置参数
+                state.positionOffset = readInt32BE(frame, 2);
+                state.positionOffsetReceived = true;
                 break;
             case 0x0F:
                 // 当前工作模式
@@ -1116,6 +1175,11 @@ void EyouCan::registerManagedMotorId(MotorID motorId) const
 bool EyouCan::requestPosition(uint8_t motorId)
 {
     return tryIssueReadCommand(motorId, 0x07);
+}
+
+bool EyouCan::requestPositionOffset(uint8_t motorId)
+{
+    return tryIssueReadCommand(motorId, 0x3B);
 }
 
 bool EyouCan::requestMode(uint8_t motorId)

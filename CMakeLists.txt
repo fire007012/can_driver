@@ -64,10 +64,12 @@ add_message_files(
 ## Generate services in the 'srv' folder
 add_service_files(
   FILES
+  ApplyLimits.srv
   Init.srv
   Shutdown.srv
   Recover.srv
   MotorCommand.srv
+  SetZero.srv
   SetZeroLimit.srv
 )
 
