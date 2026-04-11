@@ -777,6 +777,44 @@ std::vector<CanDriverHW::DirectCommandEndpoint> CanDriverHW::directCommandEndpoi
     return endpoints;
 }
 
+std::vector<CanDriverHW::JointRuntimeStateView> CanDriverHW::snapshotJointRuntimeStates() const
+{
+    std::vector<JointRuntimeStateView> result;
+    result.reserve(joints_.size());
+
+    const auto sharedState = deviceManager_ ? deviceManager_->getSharedDriverState() : nullptr;
+
+    std::lock_guard<std::mutex> lock(jointStateMutex_);
+    for (const auto& joint : joints_) {
+        JointRuntimeStateView item;
+        item.jointName = joint.name;
+        item.controlMode = joint.controlMode;
+        item.position = joint.pos;
+        item.velocity = joint.vel;
+        item.effort = joint.eff;
+
+        if (sharedState) {
+            can_driver::SharedDriverState::AxisFeedbackState feedback;
+            const auto axisKey =
+                can_driver::MakeAxisKey(joint.canDevice, joint.protocol, joint.motorId);
+            if (sharedState->getAxisFeedback(axisKey, &feedback)) {
+                item.enabled = feedback.enabledValid && feedback.enabled;
+                item.fault = feedback.faultValid && feedback.fault;
+                item.feedbackFresh = sharedFeedbackFresh(feedback);
+            }
+
+            can_driver::SharedDriverState::AxisCommandState command;
+            if (sharedState->getAxisCommand(axisKey, &command)) {
+                item.commandValid = command.valid;
+            }
+        }
+
+        result.push_back(std::move(item));
+    }
+
+    return result;
+}
+
 void CanDriverHW::acceptDirectCommand(std::size_t jointIndex,
                                       bool isVelocity,
                                       double value,

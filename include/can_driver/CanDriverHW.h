@@ -61,6 +61,18 @@ public:
         std::size_t jointIndex{0};
     };
 
+    struct JointRuntimeStateView {
+        std::string jointName;
+        std::string controlMode;
+        double position{0.0};
+        double velocity{0.0};
+        double effort{0.0};
+        bool enabled{false};
+        bool fault{false};
+        bool feedbackFresh{false};
+        bool commandValid{false};
+    };
+
     CanDriverHW();
     explicit CanDriverHW(std::shared_ptr<IDeviceManager> deviceManager);
     ~CanDriverHW() override;
@@ -96,6 +108,7 @@ public:
     // 供 DriverRosEndpoints 使用的 ROS 装配辅助。
     void configureMotorMaintenanceService(MotorMaintenanceService &service);
     std::vector<DirectCommandEndpoint> directCommandEndpoints() const;
+    std::vector<JointRuntimeStateView> snapshotJointRuntimeStates() const;
     void acceptDirectCommand(std::size_t jointIndex,
                              bool isVelocity,
                              double value,
