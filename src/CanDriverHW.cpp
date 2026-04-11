@@ -750,8 +750,8 @@ void CanDriverHW::configureMotorMaintenanceService(MotorMaintenanceService &serv
         [this](uint16_t motorId, double* zeroOffset) {
             return getZeroOffset(motorId, zeroOffset);
         },
-        [this](uint16_t motorId, double appliedMin, double appliedMax, double zeroOffset) {
-            return commitLimits(motorId, appliedMin, appliedMax, zeroOffset);
+        [this](uint16_t motorId, double baseMin, double baseMax, double zeroOffset) {
+            return commitLimits(motorId, baseMin, baseMax, zeroOffset);
         },
         [this](const JointConfig &joint, can_driver::SharedDriverState::AxisFeedbackState *feedback) {
             return getFreshAxisFeedback(joint, feedback);
@@ -870,19 +870,15 @@ bool CanDriverHW::commitZero(uint16_t motorId,
             continue;
         }
         jointZeroOffsetRadByMotorId_[motorId] = zeroOffset;
-        if (joint.hasLimits && joint.limits.has_position_limits) {
-            const double delta = zeroOffset - previousZeroOffset;
-            joint.limits.min_position += delta;
-            joint.limits.max_position += delta;
-        }
+        (void)previousZeroOffset;
         return true;
     }
     return false;
 }
 
 bool CanDriverHW::commitLimits(uint16_t motorId,
-                               double appliedMin,
-                               double appliedMax,
+                               double baseMin,
+                               double baseMax,
                                double zeroOffset)
 {
     std::lock_guard<std::mutex> lock(jointStateMutex_);
@@ -892,8 +888,8 @@ bool CanDriverHW::commitLimits(uint16_t motorId,
         }
         joint.hasLimits = true;
         joint.limits.has_position_limits = true;
-        joint.limits.min_position = appliedMin;
-        joint.limits.max_position = appliedMax;
+        joint.limits.min_position = baseMin;
+        joint.limits.max_position = baseMax;
         jointZeroOffsetRadByMotorId_[motorId] = zeroOffset;
         return true;
     }

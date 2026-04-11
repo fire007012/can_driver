@@ -1938,13 +1938,13 @@ TEST_F(CanDriverHWSmokeTest, SetZeroLimitServiceCanAutoZeroFromCurrentPosition)
     ASSERT_TRUE(srv.response.success) << srv.response.message;
     EXPECT_NEAR(srv.response.current_position_rad, 0.1, 1e-4);
     EXPECT_NEAR(srv.response.applied_zero_offset_rad, -0.1, 1e-4);
-    EXPECT_NEAR(srv.response.applied_min_rad, -0.5, 1e-4);
-    EXPECT_NEAR(srv.response.applied_max_rad, 0.3, 1e-4);
+    EXPECT_NEAR(srv.response.applied_min_rad, -0.4, 1e-4);
+    EXPECT_NEAR(srv.response.applied_max_rad, 0.4, 1e-4);
     EXPECT_EQ(fakeDm->protocol()->setOffsetCalls(), 1);
     EXPECT_EQ(fakeDm->protocol()->setLimitCalls(), 1);
     EXPECT_EQ(fakeDm->protocol()->lastOffsetRaw(), -rawFromPprRadians(0.1));
-    EXPECT_EQ(fakeDm->protocol()->lastLimitMin(), rawFromPprRadians(-0.5));
-    EXPECT_EQ(fakeDm->protocol()->lastLimitMax(), rawFromPprRadians(0.3));
+    EXPECT_EQ(fakeDm->protocol()->lastLimitMin(), rawFromPprRadians(-0.4));
+    EXPECT_EQ(fakeDm->protocol()->lastLimitMax(), rawFromPprRadians(0.4));
     EXPECT_TRUE(fakeDm->protocol()->lastLimitEnable());
 
     spinner.stop();

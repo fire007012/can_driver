@@ -108,8 +108,8 @@ public:
                     double zeroOffset,
                     double previousZeroOffset);
     bool commitLimits(uint16_t motorId,
-                      double appliedMin,
-                      double appliedMax,
+                      double baseMin,
+                      double baseMax,
                       double zeroOffset);
     void publishMotorStates(ros::Publisher &publisher);
     void publishLifecycleState(ros::Publisher &publisher);

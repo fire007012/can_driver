@@ -614,12 +614,12 @@ bool MotorMaintenanceService::ApplyLimitsByMotorId(uint16_t motorId,
         *activeZeroOffsetRad = activeZeroOffset;
     }
 
-    const double resolvedMin = limits.baseMin + activeZeroOffset;
-    const double resolvedMax = limits.baseMax + activeZeroOffset;
+    const double resolvedMin = limits.baseMin;
+    const double resolvedMax = limits.baseMax;
     if (!std::isfinite(resolvedMin) || !std::isfinite(resolvedMax) ||
         resolvedMin >= resolvedMax) {
         if (message != nullptr) {
-            *message = "Invalid limit range after zero offset.";
+            *message = "Invalid limit range.";
         }
         return false;
     }
