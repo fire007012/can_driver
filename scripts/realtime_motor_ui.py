@@ -28,7 +28,7 @@ from std_msgs.msg import Float64, String
 from std_srvs.srv import Trigger
 
 from can_driver.msg import MotorState
-from can_driver.srv import Init, MotorCommand, Recover, SetZeroLimit, Shutdown
+from can_driver.srv import ApplyLimits, Init, MotorCommand, Recover, SetZero, SetZeroLimit, Shutdown
 
 # MotorCommand.srv 常量
 CMD_ENABLE = 0
@@ -201,6 +201,8 @@ class RealtimeMotorUI:
         self.srv_init = self._wait_service("init", Init)
         self.srv_shutdown = self._wait_service("shutdown", Shutdown)
         self.srv_recover = self._wait_service("recover", Recover)
+        self.srv_set_zero = self._wait_service("set_zero", SetZero)
+        self.srv_apply_limits = self._wait_service("apply_limits", ApplyLimits)
         self.srv_set_zero_limit = self._wait_service("set_zero_limit", SetZeroLimit)
         self.srv_enable = self._wait_service("enable", Trigger)
         self.srv_disable = self._wait_service("disable", Trigger)
@@ -231,6 +233,7 @@ class RealtimeMotorUI:
         self.limit_min = tk.DoubleVar(value=-1.0)
         self.limit_max = tk.DoubleVar(value=1.0)
         self.use_urdf_limits = tk.BooleanVar(value=False)
+        self.require_current_inside_limits = tk.BooleanVar(value=False)
         self.apply_to_motor = tk.BooleanVar(value=True)
         self.zero_limit_result = tk.StringVar(value="最近服务返回: --")
         self.status_text = tk.StringVar(
@@ -530,19 +533,34 @@ class RealtimeMotorUI:
         ttk.Checkbutton(row_zero2, text="使用URDF限位", variable=self.use_urdf_limits).pack(
             side=tk.LEFT, padx=4
         )
+        ttk.Checkbutton(
+            row_zero2,
+            text="要求当前点在限位内",
+            variable=self.require_current_inside_limits,
+        ).pack(side=tk.LEFT, padx=4)
         ttk.Checkbutton(row_zero2, text="按当前位置归零", variable=self.auto_zero_from_current).pack(
             side=tk.LEFT, padx=4
         )
         ttk.Checkbutton(row_zero2, text="下发到电机", variable=self.apply_to_motor).pack(
             side=tk.LEFT, padx=4
         )
-        ttk.Button(row_zero2, text="应用零点/限位", command=self._apply_zero_limit).pack(
+        ttk.Button(row_zero2, text="仅设零", command=self._apply_zero_only).pack(
             side=tk.LEFT, padx=8
         )
         ttk.Button(
             row_zero2,
+            text="仅应用限位",
+            command=self._apply_limits_only,
+        ).pack(side=tk.LEFT, padx=4)
+        ttk.Button(
+            row_zero2,
+            text="设零+限位",
+            command=lambda: self._apply_zero_and_limits(force_auto_zero=False, force_apply_to_motor=False),
+        ).pack(side=tk.LEFT, padx=4)
+        ttk.Button(
+            row_zero2,
             text="当前位置归零并应用",
-            command=lambda: self._apply_zero_limit(force_auto_zero=True, force_apply_to_motor=True),
+            command=lambda: self._apply_zero_and_limits(force_auto_zero=True, force_apply_to_motor=True),
         ).pack(side=tk.LEFT, padx=4)
         ttk.Label(row_zero2, textvariable=self.zero_limit_result, foreground="#0b5d86").pack(
             side=tk.LEFT, padx=8
@@ -843,39 +861,34 @@ class RealtimeMotorUI:
     def _motor_disable(self) -> None:
         self._send_motor_service(CMD_DISABLE)
 
-    def _apply_zero_limit(
+    def _apply_zero_only(
         self, force_auto_zero: bool = False, force_apply_to_motor: bool = False
     ) -> None:
         cfg = self._get_joint_cfg(self.selected_joint.get())
-        self.status_text.set(f"{cfg['name']} 零点/限位应用中 ...")
+        self.status_text.set(f"{cfg['name']} 设零中 ...")
         use_auto_zero = bool(self.auto_zero_from_current.get() or force_auto_zero)
         apply_to_motor = bool(self.apply_to_motor.get() or force_apply_to_motor)
 
         def _run():
             try:
-                res = self.srv_set_zero_limit(
+                res = self.srv_set_zero(
                     motor_id=cfg["motor_id"],
                     zero_offset_rad=float(self.zero_offset.get()),
                     use_current_position_as_zero=use_auto_zero,
-                    min_position_rad=float(self.limit_min.get()),
-                    max_position_rad=float(self.limit_max.get()),
-                    use_urdf_limits=bool(self.use_urdf_limits.get()),
                     apply_to_motor=apply_to_motor,
                 )
 
                 def _finish():
                     if res.success:
-                        self.status_text.set(
-                            f"{cfg['name']} 零点/限位已应用: {res.message}"
-                        )
+                        self.status_text.set(f"{cfg['name']} 设零完成: {res.message}")
                         self.zero_limit_result.set(
                             "最近服务返回: "
+                            f"prev_offset={res.previous_zero_offset_rad:.4f}, "
                             f"offset={res.applied_zero_offset_rad:.4f}, "
-                            f"pos={res.current_position_rad:.4f}, "
-                            f"[{res.applied_min_rad:.4f}, {res.applied_max_rad:.4f}]"
+                            f"pos={res.current_position_rad:.4f}"
                         )
                     else:
-                        self.status_text.set(f"{cfg['name']} 零点/限位失败: {res.message}")
+                        self.status_text.set(f"{cfg['name']} 设零失败: {res.message}")
                         self.zero_limit_result.set(f"最近服务返回: 失败 ({res.message})")
 
                 self.root.after(0, _finish)
@@ -883,7 +896,113 @@ class RealtimeMotorUI:
                 self.root.after(
                     0,
                     lambda: (
-                        self.status_text.set(f"{cfg['name']} 零点/限位异常: {exc}"),
+                        self.status_text.set(f"{cfg['name']} 设零异常: {exc}"),
+                        self.zero_limit_result.set(f"最近服务返回: 异常 ({exc})"),
+                    ),
+                )
+
+        threading.Thread(target=_run, daemon=True).start()
+
+    def _apply_limits_only(self) -> None:
+        cfg = self._get_joint_cfg(self.selected_joint.get())
+        self.status_text.set(f"{cfg['name']} 应用限位中 ...")
+
+        def _run():
+            try:
+                res = self.srv_apply_limits(
+                    motor_id=cfg["motor_id"],
+                    min_position_rad=float(self.limit_min.get()),
+                    max_position_rad=float(self.limit_max.get()),
+                    use_urdf_limits=bool(self.use_urdf_limits.get()),
+                    apply_to_motor=bool(self.apply_to_motor.get()),
+                    require_current_inside_limits=bool(
+                        self.require_current_inside_limits.get()
+                    ),
+                )
+
+                def _finish():
+                    if res.success:
+                        self.status_text.set(f"{cfg['name']} 限位已应用: {res.message}")
+                        self.zero_limit_result.set(
+                            "最近服务返回: "
+                            f"offset={res.active_zero_offset_rad:.4f}, "
+                            f"pos={res.current_position_rad:.4f}, "
+                            f"[{res.applied_min_rad:.4f}, {res.applied_max_rad:.4f}]"
+                        )
+                    else:
+                        self.status_text.set(f"{cfg['name']} 限位失败: {res.message}")
+                        self.zero_limit_result.set(f"最近服务返回: 失败 ({res.message})")
+
+                self.root.after(0, _finish)
+            except Exception as exc:
+                self.root.after(
+                    0,
+                    lambda: (
+                        self.status_text.set(f"{cfg['name']} 限位异常: {exc}"),
+                        self.zero_limit_result.set(f"最近服务返回: 异常 ({exc})"),
+                    ),
+                )
+
+        threading.Thread(target=_run, daemon=True).start()
+
+    def _apply_zero_and_limits(
+        self, force_auto_zero: bool = False, force_apply_to_motor: bool = False
+    ) -> None:
+        cfg = self._get_joint_cfg(self.selected_joint.get())
+        self.status_text.set(f"{cfg['name']} 设零+限位应用中 ...")
+        use_auto_zero = bool(self.auto_zero_from_current.get() or force_auto_zero)
+        apply_to_motor = bool(self.apply_to_motor.get() or force_apply_to_motor)
+
+        def _run():
+            try:
+                zero_res = self.srv_set_zero(
+                    motor_id=cfg["motor_id"],
+                    zero_offset_rad=float(self.zero_offset.get()),
+                    use_current_position_as_zero=use_auto_zero,
+                    apply_to_motor=apply_to_motor,
+                )
+                if not zero_res.success:
+                    self.root.after(
+                        0,
+                        lambda: (
+                            self.status_text.set(f"{cfg['name']} 设零失败: {zero_res.message}"),
+                            self.zero_limit_result.set(f"最近服务返回: 失败 ({zero_res.message})"),
+                        ),
+                    )
+                    return
+
+                limits_res = self.srv_apply_limits(
+                    motor_id=cfg["motor_id"],
+                    min_position_rad=float(self.limit_min.get()),
+                    max_position_rad=float(self.limit_max.get()),
+                    use_urdf_limits=bool(self.use_urdf_limits.get()),
+                    apply_to_motor=apply_to_motor,
+                    require_current_inside_limits=bool(
+                        self.require_current_inside_limits.get()
+                    ),
+                )
+
+                def _finish():
+                    if limits_res.success:
+                        self.status_text.set(f"{cfg['name']} 设零+限位完成: {limits_res.message}")
+                        self.zero_limit_result.set(
+                            "最近服务返回: "
+                            f"offset={zero_res.applied_zero_offset_rad:.4f}, "
+                            f"pos={limits_res.current_position_rad:.4f}, "
+                            f"[{limits_res.applied_min_rad:.4f}, {limits_res.applied_max_rad:.4f}]"
+                        )
+                    else:
+                        self.status_text.set(f"{cfg['name']} 限位失败: {limits_res.message}")
+                        self.zero_limit_result.set(
+                            f"最近服务返回: 设零成功，但限位失败 ({limits_res.message})"
+                        )
+
+                self.root.after(0, _finish)
+            except Exception as exc:
+                self.root.after(
+                    0,
+                    lambda: (
+                        self.status_text.set(f"{cfg['name']} 设零/限位异常: {exc}"),
                         self.zero_limit_result.set(f"最近服务返回: 异常 ({exc})"),
                     ),
                 )
