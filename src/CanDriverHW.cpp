@@ -315,10 +315,11 @@ bool CanDriverHW::syncStartupPositionAndCommands(const std::string &deviceFilter
                 }
 
                 snapshots[i].pos =
-                    static_cast<double>(feedback.position) * jc.positionScale;
+                    static_cast<double>(feedback.position) *
+                    can_driver::effectivePositionScale(jc);
                 snapshots[i].vel = feedback.velocityValid
                                        ? static_cast<double>(feedback.velocity) *
-                                             jc.velocityScale
+                                             can_driver::effectiveVelocityScale(jc)
                                        : 0.0;
                 snapshots[i].eff =
                     feedback.currentValid ? static_cast<double>(feedback.current) : 0.0;
@@ -444,10 +445,10 @@ bool CanDriverHW::syncStartupPositionAndCommands(const std::string &deviceFilter
                     const auto &jc = joints_[i];
                     snapshots[i].pos =
                         static_cast<double>(proto->getPosition(jc.motorId)) *
-                        jc.positionScale;
+                        can_driver::effectivePositionScale(jc);
                     snapshots[i].vel =
                         static_cast<double>(proto->getVelocity(jc.motorId)) *
-                        jc.velocityScale;
+                        can_driver::effectiveVelocityScale(jc);
                     snapshots[i].eff =
                         static_cast<double>(proto->getCurrent(jc.motorId));
                     snapshots[i].valid = true;

@@ -127,15 +127,26 @@ inline double controlModeActualFeedbackValue(const CanDriverJointConfig &joint, 
     return controlModeUsesVelocitySemantics(mode) ? joint.vel : joint.pos;
 }
 
+inline double effectivePositionScale(const CanDriverJointConfig &joint)
+{
+    return joint.positionScale * joint.directionSign;
+}
+
+inline double effectiveVelocityScale(const CanDriverJointConfig &joint)
+{
+    return joint.velocityScale * joint.directionSign;
+}
+
 inline double controlModeScale(const CanDriverJointConfig &joint, AxisControlMode mode)
 {
-    return controlModeUsesVelocitySemantics(mode) ? joint.velocityScale : joint.positionScale;
+    return controlModeUsesVelocitySemantics(mode) ? effectiveVelocityScale(joint)
+                                                  : effectivePositionScale(joint);
 }
 
 inline double controlModeAlignmentTolerance(const CanDriverJointConfig &joint,
                                             AxisControlMode mode)
 {
-    return std::max(controlModeScale(joint, mode), 1e-9);
+    return std::max(std::fabs(controlModeScale(joint, mode)), 1e-9);
 }
 
 inline bool controlModeTargetNearActual(const CanDriverJointConfig &joint, AxisControlMode mode)

@@ -639,7 +639,7 @@ protected:
             << "test_can_driver_hw_smoke requires a running ROS master; run it via rostest.";
     }
 
-    static XmlRpc::XmlRpcValue makeSingleVelocityJoint()
+    static XmlRpc::XmlRpcValue makeSingleVelocityJoint(double directionSign = 1.0)
     {
         XmlRpc::XmlRpcValue joints;
         joints.setSize(1);
@@ -650,10 +650,11 @@ protected:
         joints[0]["control_mode"] = "velocity";
         joints[0]["velocity_scale"] = 0.1;
         joints[0]["position_scale"] = 1.0;
+        joints[0]["direction_sign"] = directionSign;
         return joints;
     }
 
-    static XmlRpc::XmlRpcValue makeSingleCspJoint()
+    static XmlRpc::XmlRpcValue makeSingleCspJoint(double directionSign = 1.0)
     {
         XmlRpc::XmlRpcValue joints;
         joints.setSize(1);
@@ -664,6 +665,7 @@ protected:
         joints[0]["control_mode"] = "csp";
         joints[0]["position_scale"] = 65536;
         joints[0]["velocity_scale"] = 65536;
+        joints[0]["direction_sign"] = directionSign;
         return joints;
     }
 
@@ -1860,6 +1862,108 @@ TEST_F(CanDriverHWSmokeTest, DispatchPreparedCommandsKeepsPrepareTimeRoutingSnap
     EXPECT_EQ(fakeDm->protocol()->velocityCalls(), 0);
     EXPECT_EQ(fakeDm->protocol()->lastQuickPositionMotor(), 0x05u);
     EXPECT_EQ(fakeDm->protocol()->lastQuickPosition(), rawFromPprRadians(1.0));
+}
+
+TEST_F(CanDriverHWSmokeTest, SyncJointFeedbackAppliesNegativeDirectionSign)
+{
+    auto fakeDm = std::make_shared<FakeDeviceManager>();
+
+    std::deque<can_driver::CanDriverJointConfig> joints(1);
+    joints[0].name = "test_arm";
+    joints[0].motorId = static_cast<MotorID>(0x05);
+    joints[0].protocol = CanType::PP;
+    joints[0].canDevice = "fake0";
+    joints[0].controlMode = "csp";
+    joints[0].positionScale = 2.0 * M_PI / 65536.0;
+    joints[0].velocityScale = 2.0 * M_PI / 65536.0;
+    joints[0].directionSign = -1.0;
+
+    fakeDm->protocol()->setFeedbackPosition(rawFromPprRadians(0.25));
+    fakeDm->protocol()->setFeedbackVelocity(static_cast<int16_t>(rawFromPprRadians(0.5)));
+    fakeDm->protocol()->setFeedbackCurrent(7);
+
+    std::vector<can_driver::CanDriverDeviceProtocolGroup> groups{
+        {"fake0", CanType::PP, {0}},
+    };
+    std::mutex jointStateMutex;
+
+    can_driver::CanDriverIoRuntime::SyncJointFeedback(*fakeDm,
+                                                      groups,
+                                                      &joints,
+                                                      &jointStateMutex);
+
+    std::lock_guard<std::mutex> lock(jointStateMutex);
+    EXPECT_NEAR(joints[0].pos, -0.25, 1e-4);
+    EXPECT_NEAR(joints[0].vel, -0.5, 1e-4);
+    EXPECT_DOUBLE_EQ(joints[0].eff, 7.0);
+}
+
+TEST_F(CanDriverHWSmokeTest, PrepareCommandsAppliesNegativeDirectionSignToPosition)
+{
+    ros::Time::init();
+
+    std::deque<can_driver::CanDriverJointConfig> joints(1);
+    joints[0].name = "test_arm";
+    joints[0].motorId = static_cast<MotorID>(0x05);
+    joints[0].protocol = CanType::PP;
+    joints[0].canDevice = "fake0";
+    joints[0].controlMode = "csp";
+    joints[0].positionScale = 2.0 * M_PI / 65536.0;
+    joints[0].velocityScale = 2.0 * M_PI / 65536.0;
+    joints[0].directionSign = -1.0;
+    joints[0].posCmd = 0.25;
+
+    std::vector<int32_t> rawCommandBuffer(1, 0);
+    std::vector<uint8_t> commandValidBuffer(1, 0);
+    std::vector<can_driver::CanDriverPreparedCommand> preparedCommandBuffer(
+        1, can_driver::CanDriverPreparedCommand{});
+    std::mutex jointStateMutex;
+    can_driver::CanDriverIoRuntime::WriteConfig config;
+
+    can_driver::CanDriverIoRuntime::PrepareCommands(&joints,
+                                                    &rawCommandBuffer,
+                                                    &commandValidBuffer,
+                                                    &preparedCommandBuffer,
+                                                    &jointStateMutex,
+                                                    config);
+
+    EXPECT_EQ(commandValidBuffer[0], 1);
+    EXPECT_TRUE(preparedCommandBuffer[0].valid);
+    EXPECT_EQ(rawCommandBuffer[0], -rawFromPprRadians(0.25));
+}
+
+TEST_F(CanDriverHWSmokeTest, PrepareCommandsAppliesNegativeDirectionSignToVelocity)
+{
+    ros::Time::init();
+
+    std::deque<can_driver::CanDriverJointConfig> joints(1);
+    joints[0].name = "test_wheel";
+    joints[0].motorId = static_cast<MotorID>(0x141);
+    joints[0].protocol = CanType::MT;
+    joints[0].canDevice = "fake0";
+    joints[0].controlMode = "velocity";
+    joints[0].positionScale = 1.0;
+    joints[0].velocityScale = 0.1;
+    joints[0].directionSign = -1.0;
+    joints[0].velCmd = 1.2;
+
+    std::vector<int32_t> rawCommandBuffer(1, 0);
+    std::vector<uint8_t> commandValidBuffer(1, 0);
+    std::vector<can_driver::CanDriverPreparedCommand> preparedCommandBuffer(
+        1, can_driver::CanDriverPreparedCommand{});
+    std::mutex jointStateMutex;
+    can_driver::CanDriverIoRuntime::WriteConfig config;
+
+    can_driver::CanDriverIoRuntime::PrepareCommands(&joints,
+                                                    &rawCommandBuffer,
+                                                    &commandValidBuffer,
+                                                    &preparedCommandBuffer,
+                                                    &jointStateMutex,
+                                                    config);
+
+    EXPECT_EQ(commandValidBuffer[0], 1);
+    EXPECT_TRUE(preparedCommandBuffer[0].valid);
+    EXPECT_EQ(rawCommandBuffer[0], -12);
 }
 
 TEST_F(CanDriverHWSmokeTest, SetZeroLimitServiceAcceptsCspJoint)

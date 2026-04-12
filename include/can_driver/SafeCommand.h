@@ -13,6 +13,7 @@ int32_t clampToInt32(double value);
 int16_t clampToInt16(double value);
 /**
  * @brief 先按比例缩放命令值，再安全转换为 int32。
+ * @note scale 允许为正或负，但不能为 0；负号可用于方向翻转。
  * @return true 表示输出有效；false 表示输入非法（out 保持不变）
  */
 bool scaleAndClampToInt32(double cmdValue,

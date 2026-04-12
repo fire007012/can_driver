@@ -69,9 +69,11 @@ public:
             for (const std::size_t index : group.jointIndices) {
                 const auto &joint = (*joints)[index];
                 snapshots[index].pos =
-                    static_cast<double>(proto->getPosition(joint.motorId)) * joint.positionScale;
+                    static_cast<double>(proto->getPosition(joint.motorId)) *
+                    can_driver::effectivePositionScale(joint);
                 snapshots[index].vel =
-                    static_cast<double>(proto->getVelocity(joint.motorId)) * joint.velocityScale;
+                    static_cast<double>(proto->getVelocity(joint.motorId)) *
+                    can_driver::effectiveVelocityScale(joint);
                 snapshots[index].eff = static_cast<double>(proto->getCurrent(joint.motorId));
                 snapshots[index].valid = true;
             }
