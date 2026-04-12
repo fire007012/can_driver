@@ -185,6 +185,7 @@ TEST(JointConfigParser, ParseUsesDefaultScalesWhenNotProvided)
     EXPECT_EQ(static_cast<uint16_t>(out[0].motorId), 7u);
     EXPECT_DOUBLE_EQ(out[0].positionScale, 1.0);
     EXPECT_DOUBLE_EQ(out[0].velocityScale, 1.0);
+    EXPECT_DOUBLE_EQ(out[0].directionSign, 1.0);
     EXPECT_DOUBLE_EQ(out[0].ipMaxVelocity, 1.0);
     EXPECT_DOUBLE_EQ(out[0].ipMaxAcceleration, 2.0);
     EXPECT_DOUBLE_EQ(out[0].ipMaxJerk, 10.0);
@@ -205,6 +206,60 @@ TEST(JointConfigParser, ParseReadsExplicitScales)
     ASSERT_EQ(out.size(), 1u);
     EXPECT_DOUBLE_EQ(out[0].positionScale, 0.01);
     EXPECT_DOUBLE_EQ(out[0].velocityScale, 0.02);
+}
+
+TEST(JointConfigParser, ParseReadsPositiveDirectionSign)
+{
+    XmlRpc::XmlRpcValue motorId(13);
+    auto joint = makeJointBase("joint_direction_positive", motorId);
+    joint["direction_sign"] = 1;
+    auto list = makeJointList(joint);
+
+    std::vector<joint_config_parser::ParsedJointConfig> out;
+    std::string err;
+    ASSERT_TRUE(parse(list, out, err));
+    ASSERT_EQ(out.size(), 1u);
+    EXPECT_DOUBLE_EQ(out[0].directionSign, 1.0);
+}
+
+TEST(JointConfigParser, ParseReadsNegativeDirectionSign)
+{
+    XmlRpc::XmlRpcValue motorId(14);
+    auto joint = makeJointBase("joint_direction_negative", motorId);
+    joint["direction_sign"] = -1;
+    auto list = makeJointList(joint);
+
+    std::vector<joint_config_parser::ParsedJointConfig> out;
+    std::string err;
+    ASSERT_TRUE(parse(list, out, err));
+    ASSERT_EQ(out.size(), 1u);
+    EXPECT_DOUBLE_EQ(out[0].directionSign, -1.0);
+}
+
+TEST(JointConfigParser, ParseRejectsZeroDirectionSign)
+{
+    XmlRpc::XmlRpcValue motorId(15);
+    auto joint = makeJointBase("joint_direction_zero", motorId);
+    joint["direction_sign"] = 0;
+    auto list = makeJointList(joint);
+
+    std::vector<joint_config_parser::ParsedJointConfig> out;
+    std::string err;
+    EXPECT_FALSE(parse(list, out, err));
+    EXPECT_NE(err.find("direction_sign must be either 1 or -1"), std::string::npos);
+}
+
+TEST(JointConfigParser, ParseRejectsInvalidDirectionSign)
+{
+    XmlRpc::XmlRpcValue motorId(16);
+    auto joint = makeJointBase("joint_direction_invalid", motorId);
+    joint["direction_sign"] = 2;
+    auto list = makeJointList(joint);
+
+    std::vector<joint_config_parser::ParsedJointConfig> out;
+    std::string err;
+    EXPECT_FALSE(parse(list, out, err));
+    EXPECT_NE(err.find("direction_sign must be either 1 or -1"), std::string::npos);
 }
 
 TEST(JointConfigParser, ParseConvertsPprToNormalizedScale)

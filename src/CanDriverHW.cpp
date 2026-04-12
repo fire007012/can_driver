@@ -564,6 +564,7 @@ bool CanDriverHW::parseAndSetupJoints(const ros::NodeHandle &pnh)
         jc.protocol = p.protocol;
         jc.positionScale = p.positionScale;
         jc.velocityScale = p.velocityScale;
+        jc.directionSign = p.directionSign;
         jc.ipMaxVelocity = p.ipMaxVelocity;
         jc.ipMaxAcceleration = p.ipMaxAcceleration;
         jc.ipMaxJerk = p.ipMaxJerk;

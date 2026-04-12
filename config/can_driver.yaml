@@ -93,6 +93,7 @@ can_driver_node:
       control_mode: csp
       position_scale: 65536  # 16-bit 编码器，PPR → 驱动自动换算为 2π/65536 rad/count
       velocity_scale: 65536
+      direction_sign: -1.0   # 物理方向与系统正方向相反时填写 -1.0
       ip_max_velocity: 1.0
       ip_max_acceleration: 2.0
       ip_max_jerk: 10.0
@@ -111,7 +112,7 @@ can_driver_node:
       ip_goal_tolerance: 0.001
 
     - name: wrist_roll_joint     # 腕部滚转（第 5 轴）
-      motor_id: 0x15
+      motor_id: 0x16
       protocol: PP
       can_device: can1
       control_mode: csp
@@ -119,7 +120,7 @@ can_driver_node:
       velocity_scale: 65536
 
     - name: wrist_yaw_joint      # 腕部偏航（第 6 轴）
-      motor_id: 0x16
+      motor_id: 0x15
       protocol: PP
       can_device: can1
       control_mode: csp
@@ -141,4 +142,5 @@ can_driver_node:
     #      示例：position_scale: 9.587379924285257e-05   # = 2π/65536
     #   2. 填每圈脉冲数 PPR（>=2 的整数），驱动自动换算为 2π/PPR
     #      示例：position_scale: 65536                   # 16-bit 编码器
+    #   direction_sign 仅用于方向修正，只允许填写 1.0 或 -1.0
     # --------------------------------------------------------------------------

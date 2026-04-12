@@ -67,6 +67,34 @@ bool parseNonNegativeOptionalDouble(const XmlRpc::XmlRpcValue &jointValue,
     return true;
 }
 
+bool parseDirectionSign(const XmlRpc::XmlRpcValue &jointValue,
+                        const std::string &jointName,
+                        double *out,
+                        std::string &errorMsg)
+{
+    if (!jointValue.hasMember("direction_sign")) {
+        return true;
+    }
+
+    const auto &value = jointValue["direction_sign"];
+    if (value.getType() != XmlRpc::XmlRpcValue::TypeInt &&
+        value.getType() != XmlRpc::XmlRpcValue::TypeDouble) {
+        errorMsg = "Joint '" + jointName + "': direction_sign must be either 1 or -1.";
+        return false;
+    }
+
+    const double parsed = (value.getType() == XmlRpc::XmlRpcValue::TypeInt)
+                              ? static_cast<double>(static_cast<int>(value))
+                              : static_cast<double>(value);
+    if (parsed != 1.0 && parsed != -1.0) {
+        errorMsg = "Joint '" + jointName + "': direction_sign must be either 1 or -1.";
+        return false;
+    }
+
+    *out = parsed;
+    return true;
+}
+
 } // namespace
 
 // 支持 int 或 string（十进制/十六进制）两种配置形式。
@@ -157,6 +185,9 @@ bool parse(const XmlRpc::XmlRpcValue &jointList,
         }
         if (!std::isfinite(jc.velocityScale) || jc.velocityScale <= 0.0) {
             errorMsg = "Joint '" + jc.name + "': invalid velocity_scale.";
+            return false;
+        }
+        if (!parseDirectionSign(jv, jc.name, &jc.directionSign, errorMsg)) {
             return false;
         }
         if (!parsePositiveOptionalDouble(jv, "ip_max_velocity", jc.name,
