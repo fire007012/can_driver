@@ -14,6 +14,7 @@
 #include <string>
 #include <thread>
 #include <tuple>
+#include <unordered_map>
 #include <xmlrpcpp/XmlRpcValue.h>
 
 namespace {
@@ -783,6 +784,7 @@ std::vector<CanDriverHW::JointRuntimeStateView> CanDriverHW::snapshotJointRuntim
     result.reserve(joints_.size());
 
     const auto sharedState = deviceManager_ ? deviceManager_->getSharedDriverState() : nullptr;
+    std::unordered_map<std::string, bool> deviceReadyByName;
 
     std::lock_guard<std::mutex> lock(jointStateMutex_);
     for (const auto& joint : joints_) {
@@ -792,6 +794,16 @@ std::vector<CanDriverHW::JointRuntimeStateView> CanDriverHW::snapshotJointRuntim
         item.position = joint.pos;
         item.velocity = joint.vel;
         item.effort = joint.eff;
+
+        const auto deviceReadyIt = deviceReadyByName.find(joint.canDevice);
+        if (deviceReadyIt != deviceReadyByName.end()) {
+            item.deviceReady = deviceReadyIt->second;
+        } else {
+            const bool deviceReady =
+                deviceManager_ ? deviceManager_->isDeviceReady(joint.canDevice) : false;
+            deviceReadyByName.emplace(joint.canDevice, deviceReady);
+            item.deviceReady = deviceReady;
+        }
 
         if (sharedState) {
             can_driver::SharedDriverState::AxisFeedbackState feedback;

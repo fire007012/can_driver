@@ -218,6 +218,29 @@ TEST_F(EyouCanCSPTest, QuickSetPositionResendsVelocityAfterModeSwitch)
     EXPECT_EQ(transport->sentFrames[1].data[1], 0x0A);
 }
 
+TEST_F(EyouCanCSPTest, QuickSetPositionResendsVelocityAfterEnable)
+{
+    constexpr MotorID kMotorId = static_cast<MotorID>(0x05);
+
+    ASSERT_TRUE(eyou.quickSetPosition(kMotorId, 1000));
+    ASSERT_EQ(transport->sentFrames.size(), 2u);
+
+    transport->clearSent();
+    txDispatcher->requests.clear();
+    ASSERT_TRUE(eyou.Enable(kMotorId));
+    ASSERT_EQ(transport->sentFrames.size(), 1u);
+    EXPECT_EQ(transport->sentFrames[0].data[1], 0x10);
+
+    transport->clearSent();
+    txDispatcher->requests.clear();
+    ASSERT_TRUE(eyou.quickSetPosition(kMotorId, 2000));
+    ASSERT_EQ(transport->sentFrames.size(), 2u);
+    EXPECT_EQ(transport->sentFrames[0].data[0], 0x01);
+    EXPECT_EQ(transport->sentFrames[0].data[1], 0x09);
+    EXPECT_EQ(transport->sentFrames[1].data[0], 0x05);
+    EXPECT_EQ(transport->sentFrames[1].data[1], 0x0A);
+}
+
 int main(int argc, char **argv)
 {
     testing::InitGoogleTest(&argc, argv);

@@ -22,6 +22,10 @@ struct ParsedJointConfig {
     CanType protocol{CanType::MT};       ///< 协议类型
     double positionScale{1.0};           ///< 位置单位换算比例
     double velocityScale{1.0};           ///< 速度单位换算比例
+    double ipMaxVelocity{1.0};           ///< IP executor 最大速度（rad/s）
+    double ipMaxAcceleration{2.0};       ///< IP executor 最大加速度（rad/s^2）
+    double ipMaxJerk{10.0};              ///< IP executor 最大 jerk（rad/s^3）
+    double ipGoalTolerance{1e-3};        ///< IP executor 终点容差（rad）
 };
 
 /**

@@ -7,6 +7,68 @@
 
 namespace joint_config_parser {
 
+namespace {
+
+bool parsePositiveOptionalDouble(const XmlRpc::XmlRpcValue &jointValue,
+                                 const char *fieldName,
+                                 const std::string &jointName,
+                                 double *out,
+                                 std::string &errorMsg)
+{
+    if (!jointValue.hasMember(fieldName)) {
+        return true;
+    }
+
+    const auto &value = jointValue[fieldName];
+    if (value.getType() != XmlRpc::XmlRpcValue::TypeInt &&
+        value.getType() != XmlRpc::XmlRpcValue::TypeDouble) {
+        errorMsg = "Joint '" + jointName + "': invalid " + fieldName + ".";
+        return false;
+    }
+
+    const double parsed = (value.getType() == XmlRpc::XmlRpcValue::TypeInt)
+                              ? static_cast<double>(static_cast<int>(value))
+                              : static_cast<double>(value);
+    if (!std::isfinite(parsed) || parsed <= 0.0) {
+        errorMsg = "Joint '" + jointName + "': invalid " + fieldName + ".";
+        return false;
+    }
+
+    *out = parsed;
+    return true;
+}
+
+bool parseNonNegativeOptionalDouble(const XmlRpc::XmlRpcValue &jointValue,
+                                    const char *fieldName,
+                                    const std::string &jointName,
+                                    double *out,
+                                    std::string &errorMsg)
+{
+    if (!jointValue.hasMember(fieldName)) {
+        return true;
+    }
+
+    const auto &value = jointValue[fieldName];
+    if (value.getType() != XmlRpc::XmlRpcValue::TypeInt &&
+        value.getType() != XmlRpc::XmlRpcValue::TypeDouble) {
+        errorMsg = "Joint '" + jointName + "': invalid " + fieldName + ".";
+        return false;
+    }
+
+    const double parsed = (value.getType() == XmlRpc::XmlRpcValue::TypeInt)
+                              ? static_cast<double>(static_cast<int>(value))
+                              : static_cast<double>(value);
+    if (!std::isfinite(parsed) || parsed < 0.0) {
+        errorMsg = "Joint '" + jointName + "': invalid " + fieldName + ".";
+        return false;
+    }
+
+    *out = parsed;
+    return true;
+}
+
+} // namespace
+
 // 支持 int 或 string（十进制/十六进制）两种配置形式。
 bool parseMotorId(const XmlRpc::XmlRpcValue &value,
                   const std::string &jointName,
@@ -95,6 +157,22 @@ bool parse(const XmlRpc::XmlRpcValue &jointList,
         }
         if (!std::isfinite(jc.velocityScale) || jc.velocityScale <= 0.0) {
             errorMsg = "Joint '" + jc.name + "': invalid velocity_scale.";
+            return false;
+        }
+        if (!parsePositiveOptionalDouble(jv, "ip_max_velocity", jc.name,
+                                         &jc.ipMaxVelocity, errorMsg)) {
+            return false;
+        }
+        if (!parsePositiveOptionalDouble(jv, "ip_max_acceleration", jc.name,
+                                         &jc.ipMaxAcceleration, errorMsg)) {
+            return false;
+        }
+        if (!parsePositiveOptionalDouble(jv, "ip_max_jerk", jc.name,
+                                         &jc.ipMaxJerk, errorMsg)) {
+            return false;
+        }
+        if (!parseNonNegativeOptionalDouble(jv, "ip_goal_tolerance", jc.name,
+                                            &jc.ipGoalTolerance, errorMsg)) {
             return false;
         }
 

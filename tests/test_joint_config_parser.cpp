@@ -185,6 +185,10 @@ TEST(JointConfigParser, ParseUsesDefaultScalesWhenNotProvided)
     EXPECT_EQ(static_cast<uint16_t>(out[0].motorId), 7u);
     EXPECT_DOUBLE_EQ(out[0].positionScale, 1.0);
     EXPECT_DOUBLE_EQ(out[0].velocityScale, 1.0);
+    EXPECT_DOUBLE_EQ(out[0].ipMaxVelocity, 1.0);
+    EXPECT_DOUBLE_EQ(out[0].ipMaxAcceleration, 2.0);
+    EXPECT_DOUBLE_EQ(out[0].ipMaxJerk, 10.0);
+    EXPECT_DOUBLE_EQ(out[0].ipGoalTolerance, 1e-3);
 }
 
 TEST(JointConfigParser, ParseReadsExplicitScales)
@@ -217,6 +221,52 @@ TEST(JointConfigParser, ParseConvertsPprToNormalizedScale)
     ASSERT_EQ(out.size(), 1u);
     EXPECT_NEAR(out[0].positionScale, 2.0 * M_PI / 65536.0, 1e-12);
     EXPECT_NEAR(out[0].velocityScale, 2.0 * M_PI / 32768.0, 1e-12);
+}
+
+TEST(JointConfigParser, ParseReadsIpExecutorLimits)
+{
+    XmlRpc::XmlRpcValue motorId(10);
+    auto joint = makeJointBase("joint_ip_limits", motorId, "PP");
+    joint["ip_max_velocity"] = 1.5;
+    joint["ip_max_acceleration"] = 3.5;
+    joint["ip_max_jerk"] = 12.5;
+    joint["ip_goal_tolerance"] = 0.0025;
+    auto list = makeJointList(joint);
+
+    std::vector<joint_config_parser::ParsedJointConfig> out;
+    std::string err;
+    ASSERT_TRUE(parse(list, out, err));
+    ASSERT_EQ(out.size(), 1u);
+    EXPECT_DOUBLE_EQ(out[0].ipMaxVelocity, 1.5);
+    EXPECT_DOUBLE_EQ(out[0].ipMaxAcceleration, 3.5);
+    EXPECT_DOUBLE_EQ(out[0].ipMaxJerk, 12.5);
+    EXPECT_DOUBLE_EQ(out[0].ipGoalTolerance, 0.0025);
+}
+
+TEST(JointConfigParser, ParseRejectsInvalidIpMaxVelocity)
+{
+    XmlRpc::XmlRpcValue motorId(11);
+    auto joint = makeJointBase("joint_bad_ip_vel", motorId, "PP");
+    joint["ip_max_velocity"] = 0.0;
+    auto list = makeJointList(joint);
+
+    std::vector<joint_config_parser::ParsedJointConfig> out;
+    std::string err;
+    EXPECT_FALSE(parse(list, out, err));
+    EXPECT_NE(err.find("invalid ip_max_velocity"), std::string::npos);
+}
+
+TEST(JointConfigParser, ParseRejectsInvalidIpGoalTolerance)
+{
+    XmlRpc::XmlRpcValue motorId(12);
+    auto joint = makeJointBase("joint_bad_ip_tol", motorId, "PP");
+    joint["ip_goal_tolerance"] = -0.1;
+    auto list = makeJointList(joint);
+
+    std::vector<joint_config_parser::ParsedJointConfig> out;
+    std::string err;
+    EXPECT_FALSE(parse(list, out, err));
+    EXPECT_NE(err.find("invalid ip_goal_tolerance"), std::string::npos);
 }
 
 TEST(JointConfigParser, InvalidStringMotorIdFails)

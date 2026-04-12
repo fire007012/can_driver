@@ -443,6 +443,10 @@ LifecycleDriverOps::Result LifecycleDriverOps::recoverAll() const
     while (std::chrono::steady_clock::now() < deadline) {
         bool allHealthy = true;
         for (const auto &target : targets) {
+            if (!isDeviceReady(target.canDevice)) {
+                allHealthy = false;
+                break;
+            }
             if (const auto sharedState = getSharedDriverState()) {
                 const auto axisKey =
                     MakeAxisKey(target.canDevice, target.protocol, target.motorId);

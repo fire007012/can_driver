@@ -17,7 +17,7 @@ can_driver_node:
   # 调试模式：true 时 direct topic 命令绕过 ros_control 回退逻辑。
   # 行为：收到一次 direct 命令后将保持生效，直到下一次 direct 命令或 STOP/DISABLE。
   # 注意：该模式仅用于单电机联调，默认关闭。
-  debug_bypass_ros_control: true
+  debug_bypass_ros_control: false
 
   # 电机状态查询频率（协议层轮询频率，单位 Hz）。
   # >0：固定频率；<=0：使用协议默认自适应策略。
@@ -81,43 +81,55 @@ can_driver_node:
     #   control_mode: csp
     #   position_scale: 65536  # 16-bit 编码器，PPR → 驱动自动换算为 2π/65536 rad/count
     #   velocity_scale: 65536
+    #   ip_max_velocity: 1.0
+    #   ip_max_acceleration: 2.0
+    #   ip_max_jerk: 10.0
+    #   ip_goal_tolerance: 0.001
 
     - name: elbow_pitch_joint   # 小臂俯仰（第 3 轴）
       motor_id: 0x13
       protocol: PP
-      can_device: can0
+      can_device: can1
+      control_mode: csp
+      position_scale: 65536  # 16-bit 编码器，PPR → 驱动自动换算为 2π/65536 rad/count
+      velocity_scale: 65536
+      ip_max_velocity: 1.0
+      ip_max_acceleration: 2.0
+      ip_max_jerk: 10.0
+      ip_goal_tolerance: 0.001
+
+    - name: wrist_pitch_joint    # 腕部俯仰（第 4 轴）
+      motor_id: 0x14
+      protocol: PP
+      can_device: can1
+      control_mode: csp
+      position_scale: 65536  # 16-bit 编码器，PPR → 驱动自动换算为 2π/65536 rad/count
+      velocity_scale: 65536
+      ip_max_velocity: 1.0
+      ip_max_acceleration: 2.0
+      ip_max_jerk: 10.0
+      ip_goal_tolerance: 0.001
+
+    - name: wrist_roll_joint     # 腕部滚转（第 5 轴）
+      motor_id: 0x15
+      protocol: PP
+      can_device: can1
       control_mode: csp
       position_scale: 65536  # 16-bit 编码器，PPR → 驱动自动换算为 2π/65536 rad/count
       velocity_scale: 65536
 
-    # - name: wrist_pitch_joint    # 腕部俯仰（第 4 轴）
-    #   motor_id: 0x14
-    #   protocol: PP
-    #   can_device: can0
-    #   control_mode: csp
-    #   position_scale: 65536  # 16-bit 编码器，PPR → 驱动自动换算为 2π/65536 rad/count
-    #   velocity_scale: 65536
-
-    # - name: wrist_roll_joint     # 腕部滚转（第 5 轴）
-    #   motor_id: 0x15
-    #   protocol: PP
-    #   can_device: can0
-    #   control_mode: csp
-    #   position_scale: 65536  # 16-bit 编码器，PPR → 驱动自动换算为 2π/65536 rad/count
-    #   velocity_scale: 65536
-
-    # - name: wrist_yaw_joint      # 腕部偏航（第 6 轴）
-    #   motor_id: 0x16
-    #   protocol: PP
-    #   can_device: can0
-    #   control_mode: csp
-    #   position_scale: 65536  # 16-bit 编码器，PPR → 驱动自动换算为 2π/65536 rad/count
-    #   velocity_scale: 65536
+    - name: wrist_yaw_joint      # 腕部偏航（第 6 轴）
+      motor_id: 0x16
+      protocol: PP
+      can_device: can1
+      control_mode: csp
+      position_scale: 65536  # 16-bit 编码器，PPR → 驱动自动换算为 2π/65536 rad/count
+      velocity_scale: 65536
 
     # - name: left_gripper_finger_joint  # 左夹爪（第 7 轴）
     #   motor_id: 0x17
     #   protocol: PP
-    #   can_device: can0
+    #   can_device: can1
     #   control_mode: csp
     #   position_scale: 65536  # 16-bit 编码器，PPR → 驱动自动换算为 2π/65536 rad/count
     #   velocity_scale: 65536

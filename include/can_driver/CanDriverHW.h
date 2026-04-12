@@ -67,6 +67,7 @@ public:
         double position{0.0};
         double velocity{0.0};
         double effort{0.0};
+        bool deviceReady{false};
         bool enabled{false};
         bool fault{false};
         bool feedbackFresh{false};

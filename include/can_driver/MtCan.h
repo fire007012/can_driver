@@ -172,6 +172,7 @@ private:
     mutable std::unordered_map<uint8_t, MotorID> systemMotorIdsByNodeId_;
     mutable std::mutex refreshMutex;
     std::atomic<double> refreshRateHz_{0.0};
+    std::atomic<bool> shuttingDown_{false};
     mutable std::mutex pendingReadMutex_;
     std::unordered_map<uint16_t, PendingReadRequest> pendingReadRequests_;
 

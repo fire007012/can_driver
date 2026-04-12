@@ -318,7 +318,6 @@ void DeviceManager::stopAllDeviceRefreshWorkersLocked()
 
 void DeviceManager::resetDeviceRuntimeLocked(const std::string &device)
 {
-    stopDeviceRefreshWorkerLocked(device);
     mtProtocols_.erase(device);
     eyouProtocols_.erase(device);
     txDispatchers_.erase(device);
@@ -345,10 +344,11 @@ void DeviceManager::shutdownDeviceLocked(const std::string &device)
             });
     }
 
-    resetDeviceRuntimeLocked(device);
+    stopDeviceRefreshWorkerLocked(device);
     if (transport) {
         transport->shutdown();
     }
+    resetDeviceRuntimeLocked(device);
     transports_.erase(device);
     deviceCmdMutexes_.erase(device);
 }
@@ -450,8 +450,9 @@ bool DeviceManager::initDevice(const std::string &device,
     } else {
         const auto &transport = transportIt->second;
         // Re-init must rebuild protocol handlers and TX runtime for this bus.
-        resetDeviceRuntimeLocked(device);
+        stopDeviceRefreshWorkerLocked(device);
         transport->shutdown();
+        resetDeviceRuntimeLocked(device);
         if (!transport->initialize(device, loopback)) {
             ROS_ERROR("[CanDriverHW] Re-init of '%s' failed.", device.c_str());
             shutdownDeviceLocked(device);

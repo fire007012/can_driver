@@ -530,7 +530,7 @@ Lely 风格架构本质上做了三件事：
 
 为避免本轮重构再次失控，建议严格按 commit 切分推进，每个 commit 都只解决一个层次的问题。
 
-### Commit 1
+### Commit 1 ✅ `27b5c2c`
 
 `feat(can_driver): add per-device tx/rx stats and query backoff`
 
@@ -552,7 +552,7 @@ Lely 风格架构本质上做了三件事：
 - 运行中可看到更明确的设备级统计日志
 - 出现读超时时，不再继续无节制追发查询帧
 
-### Commit 2
+### Commit 2 ✅ `b0911e0`
 
 `refactor(can_driver): funnel all socketcan writes through a single tx entry`
 
@@ -563,15 +563,16 @@ Lely 风格架构本质上做了三件事：
 
 内容：
 
+- 引入 `CanTxDispatcher` 抽象接口和 `DirectCanTxDispatcher` 直通实现
 - 收口所有 socket 发送路径
-- 协议类不再各自随意直接写 transport
-- `CanDriverHW` 和维护路径统一走一个发送入口
+- 协议类（`EyouCan`、`MtCan`）不再直接调用 `canController->send()`，统一走 `submitTx()`
+- 每个发送点按语义标注 `Category`（Control / Recover / Config / Query）
 
 验收：
 
 - 仓内所有发送路径都可以追到同一个 TX 入口
 
-### Commit 3
+### Commit 3 ✅ `028fbbf`
 
 `refactor(can_driver): introduce device runtime with prioritized nonblocking tx`
 
@@ -581,17 +582,51 @@ Lely 风格架构本质上做了三件事：
 
 内容：
 
-- 引入 `DeviceRuntime`
-- 按 `Control` / `Recover` / `Query` 分类发送
-- 非阻塞发送失败时先丢 `Query`
-- 统一维护队列深度、发送失败和退避状态
+- 引入 `DeviceRuntime`，实现 `CanTxDispatcher` 接口
+- 按 `Control` > `Recover` > `Config` > `Query` 四级优先级调度
+- 单 worker 线程串行发送，消灭多路径争抢 socket
+- 队列满时按类别丢弃并计数
+- `DeviceManager` 中把 `DirectCanTxDispatcher` 全部替换为 `DeviceRuntime`
+- 修正 shutdown 顺序：先停 `DeviceRuntime`，再关 transport
 
 验收：
 
 - 不同业务路径不再直接争抢同一个 socket
 - `TX queue saturated` 不再由零散路径分别触发
 
+已知短板（在 Commit 4 中解决）：
+
+- `transport_->send()` 返回值未被检查，EAGAIN 时 `sentCount_` 仍然 +1
+- 队列满时一律丢新帧，控制帧应考虑"丢旧保新"
+- 无 per-axis 发送限流
+
 ### Commit 4
+
+`fix(can_driver): handle transport send failures and control frame eviction in DeviceRuntime`
+
+目标：
+
+- 补齐 `DeviceRuntime` 的发送失败处理和队列淘汰策略
+- 让统计数据真实可信
+
+内容：
+
+- `CanTransport::send()` 改为返回 `bool`（或 enum），表示发送成功/EAGAIN/链路异常
+- `DeviceRuntime::workerLoop()` 根据返回值区分：
+  - 成功 → `sentCount_++`
+  - EAGAIN → 帧回插队头或丢弃，`eagainCount_++`，短暂退避后重试
+  - 链路异常 → `linkDownCount_++`，触发降级
+- Control 队列满时改用"丢最旧、保最新"淘汰策略（同一电机旧位置命令已过时）
+- Recover / Config / Query 队列保持现有"丢新帧"策略
+- 清理 `submit()` 中日志路径的多余 `snapshotStats()` 加锁
+
+验收：
+
+- 统计中 `sentCount_` 与 `eagainCount_` + `linkDownCount_` 之和等于实际 `send()` 调用次数
+- Control 队列饱和时，新命令不会被丢弃，过时命令被淘汰
+- EAGAIN 后 worker 不会陷入无退避的忙循环
+
+### Commit 5
 
 `refactor(can_driver): introduce shared driver state for feedback freshness and intents`
 
@@ -609,7 +644,7 @@ Lely 风格架构本质上做了三件事：
 
 - 反馈新鲜度和设备健康状态不再散落在多个对象里
 
-### Commit 5
+### Commit 6
 
 `refactor(can_driver): add axis runtime closed-loop states for pp path`
 
@@ -622,12 +657,14 @@ Lely 风格架构本质上做了三件事：
 - 引入 `Offline/Seen/Standby/Armed/Running/Faulted/Recovering` 轴级状态
 - 基于真实反馈判断 ready，而不是只看 service 成功
 - 让恢复、使能、运行都依赖真实回读
+- `AxisRuntime` 负责 per-axis 发送限流：offline 轴自动降低查询频率，连续超时轴暂停非关键请求
 
 验收：
 
 - lifecycle mode 与轴真实状态不再脱节
+- 某轴异常不会拖累其它轴的发送资源
 
-### Commit 6
+### Commit 7
 
 `refactor(can_driver): slim CanDriverHW and remove protocol-owned refresh loops`
 
@@ -640,6 +677,7 @@ Lely 风格架构本质上做了三件事：
 - 迁出总线调度与刷新策略
 - 协议层只保留协议语义
 - `CanDriverHW` 只保留 `RobotHW` / ROS 接线职责
+- 删除 `DirectCanTxDispatcher`（已被 `DeviceRuntime` 全面替代，仅测试中保留或替换为 mock）
 
 验收：
 
@@ -647,8 +685,9 @@ Lely 风格架构本质上做了三件事：
 
 ### 实施顺序说明
 
-本轮应立即开始的是 `Commit 1`，原因有三点：
+Commit 1–3 已完成。下一步应立即开始 Commit 4，原因：
 
-- 风险最低，不会大面积扰动现有控制链
-- 能最快回答“为什么平均负载不高却依然爆队列”
-- 它会直接决定后续 `DeviceRuntime` 需要怎样设计优先级和退避策略
+- 它是对已有 `DeviceRuntime` 的加固，不引入新抽象，改动范围小
+- 不处理 `send()` 失败，后续上真机调试时几乎必然会碰到 EAGAIN 导致统计失真、退避缺失的问题
+- Control 帧”丢新保旧”在高负载场景下会导致电机收到过时命令，越早修正越安全
+- 完成后 `DeviceRuntime` 就是一个真正可靠的发送层，后续 Commit 5–7 可以放心往上堆

@@ -1,4 +1,5 @@
 #include "can_driver/MtCan.h"
+#include "can_driver/DeviceRuntime.h"
 
 #include <algorithm>
 #include <array>
@@ -97,10 +98,16 @@ MtCan::MtCan(std::shared_ptr<CanTransport> controller,
 
 MtCan::~MtCan()
 {
+    shuttingDown_.store(true, std::memory_order_release);
     stopRefreshLoop();
     if (canController && receiveHandlerId != 0) {
         canController->removeReceiveHandler(receiveHandlerId);
+        receiveHandlerId = 0;
     }
+    if (const auto runtime = std::dynamic_pointer_cast<DeviceRuntime>(txDispatcher_)) {
+        runtime->shutdown();
+    }
+    txDispatcher_.reset();
 }
 
 void MtCan::initializeMotorRefresh(const std::vector<MotorID> &motorIds)
@@ -686,7 +693,7 @@ void MtCan::stopRefreshLoop()
 
 bool MtCan::tryIssueReadCommand(uint8_t motorId, uint8_t command)
 {
-    if (!canController) {
+    if (shuttingDown_.load(std::memory_order_acquire) || !canController) {
         return false;
     }
 
@@ -743,6 +750,9 @@ void MtCan::onReadDispatchResult(uint8_t motorId,
                                  CanTransport::SendResult sendResult,
                                  std::chrono::steady_clock::time_point eventTime)
 {
+    if (shuttingDown_.load(std::memory_order_acquire)) {
+        return;
+    }
     std::lock_guard<std::mutex> lock(pendingReadMutex_);
     auto it = pendingReadRequests_.find(pendingReadKey(motorId, command));
     if (it == pendingReadRequests_.end()) {
@@ -939,6 +949,9 @@ std::chrono::milliseconds MtCan::computeTimeoutBackoff(std::size_t consecutiveTi
 // [FIX #1] 重写 handleResponse，修正 nodeId 提取
 void MtCan::handleResponse(const CanTransport::Frame &frame)
 {
+    if (shuttingDown_.load(std::memory_order_acquire)) {
+        return;
+    }
     if (frame.isExtended) {
         return;
     }
