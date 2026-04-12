@@ -8,6 +8,7 @@
 #include <joint_limits_interface/joint_limits_urdf.h>
 #include <urdf/model.h>
 
+#include <algorithm>
 #include <cmath>
 #include <thread>
 
@@ -355,7 +356,8 @@ bool MotorMaintenanceService::resolveCurrentReportedPosition(
         }
     }
 
-    *currentPositionRad = static_cast<double>(rawPos) * target.positionScale;
+    *currentPositionRad =
+        static_cast<double>(rawPos) * can_driver::effectivePositionScale(target);
     return true;
 }
 
@@ -376,7 +378,8 @@ bool MotorMaintenanceService::resolveCurrentZeroOffset(const JointConfig& target
         auto proto = getProtocol_(target.canDevice, target.protocol);
         int32_t offsetRaw = 0;
         if (proto && proto->readPositionOffset(target.motorId, &offsetRaw)) {
-            *zeroOffsetRad = static_cast<double>(offsetRaw) * target.positionScale;
+            *zeroOffsetRad =
+                static_cast<double>(offsetRaw) * can_driver::effectivePositionScale(target);
             return true;
         }
     }
@@ -485,7 +488,7 @@ bool MotorMaintenanceService::SetZeroByMotorId(uint16_t motorId,
         int32_t rawOffset = 0;
         if (!can_driver::safe_command::scaleAndClampToInt32(
                 resolvedZeroOffset,
-                target.positionScale,
+                can_driver::effectivePositionScale(target),
                 target.name + ".zero_offset",
                 rawOffset)) {
             if (message != nullptr) {
@@ -651,15 +654,26 @@ bool MotorMaintenanceService::ApplyLimitsByMotorId(uint16_t motorId,
 
         int32_t rawMin = 0;
         int32_t rawMax = 0;
+        int32_t rawLimitA = 0;
+        int32_t rawLimitB = 0;
         if (!can_driver::safe_command::scaleAndClampToInt32(
-                resolvedMin, target.positionScale, target.name + ".min_limit", rawMin) ||
+                resolvedMin,
+                can_driver::effectivePositionScale(target),
+                target.name + ".min_limit",
+                rawLimitA) ||
             !can_driver::safe_command::scaleAndClampToInt32(
-                resolvedMax, target.positionScale, target.name + ".max_limit", rawMax)) {
+                resolvedMax,
+                can_driver::effectivePositionScale(target),
+                target.name + ".max_limit",
+                rawLimitB)) {
             if (message != nullptr) {
                 *message = "Failed to convert limits to protocol raw values.";
             }
             return false;
         }
+        const auto orderedRawLimits = std::minmax(rawLimitA, rawLimitB);
+        rawMin = orderedRawLimits.first;
+        rawMax = orderedRawLimits.second;
 
         if (!motorActionExecutor_) {
             if (message != nullptr) {
