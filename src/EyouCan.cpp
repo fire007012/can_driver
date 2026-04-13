@@ -589,9 +589,20 @@ bool EyouCan::setPositionOffset(MotorID Id, int32_t offsetRaw)
     }
     uint8_t motorId = toProtocolNodeId(Id);
     registerManagedMotorId(Id);
-    // PP 协议：0x3B 位置偏置参数
-    sendWriteCommand(motorId, 0x3B, static_cast<uint32_t>(offsetRaw), 4, kWriteCommand);
-    return true;
+    uint8_t ackState = 0;
+    const bool ok = writeCommandAndWaitForAck(motorId,
+                                              0x3B,
+                                              static_cast<uint32_t>(offsetRaw),
+                                              4,
+                                              std::chrono::milliseconds(200),
+                                              &ackState);
+    if (!ok) {
+        ROS_ERROR("[EyouCan] Position offset write failed on motor %u: raw_offset=%d ack_state=0x%02X.",
+                  static_cast<unsigned>(motorId),
+                  offsetRaw,
+                  static_cast<unsigned>(ackState));
+    }
+    return ok;
 }
 
 bool EyouCan::readPositionOffset(MotorID Id, int32_t* offsetRaw)
@@ -675,12 +686,24 @@ bool EyouCan::persistParameters(MotorID Id)
     registerManagedMotorId(Id);
     const uint32_t savePayload =
         ((serialNumber & 0x00FFFFFFu) << 8) | 0x01u;
-    sendWriteCommand(motorId,
-                     kPersistParametersSubCommand,
-                     savePayload,
-                     4,
-                     kWriteCommand);
-    return true;
+    uint8_t ackState = 0;
+    const bool ok = writeCommandAndWaitForAck(motorId,
+                                              kPersistParametersSubCommand,
+                                              savePayload,
+                                              4,
+                                              std::chrono::milliseconds(300),
+                                              &ackState);
+    if (!ok) {
+        ROS_ERROR("[EyouCan] Persist parameters failed on motor %u: serial=0x%08X payload=[%02X %02X %02X %02X] ack_state=0x%02X.",
+                  static_cast<unsigned>(motorId),
+                  static_cast<unsigned>(serialNumber),
+                  static_cast<unsigned>((savePayload >> 24) & 0xFFu),
+                  static_cast<unsigned>((savePayload >> 16) & 0xFFu),
+                  static_cast<unsigned>((savePayload >> 8) & 0xFFu),
+                  static_cast<unsigned>(savePayload & 0xFFu),
+                  static_cast<unsigned>(ackState));
+    }
+    return ok;
 }
 
 void EyouCan::sendWriteCommand(uint8_t motorId,
@@ -831,6 +854,42 @@ bool EyouCan::tryIssueReadCommand(uint8_t motorId, uint8_t subCommand)
 
     sendReadCommand(motorId, subCommand);
     return true;
+}
+
+bool EyouCan::writeCommandAndWaitForAck(uint8_t motorId,
+                                        uint8_t subCommand,
+                                        uint32_t value,
+                                        std::size_t payloadBytes,
+                                        std::chrono::milliseconds timeout,
+                                        uint8_t *ackStateOut)
+{
+    if (!canController || !txDispatcher_) {
+        return false;
+    }
+
+    {
+        std::lock_guard<std::mutex> lock(pendingWriteAckMutex_);
+        auto &ack = pendingWriteAcks_[pendingReadKey(motorId, subCommand)];
+        ack.received = false;
+        ack.state = 0;
+    }
+
+    sendWriteCommand(motorId, subCommand, value, payloadBytes, kWriteCommand);
+
+    std::unique_lock<std::mutex> lock(pendingWriteAckMutex_);
+    auto &ack = pendingWriteAcks_[pendingReadKey(motorId, subCommand)];
+    const bool received = pendingWriteAckCv_.wait_for(
+        lock, timeout, [&ack]() { return ack.received; });
+    if (!received) {
+        if (ackStateOut != nullptr) {
+            *ackStateOut = 0;
+        }
+        return false;
+    }
+    if (ackStateOut != nullptr) {
+        *ackStateOut = ack.state;
+    }
+    return ack.state == 0x01 || ack.state == 0x05;
 }
 
 void EyouCan::onReadDispatchResult(uint8_t motorId,
@@ -1094,6 +1153,7 @@ void EyouCan::handleResponse(const CanTransport::Frame &frame)
             // STATE 是写入结果状态码，不是寄存器值
             // 0x01=成功, 0x05=矫正后成功, 其它=失败
             uint8_t writeState = dataByteOrZero(frame, 2);
+            markWriteAckReceived(motorId, subCommand, writeState);
             if (writeState != 0x01 && writeState != 0x05) {
                 std::cerr << "[EyouCan] Write to motor " << static_cast<int>(motorId)
                           << " addr 0x" << std::hex << static_cast<int>(subCommand)
@@ -1212,6 +1272,17 @@ void EyouCan::handleResponse(const CanTransport::Frame &frame)
     if (resyncCurrent) {
         requestCurrent(motorId);
     }
+}
+
+void EyouCan::markWriteAckReceived(uint8_t motorId, uint8_t subCommand, uint8_t writeState)
+{
+    {
+        std::lock_guard<std::mutex> lock(pendingWriteAckMutex_);
+        auto &ack = pendingWriteAcks_[pendingReadKey(motorId, subCommand)];
+        ack.received = true;
+        ack.state = writeState;
+    }
+    pendingWriteAckCv_.notify_all();
 }
 
 bool EyouCan::isManagedMotorId(uint8_t motorId) const

@@ -7,6 +7,7 @@
 #include "can_driver/CanTxDispatcher.h"
 #include <atomic>
 #include <chrono>
+#include <condition_variable>
 #include <memory>
 #include <mutex>
 #include <thread>
@@ -164,6 +165,10 @@ private:
         std::size_t missedRefreshWindows {0};
         std::size_t warnedStaleBuckets {0};
     };
+    struct PendingWriteAck {
+        bool received {false};
+        uint8_t state {0};
+    };
 
     std::shared_ptr<CanTransport> canController;
     std::shared_ptr<CanTxDispatcher> txDispatcher_;
@@ -187,6 +192,9 @@ private:
     std::atomic<bool> shuttingDown_{false};
     mutable std::mutex pendingReadMutex_;
     std::unordered_map<uint16_t, PendingReadRequest> pendingReadRequests_;
+    mutable std::mutex pendingWriteAckMutex_;
+    std::condition_variable pendingWriteAckCv_;
+    std::unordered_map<uint16_t, PendingWriteAck> pendingWriteAcks_;
 
     /**
      * @brief 发送写指令帧（0x01）
@@ -231,6 +239,13 @@ private:
     bool ensurePositionVelocityConfigured(uint8_t motorId, int32_t velocityRaw, bool forceWrite);
     bool tryIssueReadCommand(uint8_t motorId, uint8_t subCommand);
     void markReadResponseReceived(uint8_t motorId, uint8_t subCommand);
+    bool writeCommandAndWaitForAck(uint8_t motorId,
+                                   uint8_t subCommand,
+                                   uint32_t value,
+                                   std::size_t payloadBytes,
+                                   std::chrono::milliseconds timeout,
+                                   uint8_t *ackStateOut = nullptr);
+    void markWriteAckReceived(uint8_t motorId, uint8_t subCommand, uint8_t writeState);
     void resetReadTracking();
     MotorID resolveSystemMotorId(uint8_t motorId) const;
     can_driver::SharedDriverState::AxisKey makeAxisKey(uint8_t motorId) const;

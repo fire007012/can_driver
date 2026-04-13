@@ -751,6 +751,17 @@ TEST_F(EyouCanTest, PersistParametersUsesSerialNumberLow24BitsWithSaveFlag)
         frame.data[4] = 0x56;
         frame.data[5] = 0x78;
         transport->simulateReceive(frame);
+
+        std::this_thread::sleep_for(std::chrono::milliseconds(10));
+        CanTransport::Frame ack {};
+        ack.id = 0x0005;
+        ack.isExtended = false;
+        ack.isRemoteRequest = false;
+        ack.dlc = 3;
+        ack.data[0] = 0x02;
+        ack.data[1] = 0x4D;
+        ack.data[2] = 0x01;
+        transport->simulateReceive(ack);
     });
 
     ASSERT_TRUE(eyou.persistParameters(static_cast<MotorID>(0x05)));
@@ -767,6 +778,40 @@ TEST_F(EyouCanTest, PersistParametersUsesSerialNumberLow24BitsWithSaveFlag)
     EXPECT_EQ(writeFrame.data[3], 0x56);
     EXPECT_EQ(writeFrame.data[4], 0x78);
     EXPECT_EQ(writeFrame.data[5], 0x01);
+
+    responder.join();
+}
+
+TEST_F(EyouCanTest, PersistParametersFailsWhenWriteAckReportsFailure)
+{
+    std::thread responder([this]() {
+        std::this_thread::sleep_for(std::chrono::milliseconds(10));
+        CanTransport::Frame frame {};
+        frame.id = 0x0005;
+        frame.isExtended = false;
+        frame.isRemoteRequest = false;
+        frame.dlc = 6;
+        frame.data[0] = 0x04;
+        frame.data[1] = 0x02;
+        frame.data[2] = 0x12;
+        frame.data[3] = 0x34;
+        frame.data[4] = 0x56;
+        frame.data[5] = 0x78;
+        transport->simulateReceive(frame);
+
+        std::this_thread::sleep_for(std::chrono::milliseconds(10));
+        CanTransport::Frame ack {};
+        ack.id = 0x0005;
+        ack.isExtended = false;
+        ack.isRemoteRequest = false;
+        ack.dlc = 3;
+        ack.data[0] = 0x02;
+        ack.data[1] = 0x4D;
+        ack.data[2] = 0x00;
+        transport->simulateReceive(ack);
+    });
+
+    EXPECT_FALSE(eyou.persistParameters(static_cast<MotorID>(0x05)));
 
     responder.join();
 }
