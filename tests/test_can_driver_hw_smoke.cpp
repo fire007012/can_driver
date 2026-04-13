@@ -122,7 +122,7 @@ public:
         lastOffsetMotor_ = motorId;
         lastOffsetRaw_ = offsetRaw;
         ++setOffsetCalls_;
-        return true;
+        return setOffsetResult_;
     }
 
     bool readPositionOffset(MotorID, int32_t* offsetRaw) override
@@ -133,6 +133,27 @@ public:
         std::lock_guard<std::mutex> lock(mutex_);
         *offsetRaw = lastOffsetRaw_;
         return true;
+    }
+
+    bool readSerialNumber(MotorID, uint32_t* serialNumber) override
+    {
+        if (serialNumber == nullptr) {
+            return false;
+        }
+        std::lock_guard<std::mutex> lock(mutex_);
+        if (!serialNumberReadable_) {
+            return false;
+        }
+        *serialNumber = serialNumber_;
+        return true;
+    }
+
+    bool persistParameters(MotorID motorId) override
+    {
+        std::lock_guard<std::mutex> lock(mutex_);
+        lastPersistMotor_ = motorId;
+        ++persistCalls_;
+        return persistResult_;
     }
 
     int64_t getPosition(MotorID) const override
@@ -305,6 +326,12 @@ public:
         return setOffsetCalls_;
     }
 
+    int persistCalls() const
+    {
+        std::lock_guard<std::mutex> lock(mutex_);
+        return persistCalls_;
+    }
+
     int setLimitCalls() const
     {
         std::lock_guard<std::mutex> lock(mutex_);
@@ -315,6 +342,12 @@ public:
     {
         std::lock_guard<std::mutex> lock(mutex_);
         return lastOffsetRaw_;
+    }
+
+    uint16_t lastPersistMotor() const
+    {
+        std::lock_guard<std::mutex> lock(mutex_);
+        return static_cast<uint16_t>(lastPersistMotor_);
     }
 
     int32_t lastLimitMin() const
@@ -333,6 +366,30 @@ public:
     {
         std::lock_guard<std::mutex> lock(mutex_);
         return lastLimitEnable_;
+    }
+
+    void setOffsetResult(bool value)
+    {
+        std::lock_guard<std::mutex> lock(mutex_);
+        setOffsetResult_ = value;
+    }
+
+    void setPersistResult(bool value)
+    {
+        std::lock_guard<std::mutex> lock(mutex_);
+        persistResult_ = value;
+    }
+
+    void setSerialNumberReadable(bool value)
+    {
+        std::lock_guard<std::mutex> lock(mutex_);
+        serialNumberReadable_ = value;
+    }
+
+    void setSerialNumber(uint32_t value)
+    {
+        std::lock_guard<std::mutex> lock(mutex_);
+        serialNumber_ = value;
     }
 
 private:
@@ -361,6 +418,12 @@ private:
     MotorID lastOffsetMotor_{MotorID::LeftWheel};
     int32_t lastOffsetRaw_{0};
     int setOffsetCalls_{0};
+    bool setOffsetResult_{true};
+    MotorID lastPersistMotor_{MotorID::LeftWheel};
+    int persistCalls_{0};
+    bool persistResult_{true};
+    bool serialNumberReadable_{true};
+    uint32_t serialNumber_{0x12345678u};
     MotorID lastLimitMotor_{MotorID::LeftWheel};
     int32_t lastLimitMin_{0};
     int32_t lastLimitMax_{0};
@@ -2045,6 +2108,7 @@ TEST_F(CanDriverHWSmokeTest, SetZeroLimitServiceCanAutoZeroFromCurrentPosition)
     EXPECT_NEAR(srv.response.applied_min_rad, -0.4, 1e-4);
     EXPECT_NEAR(srv.response.applied_max_rad, 0.4, 1e-4);
     EXPECT_EQ(fakeDm->protocol()->setOffsetCalls(), 1);
+    EXPECT_EQ(fakeDm->protocol()->persistCalls(), 1);
     EXPECT_EQ(fakeDm->protocol()->setLimitCalls(), 1);
     EXPECT_EQ(fakeDm->protocol()->lastOffsetRaw(), -rawFromPprRadians(0.1));
     EXPECT_EQ(fakeDm->protocol()->lastLimitMin(), rawFromPprRadians(-0.4));
@@ -2127,6 +2191,7 @@ TEST_F(CanDriverHWSmokeTest, SetZeroServiceAllowsAutoZeroOutsideCurrentLimits)
     EXPECT_NEAR(srv.response.current_position_rad, 1.2, 1e-4);
     EXPECT_NEAR(srv.response.applied_zero_offset_rad, -1.2, 1e-4);
     EXPECT_EQ(fakeDm->protocol()->setOffsetCalls(), 1);
+    EXPECT_EQ(fakeDm->protocol()->persistCalls(), 1);
 
     spinner.stop();
 }
@@ -2167,10 +2232,96 @@ TEST_F(CanDriverHWSmokeTest, SetZeroServiceAppliesDirectionSignToZeroOffsets)
     EXPECT_NEAR(srv.response.current_position_rad, -0.1, 1e-4);
     EXPECT_NEAR(srv.response.previous_zero_offset_rad, -0.05, 1e-4);
     EXPECT_NEAR(srv.response.applied_zero_offset_rad, 0.05, 1e-4);
+    EXPECT_EQ(fakeDm->protocol()->persistCalls(), 1);
     const double signedPprScale = -(2.0 * M_PI / 65536.0);
     EXPECT_EQ(fakeDm->protocol()->lastOffsetRaw(),
               static_cast<int32_t>(std::llround(
                   srv.response.applied_zero_offset_rad / signedPprScale)));
+
+    spinner.stop();
+}
+
+TEST_F(CanDriverHWSmokeTest, SetZeroServiceRollsBackOffsetWhenPersistenceFails)
+{
+    auto fakeDm = std::make_shared<FakeDeviceManager>();
+    fakeDm->protocol()->setFeedbackPosition(rawFromPprRadians(0.1));
+    ASSERT_TRUE(fakeDm->protocol()->setPositionOffset(static_cast<MotorID>(0x05),
+                                                      rawFromPprRadians(0.05)));
+    fakeDm->protocol()->setPersistResult(false);
+    CanDriverHW hw(fakeDm);
+
+    ros::NodeHandle nh;
+    ros::NodeHandle pnh(uniqueNs("can_driver_hw_smoke_zero_persist_fail"));
+
+    pnh.setParam("joints", makeSingleCspJoint());
+
+    ASSERT_TRUE(hw.init(nh, pnh));
+    const auto initResult = hw.operationalCoordinator().RequestInit("fake0", false);
+    ASSERT_TRUE(initResult.ok) << initResult.message;
+
+    ros::AsyncSpinner spinner(1);
+    spinner.start();
+
+    ros::ServiceClient client = nh.serviceClient<can_driver::SetZero>(
+        pnh.resolveName("set_zero"));
+    ASSERT_TRUE(client.waitForExistence(ros::Duration(1.0)));
+
+    setFreshEnabledFeedback(*fakeDm, "fake0", CanType::PP, static_cast<MotorID>(0x05), false);
+
+    can_driver::SetZero srv;
+    srv.request.motor_id = 0x05u;
+    srv.request.zero_offset_rad = 0.0;
+    srv.request.use_current_position_as_zero = true;
+    srv.request.apply_to_motor = true;
+    ASSERT_TRUE(client.call(srv));
+    EXPECT_FALSE(srv.response.success);
+    EXPECT_NE(srv.response.message.find("Rollback"), std::string::npos);
+    EXPECT_EQ(fakeDm->protocol()->setOffsetCalls(), 3);
+    EXPECT_EQ(fakeDm->protocol()->persistCalls(), 2);
+    EXPECT_EQ(fakeDm->protocol()->lastOffsetRaw(), rawFromPprRadians(0.05));
+
+    spinner.stop();
+}
+
+TEST_F(CanDriverHWSmokeTest, SetZeroLimitServiceStopsBeforeLimitsWhenZeroPersistenceFails)
+{
+    auto fakeDm = std::make_shared<FakeDeviceManager>();
+    fakeDm->protocol()->setFeedbackPosition(rawFromPprRadians(0.1));
+    ASSERT_TRUE(fakeDm->protocol()->setPositionOffset(static_cast<MotorID>(0x05),
+                                                      rawFromPprRadians(0.05)));
+    fakeDm->protocol()->setPersistResult(false);
+    CanDriverHW hw(fakeDm);
+
+    ros::NodeHandle nh;
+    ros::NodeHandle pnh(uniqueNs("can_driver_hw_smoke_zero_limit_persist_fail"));
+
+    pnh.setParam("joints", makeSingleCspJoint());
+
+    ASSERT_TRUE(hw.init(nh, pnh));
+    const auto initResult = hw.operationalCoordinator().RequestInit("fake0", false);
+    ASSERT_TRUE(initResult.ok) << initResult.message;
+
+    ros::AsyncSpinner spinner(1);
+    spinner.start();
+
+    ros::ServiceClient client = nh.serviceClient<can_driver::SetZeroLimit>(
+        pnh.resolveName("set_zero_limit"));
+    ASSERT_TRUE(client.waitForExistence(ros::Duration(1.0)));
+
+    setFreshEnabledFeedback(*fakeDm, "fake0", CanType::PP, static_cast<MotorID>(0x05), false);
+
+    can_driver::SetZeroLimit srv;
+    srv.request.motor_id = 0x05u;
+    srv.request.zero_offset_rad = 0.0;
+    srv.request.use_current_position_as_zero = true;
+    srv.request.min_position_rad = -0.4;
+    srv.request.max_position_rad = 0.4;
+    srv.request.use_urdf_limits = false;
+    srv.request.apply_to_motor = true;
+    ASSERT_TRUE(client.call(srv));
+    EXPECT_FALSE(srv.response.success);
+    EXPECT_EQ(fakeDm->protocol()->persistCalls(), 2);
+    EXPECT_EQ(fakeDm->protocol()->setLimitCalls(), 0);
 
     spinner.stop();
 }

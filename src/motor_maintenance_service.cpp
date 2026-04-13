@@ -44,6 +44,36 @@ bool decodeModeSelection(double value, ModeSelection *selection)
 
 } // namespace
 
+namespace {
+
+bool writePersistedPositionOffset(const MotorMaintenanceService::JointConfig& target,
+                                  CanProtocol* protocol,
+                                  int32_t rawOffset,
+                                  std::string* message)
+{
+    if (protocol == nullptr) {
+        if (message != nullptr) {
+            *message = "Protocol not available.";
+        }
+        return false;
+    }
+    if (!protocol->setPositionOffset(target.motorId, rawOffset)) {
+        if (message != nullptr) {
+            *message = "Protocol rejected zero offset setting.";
+        }
+        return false;
+    }
+    if (!protocol->persistParameters(target.motorId)) {
+        if (message != nullptr) {
+            *message = "Protocol rejected zero offset persistence.";
+        }
+        return false;
+    }
+    return true;
+}
+
+} // namespace
+
 void MotorMaintenanceService::configure(
     ActivityChecker isActive,
     MotorActionExecutor *motorActionExecutor,
@@ -497,16 +527,44 @@ bool MotorMaintenanceService::SetZeroByMotorId(uint16_t motorId,
             return false;
         }
 
+        int32_t previousRawOffset = 0;
+        if (!can_driver::safe_command::scaleAndClampToInt32(
+                previousZeroOffset,
+                can_driver::effectivePositionScale(target),
+                target.name + ".previous_zero_offset",
+                previousRawOffset)) {
+            if (message != nullptr) {
+                *message = "Failed to convert previous zero offset to protocol raw value.";
+            }
+            return false;
+        }
+
         if (!motorActionExecutor_) {
             if (message != nullptr) {
                 *message = "Motor maintenance service not configured.";
             }
             return false;
         }
+
+        bool persistOk = false;
+        std::string persistError = "Set zero execution failed.";
         const auto status = motorActionExecutor_->execute(
             makeMotorTarget(target),
-            [rawOffset](const std::shared_ptr<CanProtocol>& p, MotorID id) {
-                return p->setPositionOffset(id, rawOffset);
+            [&target, rawOffset, previousRawOffset, &persistOk, &persistError](
+                const std::shared_ptr<CanProtocol>& p, MotorID /*id*/) {
+                if (!writePersistedPositionOffset(target, p.get(), rawOffset, &persistError)) {
+                    std::string rollbackError;
+                    if (!writePersistedPositionOffset(
+                            target, p.get(), previousRawOffset, &rollbackError)) {
+                        persistError += " Rollback failed: " + rollbackError;
+                    } else {
+                        persistError += " Rolled back previous zero offset.";
+                    }
+                    persistOk = false;
+                    return false;
+                }
+                persistOk = true;
+                return true;
             },
             "Set zero offset");
         if (status != MotorActionExecutor::Status::Ok) {
@@ -516,10 +574,16 @@ bool MotorMaintenanceService::SetZeroByMotorId(uint16_t motorId,
                 } else if (status == MotorActionExecutor::Status::ProtocolUnavailable) {
                     *message = "Protocol not available.";
                 } else if (status == MotorActionExecutor::Status::Rejected) {
-                    *message = "Protocol rejected zero offset setting.";
+                    *message = persistError;
                 } else {
                     *message = "Set zero execution failed.";
                 }
+            }
+            return false;
+        }
+        if (!persistOk) {
+            if (message != nullptr) {
+                *message = persistError;
             }
             return false;
         }
