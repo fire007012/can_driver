@@ -9,6 +9,8 @@
 #include <chrono>
 #include <cmath>
 #include <cstdint>
+#include <cstdlib>
+#include <fstream>
 #include <set>
 #include <sstream>
 #include <string>
@@ -237,6 +239,21 @@ bool CanDriverHW::loadRuntimeParams(const ros::NodeHandle &pnh)
     if (!pnh.getParam("safety_hold_after_device_recover", safetyHoldAfterDeviceRecover_)) {
         safetyHoldAfterDeviceRecover_ = true;
     }
+    if (!pnh.getParam("pp_local_zero_offset_persistence_enabled",
+                      ppLocalZeroOffsetPersistenceEnabled_)) {
+        ppLocalZeroOffsetPersistenceEnabled_ = false;
+    }
+    if (!pnh.getParam("pp_local_zero_offset_file", ppLocalZeroOffsetFilePath_) ||
+        ppLocalZeroOffsetFilePath_.empty()) {
+        ppLocalZeroOffsetFilePath_ = defaultLocalZeroOffsetFilePath();
+    }
+
+    jointZeroOffsetRadByMotorId_.clear();
+    if (ppLocalZeroOffsetPersistenceEnabled_ && !loadPersistedLocalZeroOffsets()) {
+        ROS_ERROR("[CanDriverHW] Failed to load local zero offset persistence file '%s'.",
+                  ppLocalZeroOffsetFilePath_.c_str());
+        return false;
+    }
 
     deviceManager_->setPpFastWriteEnabled(ppFastWriteEnabled_);
     deviceManager_->setRefreshRateHz(motorQueryHz_);
@@ -260,6 +277,9 @@ bool CanDriverHW::loadRuntimeParams(const ros::NodeHandle &pnh)
              maxPositionStepRad_);
     ROS_INFO("[CanDriverHW] safety_hold_after_device_recover=%s.",
              safetyHoldAfterDeviceRecover_ ? "true" : "false");
+    ROS_INFO("[CanDriverHW] pp_local_zero_offset_persistence_enabled=%s, file='%s'.",
+             ppLocalZeroOffsetPersistenceEnabled_ ? "true" : "false",
+             ppLocalZeroOffsetFilePath_.c_str());
     ROS_WARN_STREAM_COND(debugBypassRosControl_,
                          "[CanDriverHW] debug_bypass_ros_control=true: "
                          "direct topic commands will bypass ros_control fallback.");
@@ -709,6 +729,9 @@ void CanDriverHW::configureLifecycleCoordinator()
             deviceManager_->setDeviceRefreshRateHz(device, refreshRateHz);
         },
         [this](const std::string &device) {
+            return applyPersistedPpZeroOffsets(device);
+        },
+        [this](const std::string &device) {
             return syncStartupPositionAndCommands(device);
         },
         [this](const std::string &device) {
@@ -922,7 +945,10 @@ bool CanDriverHW::commitZero(uint16_t motorId,
             continue;
         }
         jointZeroOffsetRadByMotorId_[motorId] = zeroOffset;
-        (void)previousZeroOffset;
+        if (ppLocalZeroOffsetPersistenceEnabled_ && !savePersistedLocalZeroOffsets()) {
+            jointZeroOffsetRadByMotorId_[motorId] = previousZeroOffset;
+            return false;
+        }
         return true;
     }
     return false;
@@ -946,6 +972,136 @@ bool CanDriverHW::commitLimits(uint16_t motorId,
         return true;
     }
     return false;
+}
+
+bool CanDriverHW::applyPersistedPpZeroOffsets(const std::string &deviceFilter)
+{
+    if (!ppLocalZeroOffsetPersistenceEnabled_) {
+        return true;
+    }
+
+    bool appliedAny = false;
+    std::map<uint16_t, double> persistedOffsets;
+    {
+        std::lock_guard<std::mutex> lock(jointStateMutex_);
+        persistedOffsets = jointZeroOffsetRadByMotorId_;
+    }
+
+    for (const auto &joint : joints_) {
+        if (joint.protocol != CanType::PP ||
+            !can_driver::controlModeUsesPositionSemantics(joint.controlMode)) {
+            continue;
+        }
+        if (!deviceFilter.empty() && joint.canDevice != deviceFilter) {
+            continue;
+        }
+        const auto it = persistedOffsets.find(static_cast<uint16_t>(joint.motorId));
+        if (it == persistedOffsets.end()) {
+            continue;
+        }
+
+        int32_t rawOffset = 0;
+        if (!can_driver::safe_command::scaleAndClampToInt32(
+                it->second,
+                can_driver::effectivePositionScale(joint),
+                joint.name + ".persisted_zero_offset",
+                rawOffset)) {
+            ROS_ERROR("[CanDriverHW] Failed to convert persisted zero offset for joint '%s'.",
+                      joint.name.c_str());
+            return false;
+        }
+
+        const auto status = motorActionExecutor_.execute(
+            makeMotorTarget(joint),
+            [rawOffset](const std::shared_ptr<CanProtocol> &proto, MotorID id) {
+                return proto->setPositionOffset(id, rawOffset);
+            },
+            "Restore persisted zero offset");
+        if (status != MotorActionExecutor::Status::Ok) {
+            ROS_ERROR("[CanDriverHW] Failed to restore persisted zero offset for joint '%s'.",
+                      joint.name.c_str());
+            return false;
+        }
+        ROS_INFO("[CanDriverHW] Restored persisted zero offset %.6f rad for joint '%s'.",
+                 it->second,
+                 joint.name.c_str());
+        appliedAny = true;
+    }
+
+    if (!appliedAny && deviceFilter.empty()) {
+        ROS_INFO("[CanDriverHW] No persisted PP zero offsets to restore.");
+    }
+    return true;
+}
+
+std::string CanDriverHW::defaultLocalZeroOffsetFilePath() const
+{
+    const char *home = std::getenv("HOME");
+    const std::filesystem::path root =
+        (home != nullptr && home[0] != '\0') ? std::filesystem::path(home) / ".ros"
+                                             : std::filesystem::temp_directory_path();
+    return (root / "can_driver_pp_zero_offsets.txt").string();
+}
+
+bool CanDriverHW::loadPersistedLocalZeroOffsets()
+{
+    const std::filesystem::path path(ppLocalZeroOffsetFilePath_);
+    if (!std::filesystem::exists(path)) {
+        return true;
+    }
+
+    std::ifstream in(path);
+    if (!in.is_open()) {
+        return false;
+    }
+
+    std::map<uint16_t, double> loaded;
+    std::string line;
+    while (std::getline(in, line)) {
+        if (line.empty() || line[0] == '#') {
+            continue;
+        }
+        std::istringstream iss(line);
+        uint16_t motorId = 0;
+        double zeroOffset = 0.0;
+        if (!(iss >> motorId >> zeroOffset)) {
+            return false;
+        }
+        loaded[motorId] = zeroOffset;
+    }
+
+    jointZeroOffsetRadByMotorId_ = std::move(loaded);
+    return true;
+}
+
+bool CanDriverHW::savePersistedLocalZeroOffsets() const
+{
+    const std::filesystem::path path(ppLocalZeroOffsetFilePath_);
+    std::error_code ec;
+    std::filesystem::create_directories(path.parent_path(), ec);
+    if (ec) {
+        return false;
+    }
+
+    const std::filesystem::path tmp = path.string() + ".tmp";
+    std::ofstream out(tmp, std::ios::trunc);
+    if (!out.is_open()) {
+        return false;
+    }
+    out.setf(std::ios::fixed);
+    out.precision(17);
+    for (const auto &entry : jointZeroOffsetRadByMotorId_) {
+        out << entry.first << ' ' << entry.second << '\n';
+    }
+    out.close();
+    if (!out) {
+        return false;
+    }
+    std::filesystem::rename(tmp, path, ec);
+    if (ec) {
+        return false;
+    }
+    return true;
 }
 
 void CanDriverHW::holdCommandsForLifecycleTransition()

@@ -152,6 +152,12 @@ OperationalCoordinator::Result CanDriverRuntime::prepareLifecycleDeviceForStandb
         return prepareResult;
     }
 
+    if (lifecycleHooks_.apply_persisted_pp_zero_offsets &&
+        !lifecycleHooks_.apply_persisted_pp_zero_offsets(device)) {
+        restoreSteadyRefresh();
+        return rollbackPreparedDevice(
+            {false, "Failed to restore persisted PP zero offsets on " + device});
+    }
     if (!lifecycleHooks_.sync_startup_position_and_commands(device)) {
         restoreSteadyRefresh();
         return rollbackPreparedDevice(

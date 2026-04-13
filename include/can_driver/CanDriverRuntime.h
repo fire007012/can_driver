@@ -26,6 +26,7 @@ public:
         std::function<bool(std::string *)> motion_healthy;
         std::function<double()> startup_query_hz;
         std::function<void(const std::string &, double)> set_device_refresh_rate;
+        std::function<bool(const std::string &)> apply_persisted_pp_zero_offsets;
         std::function<bool(const std::string &)> sync_startup_position_and_commands;
         std::function<bool(const std::string &)> apply_pp_default_velocities;
         std::function<bool(const std::string &)> apply_initial_modes;

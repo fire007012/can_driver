@@ -20,6 +20,8 @@
 #include <atomic>
 #include <cmath>
 #include <deque>
+#include <filesystem>
+#include <fstream>
 #include <memory>
 #include <mutex>
 #include <set>
@@ -792,6 +794,14 @@ protected:
     {
         static std::atomic<int> seq{0};
         return "/" + base + "_" + std::to_string(seq.fetch_add(1));
+    }
+
+    static std::string uniqueTempFile(const std::string &base)
+    {
+        static std::atomic<int> seq{0};
+        return (std::filesystem::temp_directory_path() /
+                (base + "_" + std::to_string(seq.fetch_add(1)) + ".txt"))
+            .string();
     }
 
     static void enterRunning(CanDriverHW &hw)
@@ -2281,6 +2291,74 @@ TEST_F(CanDriverHWSmokeTest, SetZeroServiceRollsBackOffsetWhenPersistenceFails)
     EXPECT_EQ(fakeDm->protocol()->lastOffsetRaw(), rawFromPprRadians(0.05));
 
     spinner.stop();
+}
+
+TEST_F(CanDriverHWSmokeTest, LocalPersistedZeroOffsetRestoresOnNextInit)
+{
+    const std::string persistFile = uniqueTempFile("can_driver_zero_offsets");
+    std::filesystem::remove(persistFile);
+
+    {
+        auto fakeDm = std::make_shared<FakeDeviceManager>();
+        CanDriverHW hw(fakeDm);
+
+        ros::NodeHandle nh;
+        ros::NodeHandle pnh(uniqueNs("can_driver_hw_smoke_zero_local_persist_write"));
+
+        pnh.setParam("joints", makeSingleCspJoint());
+        pnh.setParam("pp_local_zero_offset_persistence_enabled", true);
+        pnh.setParam("pp_local_zero_offset_file", persistFile);
+
+        ASSERT_TRUE(hw.init(nh, pnh));
+        const auto initResult = hw.operationalCoordinator().RequestInit("fake0", false);
+        ASSERT_TRUE(initResult.ok) << initResult.message;
+
+        ros::AsyncSpinner spinner(1);
+        spinner.start();
+
+        ros::ServiceClient client = nh.serviceClient<can_driver::SetZero>(
+            pnh.resolveName("set_zero"));
+        ASSERT_TRUE(client.waitForExistence(ros::Duration(1.0)));
+
+        can_driver::SetZero srv;
+        srv.request.motor_id = 0x05u;
+        srv.request.zero_offset_rad = 0.2;
+        srv.request.use_current_position_as_zero = false;
+        srv.request.apply_to_motor = false;
+        ASSERT_TRUE(client.call(srv));
+        ASSERT_TRUE(srv.response.success) << srv.response.message;
+
+        spinner.stop();
+    }
+
+    {
+        std::ifstream in(persistFile);
+        ASSERT_TRUE(in.is_open());
+        std::string line;
+        ASSERT_TRUE(static_cast<bool>(std::getline(in, line)));
+        EXPECT_NE(line.find("5 0.20000000000000001"), std::string::npos);
+    }
+
+    {
+        auto fakeDm = std::make_shared<FakeDeviceManager>();
+        CanDriverHW hw(fakeDm);
+
+        ros::NodeHandle nh;
+        ros::NodeHandle pnh(uniqueNs("can_driver_hw_smoke_zero_local_persist_restore"));
+
+        pnh.setParam("joints", makeSingleCspJoint());
+        pnh.setParam("pp_local_zero_offset_persistence_enabled", true);
+        pnh.setParam("pp_local_zero_offset_file", persistFile);
+
+        ASSERT_TRUE(hw.init(nh, pnh));
+        const auto initResult = hw.operationalCoordinator().RequestInit("fake0", false);
+        ASSERT_TRUE(initResult.ok) << initResult.message;
+
+        EXPECT_EQ(fakeDm->protocol()->setOffsetCalls(), 1);
+        EXPECT_EQ(fakeDm->protocol()->lastOffsetRaw(), rawFromPprRadians(0.2));
+    }
+
+    std::filesystem::remove(persistFile);
 }
 
 TEST_F(CanDriverHWSmokeTest, SetZeroLimitServiceStopsBeforeLimitsWhenZeroPersistenceFails)

@@ -40,6 +40,7 @@
 #include <atomic>
 #include <deque>
 #include <functional>
+#include <filesystem>
 
 class DriverRosEndpoints;
 
@@ -199,6 +200,7 @@ private:
     void registerJointInterfaces();
     void loadJointLimits(const ros::NodeHandle &pnh);
     bool syncStartupPositionAndCommands(const std::string &deviceFilter = std::string());
+    bool applyPersistedPpZeroOffsets(const std::string &deviceFilter = std::string());
     bool applyInitialModes(const std::string &deviceFilter = std::string());
     bool applyPerAxisPpDefaultVelocities(const std::string &deviceFilter = std::string());
     void configureCommandGate();
@@ -226,7 +228,12 @@ private:
                                              const char *operation,
                                              std::string *message) const;
     bool lifecycleHealthHealthy(std::string *detail) const;
+    std::string defaultLocalZeroOffsetFilePath() const;
+    bool loadPersistedLocalZeroOffsets();
+    bool savePersistedLocalZeroOffsets() const;
 
+    bool ppLocalZeroOffsetPersistenceEnabled_{false};
+    std::string ppLocalZeroOffsetFilePath_;
 };
 
 #endif // CAN_DRIVER_CAN_DRIVER_HW_H
