@@ -5,6 +5,7 @@
 #include "can_driver/RefreshScheduler.h"
 #include "can_driver/SharedDriverState.h"
 #include "can_driver/CanTxDispatcher.h"
+#include <array>
 #include <atomic>
 #include <chrono>
 #include <condition_variable>
@@ -245,6 +246,12 @@ private:
                                    std::size_t payloadBytes,
                                    std::chrono::milliseconds timeout,
                                    uint8_t *ackStateOut = nullptr);
+    bool writeCommandBytesAndWaitForAck(uint8_t motorId,
+                                        uint8_t subCommand,
+                                        const std::array<uint8_t, 4> &payload,
+                                        std::size_t payloadBytes,
+                                        std::chrono::milliseconds timeout,
+                                        uint8_t *ackStateOut = nullptr);
     void markWriteAckReceived(uint8_t motorId, uint8_t subCommand, uint8_t writeState);
     void resetReadTracking();
     MotorID resolveSystemMotorId(uint8_t motorId) const;

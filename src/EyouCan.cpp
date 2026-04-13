@@ -28,6 +28,8 @@ constexpr uint8_t kReadSerialNumberSubCommand = 0x02;
 constexpr uint8_t kPersistParametersSubCommand = 0x4D;
 constexpr uint16_t kEyouIdFrameBase = 0x0000;
 constexpr std::size_t kQueriesPerMotorPerCycle = 6;
+constexpr int kPersistWriteAckRetries = 3;
+constexpr auto kPersistRetryDelay = std::chrono::milliseconds(50);
 
 uint32_t readUInt32BE(const CanTransport::Frame &frame, std::size_t index)
 {
@@ -684,26 +686,38 @@ bool EyouCan::persistParameters(MotorID Id)
 
     const uint8_t motorId = toProtocolNodeId(Id);
     registerManagedMotorId(Id);
-    const uint32_t savePayload =
-        ((serialNumber & 0x00FFFFFFu) << 8) | 0x01u;
+    const std::array<uint8_t, 4> savePayload{
+        static_cast<uint8_t>((serialNumber >> 16) & 0xFFu),
+        static_cast<uint8_t>((serialNumber >> 8) & 0xFFu),
+        static_cast<uint8_t>(serialNumber & 0xFFu),
+        0x01u,
+    };
     uint8_t ackState = 0;
-    const bool ok = writeCommandAndWaitForAck(motorId,
-                                              kPersistParametersSubCommand,
-                                              savePayload,
-                                              4,
-                                              std::chrono::milliseconds(300),
-                                              &ackState);
-    if (!ok) {
-        ROS_ERROR("[EyouCan] Persist parameters failed on motor %u: serial=0x%08X payload=[%02X %02X %02X %02X] ack_state=0x%02X.",
+    for (int attempt = 1; attempt <= kPersistWriteAckRetries; ++attempt) {
+        const bool ok = writeCommandBytesAndWaitForAck(motorId,
+                                                       kPersistParametersSubCommand,
+                                                       savePayload,
+                                                       4,
+                                                       std::chrono::milliseconds(300),
+                                                       &ackState);
+        if (ok) {
+            return true;
+        }
+        ROS_ERROR("[EyouCan] Persist parameters failed on motor %u: serial=0x%08X payload=[%02X %02X %02X %02X] ack_state=0x%02X attempt=%d/%d.",
                   static_cast<unsigned>(motorId),
                   static_cast<unsigned>(serialNumber),
-                  static_cast<unsigned>((savePayload >> 24) & 0xFFu),
-                  static_cast<unsigned>((savePayload >> 16) & 0xFFu),
-                  static_cast<unsigned>((savePayload >> 8) & 0xFFu),
-                  static_cast<unsigned>(savePayload & 0xFFu),
-                  static_cast<unsigned>(ackState));
+                  static_cast<unsigned>(savePayload[0]),
+                  static_cast<unsigned>(savePayload[1]),
+                  static_cast<unsigned>(savePayload[2]),
+                  static_cast<unsigned>(savePayload[3]),
+                  static_cast<unsigned>(ackState),
+                  attempt,
+                  kPersistWriteAckRetries);
+        if (attempt < kPersistWriteAckRetries) {
+            std::this_thread::sleep_for(kPersistRetryDelay);
+        }
     }
-    return ok;
+    return false;
 }
 
 void EyouCan::sendWriteCommand(uint8_t motorId,
@@ -875,6 +889,58 @@ bool EyouCan::writeCommandAndWaitForAck(uint8_t motorId,
     }
 
     sendWriteCommand(motorId, subCommand, value, payloadBytes, kWriteCommand);
+
+    std::unique_lock<std::mutex> lock(pendingWriteAckMutex_);
+    auto &ack = pendingWriteAcks_[pendingReadKey(motorId, subCommand)];
+    const bool received = pendingWriteAckCv_.wait_for(
+        lock, timeout, [&ack]() { return ack.received; });
+    if (!received) {
+        if (ackStateOut != nullptr) {
+            *ackStateOut = 0;
+        }
+        return false;
+    }
+    if (ackStateOut != nullptr) {
+        *ackStateOut = ack.state;
+    }
+    return ack.state == 0x01 || ack.state == 0x05;
+}
+
+bool EyouCan::writeCommandBytesAndWaitForAck(uint8_t motorId,
+                                             uint8_t subCommand,
+                                             const std::array<uint8_t, 4> &payload,
+                                             std::size_t payloadBytes,
+                                             std::chrono::milliseconds timeout,
+                                             uint8_t *ackStateOut)
+{
+    if (!canController || !txDispatcher_) {
+        return false;
+    }
+
+    CanTransport::Frame frame;
+    frame.id = kEyouIdFrameBase + motorId;
+    frame.isExtended = false;
+    frame.isRemoteRequest = false;
+    frame.dlc = 8;
+    frame.data.fill(0);
+    frame.data[0] = kWriteCommand;
+    frame.data[1] = subCommand;
+    const std::size_t count = std::min<std::size_t>(payloadBytes, payload.size());
+    for (std::size_t i = 0; i < count; ++i) {
+        frame.data[2 + i] = payload[i];
+    }
+
+    {
+        std::lock_guard<std::mutex> lock(pendingWriteAckMutex_);
+        auto &ack = pendingWriteAcks_[pendingReadKey(motorId, subCommand)];
+        ack.received = false;
+        ack.state = 0;
+    }
+
+    if (!submitTx(frame, CanTxDispatcher::Category::Control, "EyouCan::persistParameters")) {
+        return false;
+    }
+    normalWriteSentCount_.fetch_add(1, std::memory_order_relaxed);
 
     std::unique_lock<std::mutex> lock(pendingWriteAckMutex_);
     auto &ack = pendingWriteAcks_[pendingReadKey(motorId, subCommand)];
