@@ -24,6 +24,8 @@ constexpr uint8_t kFastWriteCommand = 0x05;
 constexpr uint8_t kReadCommand = 0x03;
 constexpr uint8_t kWriteAck = 0x02;
 constexpr uint8_t kReadResponse = 0x04;
+constexpr uint8_t kReadSerialNumberSubCommand = 0x02;
+constexpr uint8_t kPersistParametersSubCommand = 0x4D;
 constexpr uint16_t kEyouIdFrameBase = 0x0000;
 constexpr std::size_t kQueriesPerMotorPerCycle = 6;
 
@@ -625,6 +627,62 @@ bool EyouCan::readPositionOffset(MotorID Id, int32_t* offsetRaw)
     return false;
 }
 
+bool EyouCan::readSerialNumber(MotorID Id, uint32_t* serialNumber)
+{
+    if (!canController || serialNumber == nullptr) {
+        return false;
+    }
+
+    const uint8_t motorId = toProtocolNodeId(Id);
+    registerManagedMotorId(Id);
+    {
+        std::lock_guard<std::mutex> stateLock(stateMutex);
+        motorStates[motorId].serialNumberReceived = false;
+    }
+
+    if (!requestSerialNumber(motorId)) {
+        return false;
+    }
+
+    const auto deadline =
+        std::chrono::steady_clock::now() + std::chrono::milliseconds(200);
+    while (std::chrono::steady_clock::now() < deadline) {
+        {
+            std::lock_guard<std::mutex> stateLock(stateMutex);
+            const auto it = motorStates.find(motorId);
+            if (it != motorStates.end() && it->second.serialNumberReceived) {
+                *serialNumber = it->second.serialNumber;
+                return true;
+            }
+        }
+        std::this_thread::sleep_for(std::chrono::milliseconds(10));
+    }
+    return false;
+}
+
+bool EyouCan::persistParameters(MotorID Id)
+{
+    if (!canController) {
+        return false;
+    }
+
+    uint32_t serialNumber = 0;
+    if (!readSerialNumber(Id, &serialNumber)) {
+        return false;
+    }
+
+    const uint8_t motorId = toProtocolNodeId(Id);
+    registerManagedMotorId(Id);
+    const uint32_t savePayload =
+        ((serialNumber & 0x00FFFFFFu) << 8) | 0x01u;
+    sendWriteCommand(motorId,
+                     kPersistParametersSubCommand,
+                     savePayload,
+                     4,
+                     kWriteCommand);
+    return true;
+}
+
 void EyouCan::sendWriteCommand(uint8_t motorId,
                                uint8_t subCommand,
                                uint32_t value,
@@ -1067,6 +1125,10 @@ void EyouCan::handleResponse(const CanTransport::Frame &frame)
             // 读返回格式: 0x04 ADDR data0 data1 data2 data3
             // 32位数据从 data[2] 开始（即 DAT2~DAT5）
             switch (subCommand) {
+            case kReadSerialNumberSubCommand:
+                state.serialNumber = readUInt32BE(frame, 2);
+                state.serialNumberReceived = true;
+                break;
             case 0x05:
                 // [FIX #7] 当前电流值，32位有符号数，1=1mA
                 state.current = readInt32BE(frame, 2);
@@ -1180,6 +1242,11 @@ bool EyouCan::requestPosition(uint8_t motorId)
 bool EyouCan::requestPositionOffset(uint8_t motorId)
 {
     return tryIssueReadCommand(motorId, 0x3B);
+}
+
+bool EyouCan::requestSerialNumber(uint8_t motorId)
+{
+    return tryIssueReadCommand(motorId, kReadSerialNumberSubCommand);
 }
 
 bool EyouCan::requestMode(uint8_t motorId)

@@ -200,6 +200,30 @@ public:
     }
 
     /**
+     * @brief 读取设备序列号（协议原始 32 位值）
+     * @param motorId 目标电机 ID
+     * @param serialNumber 输出序列号
+     * @return 读取成功返回 true，否则 false
+     */
+    virtual bool readSerialNumber(MotorID motorId, uint32_t* serialNumber)
+    {
+        (void)motorId;
+        (void)serialNumber;
+        return false;
+    }
+
+    /**
+     * @brief 提交参数到设备 EEPROM/非易失存储
+     * @param motorId 目标电机 ID
+     * @return 提交成功返回 true，否则 false
+     */
+    virtual bool persistParameters(MotorID motorId)
+    {
+        (void)motorId;
+        return false;
+    }
+
+    /**
      * @brief 初始化电机信息刷新机制
      * @param motorIds 需要周期刷新状态的电机 ID 列表
      *

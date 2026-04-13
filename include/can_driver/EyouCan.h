@@ -106,6 +106,8 @@ public:
                                  bool enable) override;
     bool setPositionOffset(MotorID motorId, int32_t offsetRaw) override;
     bool readPositionOffset(MotorID motorId, int32_t* offsetRaw) override;
+    bool readSerialNumber(MotorID motorId, uint32_t* serialNumber) override;
+    bool persistParameters(MotorID motorId) override;
     void initializeMotorRefresh(const std::vector<MotorID> &motorIds) override;
     /// 设置状态轮询频率（Hz）；<=0 表示使用默认自适应周期。
     void setRefreshRateHz(double hz);
@@ -143,6 +145,7 @@ private:
         bool fault = false;
         bool positionReceived = false;
         bool positionOffsetReceived = false;
+        bool serialNumberReceived = false;
         bool velocityReceived = false;
         bool currentReceived = false;
         bool modeReceived = false;
@@ -150,6 +153,7 @@ private:
         bool faultReceived = false;
         bool positionVelocityConfigured = false;
         int32_t positionOffset = 0;
+        uint32_t serialNumber = 0;
         MotorMode mode = MotorMode::Position;
     };
     struct PendingReadRequest {
@@ -202,6 +206,7 @@ private:
     void handleResponse(const CanTransport::Frame &data);
     bool requestPosition(uint8_t motorId);
     bool requestPositionOffset(uint8_t motorId);
+    bool requestSerialNumber(uint8_t motorId);
     bool requestMode(uint8_t motorId);
     bool requestEnable(uint8_t motorId);
     bool requestFault(uint8_t motorId);

@@ -706,6 +706,71 @@ TEST_F(EyouCanTest, ReadResponsesUpdateEnabledAndFaultState)
     EXPECT_TRUE(eyou.hasFault(static_cast<MotorID>(0x05)));
 }
 
+TEST_F(EyouCanTest, ReadSerialNumberRequestsSubCommand02AndCachesResponse)
+{
+    uint32_t serialNumber = 0;
+
+    std::thread responder([this]() {
+        std::this_thread::sleep_for(std::chrono::milliseconds(10));
+        CanTransport::Frame frame {};
+        frame.id = 0x0005;
+        frame.isExtended = false;
+        frame.isRemoteRequest = false;
+        frame.dlc = 6;
+        frame.data[0] = 0x04;
+        frame.data[1] = 0x02;
+        frame.data[2] = 0x12;
+        frame.data[3] = 0x34;
+        frame.data[4] = 0x56;
+        frame.data[5] = 0x78;
+        transport->simulateReceive(frame);
+    });
+
+    ASSERT_TRUE(eyou.readSerialNumber(static_cast<MotorID>(0x05), &serialNumber));
+    EXPECT_EQ(serialNumber, 0x12345678u);
+    ASSERT_FALSE(transport->sentFrames.empty());
+    EXPECT_EQ(transport->sentFrames.back().data[0], 0x03);
+    EXPECT_EQ(transport->sentFrames.back().data[1], 0x02);
+
+    responder.join();
+}
+
+TEST_F(EyouCanTest, PersistParametersUsesSerialNumberLow24BitsWithSaveFlag)
+{
+    std::thread responder([this]() {
+        std::this_thread::sleep_for(std::chrono::milliseconds(10));
+        CanTransport::Frame frame {};
+        frame.id = 0x0005;
+        frame.isExtended = false;
+        frame.isRemoteRequest = false;
+        frame.dlc = 6;
+        frame.data[0] = 0x04;
+        frame.data[1] = 0x02;
+        frame.data[2] = 0x12;
+        frame.data[3] = 0x34;
+        frame.data[4] = 0x56;
+        frame.data[5] = 0x78;
+        transport->simulateReceive(frame);
+    });
+
+    ASSERT_TRUE(eyou.persistParameters(static_cast<MotorID>(0x05)));
+    ASSERT_GE(transport->sentFrames.size(), 2u);
+
+    const auto &readFrame = transport->sentFrames[0];
+    EXPECT_EQ(readFrame.data[0], 0x03);
+    EXPECT_EQ(readFrame.data[1], 0x02);
+
+    const auto &writeFrame = transport->sentFrames.back();
+    EXPECT_EQ(writeFrame.data[0], 0x01);
+    EXPECT_EQ(writeFrame.data[1], 0x4D);
+    EXPECT_EQ(writeFrame.data[2], 0x34);
+    EXPECT_EQ(writeFrame.data[3], 0x56);
+    EXPECT_EQ(writeFrame.data[4], 0x78);
+    EXPECT_EQ(writeFrame.data[5], 0x01);
+
+    responder.join();
+}
+
 TEST_F(EyouCanTest, DISABLED_TODO_HandleWriteAckModeAndEnable)
 {
     GTEST_SKIP() << "TODO: cover write ack (0x02) branches for mode/enable.";
