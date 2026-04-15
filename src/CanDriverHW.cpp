@@ -243,6 +243,10 @@ bool CanDriverHW::loadRuntimeParams(const ros::NodeHandle &pnh)
                       ppLocalZeroOffsetPersistenceEnabled_)) {
         ppLocalZeroOffsetPersistenceEnabled_ = false;
     }
+    if (!pnh.getParam("pp_zero_offset_persist_on_apply_to_motor",
+                      ppZeroOffsetPersistOnApplyToMotor_)) {
+        ppZeroOffsetPersistOnApplyToMotor_ = true;
+    }
     if (!pnh.getParam("pp_local_zero_offset_file", ppLocalZeroOffsetFilePath_) ||
         ppLocalZeroOffsetFilePath_.empty()) {
         ppLocalZeroOffsetFilePath_ = defaultLocalZeroOffsetFilePath();
@@ -280,6 +284,8 @@ bool CanDriverHW::loadRuntimeParams(const ros::NodeHandle &pnh)
     ROS_INFO("[CanDriverHW] pp_local_zero_offset_persistence_enabled=%s, file='%s'.",
              ppLocalZeroOffsetPersistenceEnabled_ ? "true" : "false",
              ppLocalZeroOffsetFilePath_.c_str());
+    ROS_INFO("[CanDriverHW] pp_zero_offset_persist_on_apply_to_motor=%s.",
+             ppZeroOffsetPersistOnApplyToMotor_ ? "true" : "false");
     ROS_WARN_STREAM_COND(debugBypassRosControl_,
                          "[CanDriverHW] debug_bypass_ros_control=true: "
                          "direct topic commands will bypass ros_control fallback.");
@@ -790,7 +796,8 @@ void CanDriverHW::configureMotorMaintenanceService(MotorMaintenanceService &serv
         },
         [this](const std::string &device) {
             return getDeviceMutex(device);
-        });
+        },
+        ppZeroOffsetPersistOnApplyToMotor_);
 }
 
 std::vector<CanDriverHW::DirectCommandEndpoint> CanDriverHW::directCommandEndpoints() const

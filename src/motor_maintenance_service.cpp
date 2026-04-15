@@ -46,10 +46,11 @@ bool decodeModeSelection(double value, ModeSelection *selection)
 
 namespace {
 
-bool writePersistedPositionOffset(const MotorMaintenanceService::JointConfig& target,
-                                  CanProtocol* protocol,
-                                  int32_t rawOffset,
-                                  std::string* message)
+bool writePositionOffset(const MotorMaintenanceService::JointConfig& target,
+                         CanProtocol* protocol,
+                         int32_t rawOffset,
+                         bool persistToMotor,
+                         std::string* message)
 {
     if (protocol == nullptr) {
         if (message != nullptr) {
@@ -62,6 +63,9 @@ bool writePersistedPositionOffset(const MotorMaintenanceService::JointConfig& ta
             *message = "Protocol rejected zero offset setting.";
         }
         return false;
+    }
+    if (!persistToMotor) {
+        return true;
     }
     if (!protocol->persistParameters(target.motorId)) {
         if (message != nullptr) {
@@ -86,7 +90,8 @@ void MotorMaintenanceService::configure(
     FreshFeedbackGetter getFreshAxisFeedback,
     DisabledRequirementChecker requireAxisDisabledForConfiguration,
     ProtocolGetter getProtocol,
-    DeviceMutexGetter getDeviceMutex)
+    DeviceMutexGetter getDeviceMutex,
+    bool persistZeroOffsetOnApplyToMotor)
 {
     isActive_ = std::move(isActive);
     motorActionExecutor_ = motorActionExecutor;
@@ -100,6 +105,7 @@ void MotorMaintenanceService::configure(
     requireAxisDisabledForConfiguration_ = std::move(requireAxisDisabledForConfiguration);
     getProtocol_ = std::move(getProtocol);
     getDeviceMutex_ = std::move(getDeviceMutex);
+    persistZeroOffsetOnApplyToMotor_ = persistZeroOffsetOnApplyToMotor;
 }
 
 void MotorMaintenanceService::initialize(ros::NodeHandle &pnh)
@@ -546,16 +552,18 @@ bool MotorMaintenanceService::SetZeroByMotorId(uint16_t motorId,
             return false;
         }
 
+        const bool persistToMotor = persistZeroOffsetOnApplyToMotor_;
         bool persistOk = false;
         std::string persistError = "Set zero execution failed.";
         const auto status = motorActionExecutor_->execute(
             makeMotorTarget(target),
-            [&target, rawOffset, previousRawOffset, &persistOk, &persistError](
+            [&target, rawOffset, previousRawOffset, persistToMotor, &persistOk, &persistError](
                 const std::shared_ptr<CanProtocol>& p, MotorID /*id*/) {
-                if (!writePersistedPositionOffset(target, p.get(), rawOffset, &persistError)) {
+                if (!writePositionOffset(
+                        target, p.get(), rawOffset, persistToMotor, &persistError)) {
                     std::string rollbackError;
-                    if (!writePersistedPositionOffset(
-                            target, p.get(), previousRawOffset, &rollbackError)) {
+                    if (!writePositionOffset(
+                            target, p.get(), previousRawOffset, persistToMotor, &rollbackError)) {
                         persistError += " Rollback failed: " + rollbackError;
                     } else {
                         persistError += " Rolled back previous zero offset.";

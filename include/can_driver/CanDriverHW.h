@@ -233,6 +233,7 @@ private:
     bool savePersistedLocalZeroOffsets() const;
 
     bool ppLocalZeroOffsetPersistenceEnabled_{false};
+    bool ppZeroOffsetPersistOnApplyToMotor_{true};
     std::string ppLocalZeroOffsetFilePath_;
 };
 

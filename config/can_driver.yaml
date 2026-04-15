@@ -61,6 +61,15 @@ can_driver_node:
   # 默认 false；仅在 vcan/loopback 测试场景下建议打开。
   init_loopback: false
 
+  # PP 零点本地持久化：将 zero offset 保存到本机文件，并在下次初始化时自动恢复。
+  # 这与 apply_to_motor 不同；即使不写电机 EEPROM，也可以只在驱动侧持久保存。
+  pp_local_zero_offset_persistence_enabled: true
+  # apply_to_motor=true 时，是否额外发送 0x4D 持久化到电机非易失存储。
+  # false: 立即写入当前电机 offset，但不做 EEPROM 持久化，也不会因为 0x4D 失败而回滚
+  # true : 保持旧行为，写 offset 后继续发 0x4D
+  pp_zero_offset_persist_on_apply_to_motor: false
+  # pp_local_zero_offset_file: /home/dianhua/.ros/can_driver_pp_zero_offsets.txt
+
   # --------------------------------------------------------------------------
   # joints：关节列表
   # --------------------------------------------------------------------------
@@ -95,9 +104,11 @@ can_driver_node:
       velocity_scale: 65536
       direction_sign: -1.0   # 物理方向与系统正方向相反时填写 -1.0
       ip_max_velocity: 1.0
-      ip_max_acceleration: 2.0
-      ip_max_jerk: 10.0
+      ip_max_acceleration: 0.8
+      ip_max_jerk: 4.0
       ip_goal_tolerance: 0.001
+      direction_sign: -1.0
+
 
     - name: wrist_pitch_joint    # 腕部俯仰（第 4 轴）
       motor_id: 0x14
@@ -126,6 +137,7 @@ can_driver_node:
       control_mode: csp
       position_scale: 65536  # 16-bit 编码器，PPR → 驱动自动换算为 2π/65536 rad/count
       velocity_scale: 65536
+      direction_sign: -1.0
 
     # - name: left_gripper_finger_joint  # 左夹爪（第 7 轴）
     #   motor_id: 0x17

@@ -2206,6 +2206,47 @@ TEST_F(CanDriverHWSmokeTest, SetZeroServiceAllowsAutoZeroOutsideCurrentLimits)
     spinner.stop();
 }
 
+TEST_F(CanDriverHWSmokeTest, SetZeroServiceApplyToMotorCanSkipPersistence)
+{
+    auto fakeDm = std::make_shared<FakeDeviceManager>();
+    fakeDm->protocol()->setFeedbackPosition(rawFromPprRadians(0.1));
+    fakeDm->protocol()->setPersistResult(false);
+    CanDriverHW hw(fakeDm);
+
+    ros::NodeHandle nh;
+    ros::NodeHandle pnh(uniqueNs("can_driver_hw_smoke_zero_apply_without_persist"));
+
+    pnh.setParam("joints", makeSingleCspJoint());
+    pnh.setParam("pp_zero_offset_persist_on_apply_to_motor", false);
+
+    ASSERT_TRUE(hw.init(nh, pnh));
+    const auto initResult = hw.operationalCoordinator().RequestInit("fake0", false);
+    ASSERT_TRUE(initResult.ok) << initResult.message;
+
+    ros::AsyncSpinner spinner(1);
+    spinner.start();
+
+    ros::ServiceClient client = nh.serviceClient<can_driver::SetZero>(
+        pnh.resolveName("set_zero"));
+    ASSERT_TRUE(client.waitForExistence(ros::Duration(1.0)));
+
+    setFreshEnabledFeedback(*fakeDm, "fake0", CanType::PP, static_cast<MotorID>(0x05), false);
+
+    can_driver::SetZero srv;
+    srv.request.motor_id = 0x05u;
+    srv.request.zero_offset_rad = 0.0;
+    srv.request.use_current_position_as_zero = true;
+    srv.request.apply_to_motor = true;
+    ASSERT_TRUE(client.call(srv));
+    ASSERT_TRUE(srv.response.success) << srv.response.message;
+    EXPECT_NEAR(srv.response.applied_zero_offset_rad, -0.1, 1e-4);
+    EXPECT_EQ(fakeDm->protocol()->setOffsetCalls(), 1);
+    EXPECT_EQ(fakeDm->protocol()->persistCalls(), 0);
+    EXPECT_EQ(fakeDm->protocol()->lastOffsetRaw(), -rawFromPprRadians(0.1));
+
+    spinner.stop();
+}
+
 TEST_F(CanDriverHWSmokeTest, SetZeroServiceAppliesDirectionSignToZeroOffsets)
 {
     auto fakeDm = std::make_shared<FakeDeviceManager>();
@@ -2400,6 +2441,53 @@ TEST_F(CanDriverHWSmokeTest, SetZeroLimitServiceStopsBeforeLimitsWhenZeroPersist
     EXPECT_FALSE(srv.response.success);
     EXPECT_EQ(fakeDm->protocol()->persistCalls(), 2);
     EXPECT_EQ(fakeDm->protocol()->setLimitCalls(), 0);
+
+    spinner.stop();
+}
+
+TEST_F(CanDriverHWSmokeTest, SetZeroLimitServiceApplyToMotorCanSkipPersistence)
+{
+    auto fakeDm = std::make_shared<FakeDeviceManager>();
+    fakeDm->protocol()->setFeedbackPosition(rawFromPprRadians(0.1));
+    fakeDm->protocol()->setPersistResult(false);
+    CanDriverHW hw(fakeDm);
+
+    ros::NodeHandle nh;
+    ros::NodeHandle pnh(uniqueNs("can_driver_hw_smoke_zero_limit_apply_without_persist"));
+
+    pnh.setParam("joints", makeSingleCspJoint());
+    pnh.setParam("pp_zero_offset_persist_on_apply_to_motor", false);
+
+    ASSERT_TRUE(hw.init(nh, pnh));
+    const auto initResult = hw.operationalCoordinator().RequestInit("fake0", false);
+    ASSERT_TRUE(initResult.ok) << initResult.message;
+
+    ros::AsyncSpinner spinner(1);
+    spinner.start();
+
+    ros::ServiceClient client = nh.serviceClient<can_driver::SetZeroLimit>(
+        pnh.resolveName("set_zero_limit"));
+    ASSERT_TRUE(client.waitForExistence(ros::Duration(1.0)));
+
+    setFreshEnabledFeedback(*fakeDm, "fake0", CanType::PP, static_cast<MotorID>(0x05), false);
+
+    can_driver::SetZeroLimit srv;
+    srv.request.motor_id = 0x05u;
+    srv.request.zero_offset_rad = 0.0;
+    srv.request.use_current_position_as_zero = true;
+    srv.request.min_position_rad = -0.4;
+    srv.request.max_position_rad = 0.4;
+    srv.request.use_urdf_limits = false;
+    srv.request.apply_to_motor = true;
+    ASSERT_TRUE(client.call(srv));
+    ASSERT_TRUE(srv.response.success) << srv.response.message;
+    EXPECT_EQ(fakeDm->protocol()->setOffsetCalls(), 1);
+    EXPECT_EQ(fakeDm->protocol()->persistCalls(), 0);
+    EXPECT_EQ(fakeDm->protocol()->setLimitCalls(), 1);
+    EXPECT_EQ(fakeDm->protocol()->lastOffsetRaw(), -rawFromPprRadians(0.1));
+    EXPECT_EQ(fakeDm->protocol()->lastLimitMin(), rawFromPprRadians(-0.4));
+    EXPECT_EQ(fakeDm->protocol()->lastLimitMax(), rawFromPprRadians(0.4));
+    EXPECT_TRUE(fakeDm->protocol()->lastLimitEnable());
 
     spinner.stop();
 }

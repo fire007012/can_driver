@@ -66,7 +66,8 @@ public:
                    FreshFeedbackGetter getFreshAxisFeedback,
                    DisabledRequirementChecker requireAxisDisabledForConfiguration,
                    ProtocolGetter getProtocol,
-                   DeviceMutexGetter getDeviceMutex);
+                   DeviceMutexGetter getDeviceMutex,
+                   bool persistZeroOffsetOnApplyToMotor);
 
     void initialize(ros::NodeHandle &pnh);
     void initialize(ros::NodeHandle &pnh,
@@ -146,6 +147,7 @@ private:
     DisabledRequirementChecker requireAxisDisabledForConfiguration_;
     ProtocolGetter getProtocol_;
     DeviceMutexGetter getDeviceMutex_;
+    bool persistZeroOffsetOnApplyToMotor_{true};
 
     ros::ServiceServer motorCmdSrv_;
     ros::ServiceServer setZeroSrv_;
