@@ -50,6 +50,7 @@ roslaunch can_driver can_driver.launch
 
 ## More Docs
 
+- `docs/配置文件字段详解与从零配置指南.md`
 - `docs/文档导航.md`
 - `docs/架构设计.md`
 - `docs/使用指南.md`
