@@ -1,6 +1,7 @@
 #include <gtest/gtest.h>
 #include <ros/time.h>
 
+#include "can_driver/DamiaoCan.h"
 #include "can_driver/DeviceRefreshWorker.h"
 #include "can_driver/DeviceManager.h"
 
@@ -160,6 +161,18 @@ TEST_F(RosTimeFixture, EnsureProtocolFailsWithoutTransport)
     DeviceManager dm;
     const bool ok = dm.ensureProtocol("nonexistent", CanType::MT);
     EXPECT_FALSE(ok);
+}
+
+TEST_F(RosTimeFixture, EnsureDamiaoProtocolCreatesAfterInjectedTransport)
+{
+    DeviceManager dm;
+    auto fakeTransport = std::make_shared<SocketCanController>();
+    DeviceManagerTestAccessor::injectTransport(dm, "fake0", fakeTransport);
+
+    ASSERT_TRUE(dm.ensureProtocol("fake0", CanType::DM));
+    const auto protocol = dm.getProtocol("fake0", CanType::DM);
+    ASSERT_NE(protocol, nullptr);
+    EXPECT_NE(std::dynamic_pointer_cast<DamiaoCan>(protocol), nullptr);
 }
 
 TEST_F(RosTimeFixture, EnsureEcbProtocolCreatesWithoutSocketTransport)
