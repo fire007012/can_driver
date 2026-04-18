@@ -1,0 +1,12 @@
+uint16 motor_id # 电机 ID
+uint8 command   # 指令类型，见下方 CMD_* 常量
+float64 value   # 指令参数（例如速度、位置或 mode 值）
+
+# command 常量
+uint8 CMD_ENABLE=0
+uint8 CMD_DISABLE=1
+uint8 CMD_STOP=2
+uint8 CMD_SET_MODE=3   # value: 0=position  1=velocity
+---
+bool success
+string message  # 失败时返回原因

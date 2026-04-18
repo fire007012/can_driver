@@ -1,0 +1,95 @@
+# =============================================================================
+# ros_control 控制器配置
+# =============================================================================
+# 本文件由 ROS 参数服务器加载（见 launch/can_driver.launch）。
+# controller_manager 读取这些参数后，按需实例化各控制器插件。
+#
+# 数据流向：
+#   MoveIt / Nav Stack
+#       ↓ follow_joint_trajectory / /cmd_vel
+#   controller_manager
+#       ↓ PositionJointInterface / VelocityJointInterface
+#   CanDriverHW::write()
+#       ↓ CAN 帧
+#   物理电机
+# =============================================================================
+
+# controller_manager 全局设置
+controller_manager:
+  # 控制器管理器的更新频率（Hz），建议与 can_driver.yaml 中的
+  # control_frequency 保持一致，避免步调不同步。
+  update_rate: 100
+
+
+# =============================================================================
+# joint_state_controller
+# =============================================================================
+# 作用：将 CanDriverHW::read() 写入的关节状态（位置/速度/力矩）
+#       打包成 sensor_msgs/JointState 消息，发布到 /joint_states topic。
+# MoveIt、RViz、robot_state_publisher 都依赖这个 topic 来显示机器人状态。
+# 这个控制器只读不写，不会向电机发送任何指令。
+joint_state_controller:
+  type: joint_state_controller/JointStateController
+  publish_rate: 50    # /joint_states 发布频率（Hz），50 Hz 对 RViz 可视化已足够
+
+
+# =============================================================================
+# arm_controller
+# =============================================================================
+# 作用：接收 MoveIt 发来的 follow_joint_trajectory Action 目标，
+#       按时间插值后逐帧写入 PositionJointInterface，
+#       CanDriverHW::write() 再将位置指令转发给 PP 协议电机。
+#
+# 使用场景：MoveIt 运动规划执行、rqt_joint_trajectory_controller 手动调试。
+arm_controller:
+  type: position_controllers/JointTrajectoryController
+
+  # 受控关节列表，名称须与 can_driver.yaml 中的 name 字段及 URDF 完全一致。
+  joints:
+    - rotary_table    # 转台（第 1 轴）
+    - larger_arm      # 大臂（第 2 轴）
+    - smaller_arm     # 小臂（第 3 轴）
+    - wrist_x         # 腕部 X 轴（第 4 轴）
+    - wrist_y         # 腕部 Y 轴（第 5 轴）
+    - wrist_z         # 腕部 Z 轴（第 6 轴）
+    - actuator        # 末端执行器（第 7 轴）
+
+  # 轨迹执行约束（可选，未填则使用插件默认值）
+  # constraints:
+  #   goal_time: 0.5          # 允许超出目标时间的秒数
+  #   stopped_velocity_tolerance: 0.01  # 到达目标时速度容差（rad/s）
+
+
+# =============================================================================
+# wheel_controller
+# =============================================================================
+# 作用：接收 Navigation Stack 发来的 geometry_msgs/Twist（/cmd_vel），
+#       根据差速运动学模型拆解为左右轮速度，写入 VelocityJointInterface，
+#       CanDriverHW::write() 再将速度指令转发给 MT 协议电机。
+#       同时将编码器反馈积分为里程计，发布 /odom topic 和 odom→base_link TF。
+#
+# 使用场景：ROS Navigation Stack（move_base）、手柄遥控底盘。
+wheel_controller:
+  type: diff_drive_controller/DiffDriveController
+
+  left_wheel:  left_wheel     # 左轮关节名，须与 can_driver.yaml 一致
+  right_wheel: right_wheel    # 右轮关节名，须与 can_driver.yaml 一致
+
+  # ⚠️ 以下两个参数必须按实际机器人尺寸填写，否则里程计会有系统误差
+  wheel_separation: 0.5       # 左右轮中心距（单位：米）← 按实际测量值修改
+  wheel_radius: 0.1           # 车轮半径（单位：米）← 按实际测量值修改
+
+  # 里程计发布设置（可选）
+  # publish_rate: 50.0        # /odom 发布频率（Hz），默认 50
+  # odom_frame_id: odom       # 里程计坐标系名称
+  # base_frame_id: base_link  # 机器人本体坐标系名称
+
+  # 速度限制（可选，建议填写以保护硬件）
+  # linear:
+  #   x:
+  #     max_velocity: 1.0     # 最大线速度（m/s）
+  #     max_acceleration: 1.0 # 最大线加速度（m/s²）
+  # angular:
+  #   z:
+  #     max_velocity: 1.0     # 最大角速度（rad/s）
+  #     max_acceleration: 1.0 # 最大角加速度（rad/s²）

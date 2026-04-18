@@ -1,0 +1,5 @@
+string device  # SocketCAN 设备名（如 can0/vcan0）
+bool loopback  # 是否启用 CAN 回环（测试场景常用）
+---
+bool success
+string message # 失败时返回原因

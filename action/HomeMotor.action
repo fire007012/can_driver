@@ -1,0 +1,12 @@
+# goal
+uint16 motor_id      # 目标电机 ID
+bool search_positive # true=正向找零，false=反向找零
+float64 timeout      # 找零超时（秒）
+---
+# result
+bool success
+string message       # 失败原因
+---
+# feedback
+float64 progress         # 0.0~1.0
+float64 current_position # 当前位置信息

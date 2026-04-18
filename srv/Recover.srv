@@ -1,0 +1,4 @@
+uint16 motor_id # 目标电机 ID；0xFFFF 表示全局恢复
+---
+bool success
+string message  # 失败时返回原因
