@@ -9,6 +9,8 @@ namespace joint_config_parser {
 
 namespace {
 
+constexpr double kDamiaoSiScale = 1e-4;
+
 bool parsePositiveOptionalDouble(const XmlRpc::XmlRpcValue &jointValue,
                                  const char *fieldName,
                                  const std::string &jointName,
@@ -155,16 +157,55 @@ bool parse(const XmlRpc::XmlRpcValue &jointList,
         jc.name = static_cast<std::string>(jv["name"]);
         jc.canDevice = static_cast<std::string>(jv["can_device"]);
         jc.controlMode = static_cast<std::string>(jv["control_mode"]);
-        if (can_driver::axisControlModeFromString(jc.controlMode) ==
-            can_driver::AxisControlMode::Unknown) {
+        const auto axisMode = can_driver::axisControlModeFromString(jc.controlMode);
+        if (axisMode == can_driver::AxisControlMode::Unknown) {
             errorMsg = "Joint '" + jc.name + "': unknown control_mode '" + jc.controlMode +
                        "' (use velocity, position, or csp).";
+            return false;
+        }
+
+        // 协议字符串显式映射到枚举，未知值直接报错。
+        const std::string protoStr = static_cast<std::string>(jv["protocol"]);
+        if (protoStr == "MT") {
+            jc.protocol = CanType::MT;
+        } else if (protoStr == "PP") {
+            jc.protocol = CanType::PP;
+        } else if (protoStr == "DM") {
+            jc.protocol = CanType::DM;
+        } else if (protoStr == "ECB") {
+            jc.protocol = CanType::ECB;
+        } else {
+            errorMsg = "Joint '" + jc.name +
+                       "': unknown protocol '" + protoStr + "' (use MT/PP/DM/ECB).";
+            return false;
+        }
+
+        if (!parseMotorId(jv["motor_id"], jc.name, jc.motorId, errorMsg)) {
+            return false;
+        }
+
+        if (jc.protocol == CanType::DM &&
+            can_driver::toProtocolNodeId(jc.motorId) > 0x0Fu) {
+            errorMsg = "Joint '" + jc.name +
+                       "': DM protocol currently requires motor_id low byte in [0, 15] "
+                       "so feedback can be matched reliably.";
+            return false;
+        }
+
+        if (jc.protocol == CanType::DM &&
+            axisMode != can_driver::AxisControlMode::Velocity) {
+            errorMsg = "Joint '" + jc.name +
+                       "': DM protocol currently only supports control_mode 'velocity'.";
             return false;
         }
 
         // scale 支持两种填写方式：
         //   1. 直接填换算系数（小数，如 9.587e-05），raw * scale = rad
         //   2. 填每圈脉冲数 PPR（>=2 的整数，如 65536），自动换算为 2π/PPR
+        if (jc.protocol == CanType::DM) {
+            jc.positionScale = kDamiaoSiScale;
+            jc.velocityScale = kDamiaoSiScale;
+        }
         if (jv.hasMember("position_scale")) {
             const auto &sv = jv["position_scale"];
             const double val = (sv.getType() == XmlRpc::XmlRpcValue::TypeInt)
@@ -242,23 +283,6 @@ bool parse(const XmlRpc::XmlRpcValue &jointList,
                 errorMsg = "Joint '" + jc.name + "': ecb_refresh_ms must be > 0.";
                 return false;
             }
-        }
-
-        if (!parseMotorId(jv["motor_id"], jc.name, jc.motorId, errorMsg)) {
-            return false;
-        }
-
-        // 协议字符串显式映射到枚举，未知值直接报错。
-        const std::string protoStr = static_cast<std::string>(jv["protocol"]);
-        if (protoStr == "MT") {
-            jc.protocol = CanType::MT;
-        } else if (protoStr == "PP") {
-            jc.protocol = CanType::PP;
-        } else if (protoStr == "ECB") {
-            jc.protocol = CanType::ECB;
-        } else {
-            errorMsg = "Joint '" + jc.name + "': unknown protocol '" + protoStr + "' (use MT/PP/ECB).";
-            return false;
         }
 
         if (jc.protocol == CanType::ECB && !jc.ecbAutoDiscovery && jc.ecbIp.empty()) {

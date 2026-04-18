@@ -176,6 +176,7 @@ add_library(can_driver_transport
   src/JointConfigParser.cpp
   src/MtCan.cpp
   src/EyouCan.cpp
+  src/DamiaoCan.cpp
   src/InnfosEcbProtocol.cpp
   src/driver_ros_endpoints.cpp
   src/command_gate.cpp
@@ -419,6 +420,26 @@ if(CATKIN_ENABLE_TESTING)
       )
     else()
       target_link_libraries(test_mt_can_protocol
+        can_driver_transport
+        ${catkin_LIBRARIES}
+        ${GTEST_LIBRARIES} ${GTEST_MAIN_LIBRARIES}
+      )
+    endif()
+  endif()
+
+  catkin_add_gtest(test_damiao_can_protocol
+    tests/test_damiao_can_protocol.cpp
+  )
+  if(TARGET test_damiao_can_protocol)
+    target_include_directories(test_damiao_can_protocol PRIVATE include ${GTEST_INCLUDE_DIRS})
+    if (TARGET GTest::GTest)
+      target_link_libraries(test_damiao_can_protocol
+        can_driver_transport
+        ${catkin_LIBRARIES}
+        GTest::GTest GTest::Main
+      )
+    else()
+      target_link_libraries(test_damiao_can_protocol
         can_driver_transport
         ${catkin_LIBRARIES}
         ${GTEST_LIBRARIES} ${GTEST_MAIN_LIBRARIES}

@@ -18,6 +18,9 @@ const char *axisReadinessProtocolName(CanType protocol)
     if (protocol == CanType::PP) {
         return "pp";
     }
+    if (protocol == CanType::DM) {
+        return "dm";
+    }
     return "ecb";
 }
 
@@ -215,10 +218,6 @@ bool LifecycleDriverOps::queryMotorFault(const MotorActionExecutor::Target &targ
         }
     }
 
-    if (target.protocol != CanType::MT) {
-        return false;
-    }
-
     auto proto = getProtocol(target.canDevice, target.protocol);
     auto devMutex = getDeviceMutex(target.canDevice);
     if (!proto || !devMutex) {
@@ -246,10 +245,6 @@ bool LifecycleDriverOps::queryMotorEnabled(const MotorActionExecutor::Target &ta
             *enabled = feedback.enabled;
             return true;
         }
-    }
-
-    if (target.protocol != CanType::MT) {
-        return false;
     }
 
     auto proto = getProtocol(target.canDevice, target.protocol);

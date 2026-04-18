@@ -5,6 +5,7 @@
 #include "can_driver/CanTxDispatcher.h"
 #include "can_driver/CanType.h"
 #include "can_driver/DeviceRefreshWorker.h"
+#include "can_driver/DamiaoCan.h"
 #include "can_driver/EyouCan.h"
 #include "can_driver/IDeviceManager.h"
 #include "can_driver/InnfosEcbProtocol.h"
@@ -87,12 +88,16 @@ private:
         std::weak_ptr<can_driver::SharedDriverState> sharedState;
         std::weak_ptr<MtCan> mtProtocol;
         std::weak_ptr<EyouCan> ppProtocol;
+        std::weak_ptr<DamiaoCan> dmProtocol;
         std::shared_ptr<can_driver::DeviceRefreshWorker> worker;
         std::atomic<bool> mtActive{false};
         std::atomic<bool> ppActive{false};
+        std::atomic<bool> dmActive{false};
         std::vector<std::uint8_t> mtMotorIds;
         std::vector<std::uint8_t> ppMotorIds;
+        std::vector<std::uint8_t> dmMotorIds;
         std::unordered_map<std::uint8_t, can_driver::PpAxisRefreshScheduleState> ppScheduleStates;
+        std::unordered_map<std::uint8_t, can_driver::DmAxisRefreshScheduleState> dmScheduleStates;
         std::uint64_t refreshCycleCount{0};
         std::uint64_t mtScheduleCycleCount{0};
         std::uint64_t ppScheduleCycleCount{0};
@@ -100,6 +105,7 @@ private:
         std::uint64_t queryPressureUntilCycle{0};
         std::chrono::steady_clock::time_point nextMtTick {};
         std::chrono::steady_clock::time_point nextPpTick {};
+        std::chrono::steady_clock::time_point nextDmTick {};
         mutable std::mutex scheduleMutex;
     };
 
@@ -121,6 +127,7 @@ private:
     std::map<std::string, std::shared_ptr<CanTxDispatcher>> txDispatchers_;
     std::map<std::string, std::shared_ptr<MtCan>> mtProtocols_;
     std::map<std::string, std::shared_ptr<EyouCan>> eyouProtocols_;
+    std::map<std::string, std::shared_ptr<DamiaoCan>> damiaoProtocols_;
     std::map<std::string, std::shared_ptr<InnfosEcbProtocol>> ecbProtocols_;
     std::set<std::string> ecbDevices_;
     std::map<std::string, std::shared_ptr<DeviceRefreshRuntime>> deviceRefreshRuntimes_;

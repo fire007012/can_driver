@@ -10,6 +10,7 @@
 enum class CanType {
     MT, ///< 雷赛 MT 协议
     PP, ///< Eyou PP 协议
+    DM, ///< 达妙 DM 协议
     ECB ///< Innfos ECB 协议
 };
 
