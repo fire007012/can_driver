@@ -146,6 +146,23 @@ can_driver_node:
     #   position_scale: 65536  # 16-bit 编码器，PPR → 驱动自动换算为 2π/65536 rad/count
     #   velocity_scale: 65536
 
+    # --- 底盘履带关节（DM 协议，速度模式）---
+    # 达妙履带只作为 velocity 语义关节接入，由协议后端自行决定具体报文格式。
+
+    - name: left_front_wheel_joint
+      motor_id: 0x01
+      protocol: DM
+      can_device: can1
+      control_mode: velocity
+      direction_sign: 1.0
+
+    - name: right_front_wheel_joint
+      motor_id: 0x02
+      protocol: DM
+      can_device: can1
+      control_mode: velocity
+      direction_sign: -1.0
+
     # --------------------------------------------------------------------------
     # 可选字段（未填写时默认 1.0）：
     #   position_scale / velocity_scale 支持两种填写方式：
