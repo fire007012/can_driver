@@ -162,6 +162,17 @@ TEST_F(RosTimeFixture, EnsureProtocolFailsWithoutTransport)
     EXPECT_FALSE(ok);
 }
 
+TEST_F(RosTimeFixture, EnsureEcbProtocolCreatesWithoutSocketTransport)
+{
+    DeviceManager dm;
+    ASSERT_TRUE(dm.ensureTransport("ecb://auto", true));
+    ASSERT_TRUE(dm.ensureProtocol("ecb://auto", CanType::ECB));
+
+    const auto protocol = dm.getProtocol("ecb://auto", CanType::ECB);
+    ASSERT_NE(protocol, nullptr);
+    EXPECT_TRUE(dm.isDeviceReady("ecb://auto"));
+}
+
 TEST_F(RosTimeFixture, GetDeviceMutexReturnsNullForNonexistent)
 {
     DeviceManager dm;

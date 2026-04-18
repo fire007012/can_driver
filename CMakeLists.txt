@@ -1,6 +1,27 @@
 cmake_minimum_required(VERSION 3.0.2)
 project(can_driver)
 
+set(INNFOS_SDK_DIR "")
+if(EXISTS "${CMAKE_CURRENT_SOURCE_DIR}/1MINTASCA/innfos-cpp-sdk")
+  set(INNFOS_SDK_DIR "${CMAKE_CURRENT_SOURCE_DIR}/1MINTASCA/innfos-cpp-sdk")
+endif()
+
+if(INNFOS_SDK_DIR STREQUAL "")
+  message(FATAL_ERROR "Failed to locate innfos-cpp-sdk under 1MINTASCA/.")
+endif()
+
+set(INNFOS_SDK_INCLUDE_DIR "${INNFOS_SDK_DIR}/sdk/include")
+set(INNFOS_SDK_LIB_DIR "${INNFOS_SDK_DIR}/sdk/lib/linux_x86_64")
+unset(INNFOS_ACTUATOR_LIB CACHE)
+find_library(INNFOS_ACTUATOR_LIB
+  NAMES ActuatorController
+  PATHS ${INNFOS_SDK_LIB_DIR}
+  NO_DEFAULT_PATH
+)
+if(NOT INNFOS_ACTUATOR_LIB)
+  message(FATAL_ERROR "Failed to find libActuatorController.so under ${INNFOS_SDK_LIB_DIR}")
+endif()
+
 ## Use C++17 to unlock std::clamp 等现代特性
 set(CMAKE_CXX_STANDARD 17)
 set(CMAKE_CXX_STANDARD_REQUIRED ON)
@@ -136,6 +157,7 @@ endif()
 ## Your package locations should be listed before other locations
 include_directories(
   include
+  ${INNFOS_SDK_INCLUDE_DIR}
   ${catkin_INCLUDE_DIRS}
 )
 
@@ -147,6 +169,7 @@ add_library(can_driver_transport
   src/JointConfigParser.cpp
   src/MtCan.cpp
   src/EyouCan.cpp
+  src/InnfosEcbProtocol.cpp
   src/driver_ros_endpoints.cpp
   src/command_gate.cpp
   src/lifecycle_driver_ops.cpp
@@ -155,14 +178,23 @@ add_library(can_driver_transport
   src/motor_maintenance_service.cpp
   src/operational_coordinator.cpp
   src/SocketCanController.cpp
+  src/UdpCanTransport.cpp
   src/SafeCommand.cpp
   src/CanDriverHW.cpp
 )
 add_dependencies(can_driver_transport ${${PROJECT_NAME}_EXPORTED_TARGETS} ${catkin_EXPORTED_TARGETS})
 
 target_link_libraries(can_driver_transport
+  ${INNFOS_ACTUATOR_LIB}
+  pthread
   ${catkin_LIBRARIES}
 )
+if(NOT INNFOS_SDK_DIR STREQUAL "")
+  set_target_properties(can_driver_transport PROPERTIES
+    BUILD_RPATH ${INNFOS_SDK_LIB_DIR}
+    INSTALL_RPATH ${INNFOS_SDK_LIB_DIR}
+  )
+endif()
 
 ## Add cmake target dependencies of the library
 ## as an example, code may need to be generated before libraries
@@ -187,6 +219,7 @@ target_link_libraries(can_driver_node
 ## in contrast to setup.py, you can choose the destination
 catkin_install_python(PROGRAMS
   scripts/realtime_motor_ui.py
+  scripts/mt_motor_interface.py
   DESTINATION ${CATKIN_PACKAGE_BIN_DESTINATION}
 )
 
@@ -239,6 +272,26 @@ if(CATKIN_ENABLE_TESTING)
       )
     else()
       target_link_libraries(test_socketcan_controller
+        can_driver_transport
+        ${catkin_LIBRARIES}
+        ${GTEST_LIBRARIES} ${GTEST_MAIN_LIBRARIES}
+      )
+    endif()
+  endif()
+
+  catkin_add_gtest(test_udp_can_transport
+    tests/test_udp_can_transport.cpp
+  )
+  if(TARGET test_udp_can_transport)
+    target_include_directories(test_udp_can_transport PRIVATE include ${GTEST_INCLUDE_DIRS})
+    if (TARGET GTest::GTest)
+      target_link_libraries(test_udp_can_transport
+        can_driver_transport
+        ${catkin_LIBRARIES}
+        GTest::GTest GTest::Main
+      )
+    else()
+      target_link_libraries(test_udp_can_transport
         can_driver_transport
         ${catkin_LIBRARIES}
         ${GTEST_LIBRARIES} ${GTEST_MAIN_LIBRARIES}

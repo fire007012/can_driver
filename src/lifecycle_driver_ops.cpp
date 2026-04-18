@@ -12,7 +12,13 @@ namespace {
 
 const char *axisReadinessProtocolName(CanType protocol)
 {
-    return protocol == CanType::MT ? "mt" : "pp";
+    if (protocol == CanType::MT) {
+        return "mt";
+    }
+    if (protocol == CanType::PP) {
+        return "pp";
+    }
+    return "ecb";
 }
 
 std::string axisReadinessMapKey(const SharedDriverState::AxisKey &key)

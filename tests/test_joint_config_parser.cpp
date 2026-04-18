@@ -117,6 +117,67 @@ TEST(JointConfigParser, ParseRejectsInvalidProtocol)
     EXPECT_NE(err.find("unknown protocol"), std::string::npos);
 }
 
+TEST(JointConfigParser, ParseAcceptsEcbProtocolWithFixedIp)
+{
+    XmlRpc::XmlRpcValue motorId(21);
+    auto joint = makeJointBase("ecb_joint", motorId, "ECB");
+    joint["can_device"] = std::string("ecb://auto");
+    joint["ecb_ip"] = std::string("192.168.1.20");
+    joint["ecb_discovery"] = std::string("fixed");
+    joint["ecb_refresh_ms"] = 10;
+    auto list = makeJointList(joint);
+
+    std::vector<joint_config_parser::ParsedJointConfig> out;
+    std::string err;
+    ASSERT_TRUE(parse(list, out, err));
+    ASSERT_EQ(out.size(), 1u);
+    EXPECT_EQ(out[0].protocol, CanType::ECB);
+    EXPECT_EQ(out[0].ecbIp, "192.168.1.20");
+    EXPECT_FALSE(out[0].ecbAutoDiscovery);
+    EXPECT_EQ(out[0].ecbRefreshMs, 10);
+}
+
+TEST(JointConfigParser, ParseRejectsInvalidEcbDiscovery)
+{
+    XmlRpc::XmlRpcValue motorId(22);
+    auto joint = makeJointBase("ecb_joint_bad_discovery", motorId, "ECB");
+    joint["ecb_discovery"] = std::string("bad_mode");
+    auto list = makeJointList(joint);
+
+    std::vector<joint_config_parser::ParsedJointConfig> out;
+    std::string err;
+    EXPECT_FALSE(parse(list, out, err));
+    EXPECT_NE(err.find("ecb_discovery"), std::string::npos);
+}
+
+TEST(JointConfigParser, ParseUsesEcbIpFromCanDevicePrefix)
+{
+    XmlRpc::XmlRpcValue motorId(23);
+    auto joint = makeJointBase("ecb_joint_ip_fallback", motorId, "ECB");
+    joint["can_device"] = std::string("ecb://192.168.10.8");
+    joint["ecb_discovery"] = std::string("fixed");
+    auto list = makeJointList(joint);
+
+    std::vector<joint_config_parser::ParsedJointConfig> out;
+    std::string err;
+    ASSERT_TRUE(parse(list, out, err));
+    ASSERT_EQ(out.size(), 1u);
+    EXPECT_EQ(out[0].ecbIp, "192.168.10.8");
+}
+
+TEST(JointConfigParser, ParseRejectsInvalidEcbRefreshMs)
+{
+    XmlRpc::XmlRpcValue motorId(24);
+    auto joint = makeJointBase("ecb_joint_bad_refresh", motorId, "ECB");
+    joint["ecb_refresh_ms"] = 0;
+    auto list = makeJointList(joint);
+
+    std::vector<joint_config_parser::ParsedJointConfig> out;
+    std::string err;
+    EXPECT_FALSE(parse(list, out, err));
+    EXPECT_NE(err.find("ecb_refresh_ms"), std::string::npos);
+}
+
 TEST(JointConfigParser, ParseRejectsInvalidControlMode)
 {
     XmlRpc::XmlRpcValue motorId(1);

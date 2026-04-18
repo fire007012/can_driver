@@ -2,3 +2,7 @@ scripts/__pycache__/
 src/*.bak
 lib/myactuator_rmd-main/
 lib/myactuator_rmd_ros-main/
+1MINTASCA/innfos-cpp-sdk/example/build/
+1MINTASCA/innfos-cpp-sdk/sdk/lib/windows_x64/
+1MINTASCA/innfos-cpp-sdk/tools/logtool/windows_x64/
+1MINTASCA/innfos-cpp-sdk/tools/vcredist_x64.exe
