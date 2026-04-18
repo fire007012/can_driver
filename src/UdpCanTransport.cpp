@@ -200,11 +200,11 @@ CanTransport::SendResult UdpCanTransport::send(const CanTransport::Frame &frame)
     std::array<std::uint8_t, 13> packet{};
     packet.fill(0);
 
-    packet[0] = 0x08;
+    const std::uint8_t dlc = std::min<std::uint8_t>(frame.dlc, 8);
+    packet[0] = dlc;
     packet[3] = static_cast<std::uint8_t>((frame.id >> 8) & 0xFF);
     packet[4] = static_cast<std::uint8_t>(frame.id & 0xFF);
 
-    const std::uint8_t dlc = std::min<std::uint8_t>(frame.dlc, 8);
     for (std::size_t i = 0; i < dlc; ++i) {
         packet[5 + i] = frame.data[i];
     }
@@ -292,8 +292,25 @@ void UdpCanTransport::receiveLoop()
         }
 
         std::array<std::uint8_t, 64> rx{};
-        const auto n = ::recvfrom(socketFd_, rx.data(), rx.size(), 0, nullptr, nullptr);
-        if (n < 13) {
+        sockaddr_in senderAddr {};
+        socklen_t senderLen = sizeof(senderAddr);
+        const auto n = ::recvfrom(socketFd_,
+                                  rx.data(),
+                                  rx.size(),
+                                  0,
+                                  reinterpret_cast<sockaddr *>(&senderAddr),
+                                  &senderLen);
+        if (n < 5) {
+            continue;
+        }
+        if (senderLen != sizeof(senderAddr) || senderAddr.sin_family != AF_INET ||
+            senderAddr.sin_port != remoteAddr_.sin_port ||
+            senderAddr.sin_addr.s_addr != remoteAddr_.sin_addr.s_addr) {
+            continue;
+        }
+
+        const std::uint8_t dlc = rx[0];
+        if (dlc > 8 || n < static_cast<ssize_t>(5 + dlc)) {
             continue;
         }
 
@@ -301,9 +318,9 @@ void UdpCanTransport::receiveLoop()
         frame.isExtended = false;
         frame.isRemoteRequest = false;
         frame.id = (static_cast<std::uint32_t>(rx[3]) << 8) | static_cast<std::uint32_t>(rx[4]);
-        frame.dlc = 8;
+        frame.dlc = dlc;
         frame.data.fill(0);
-        for (std::size_t i = 0; i < 8; ++i) {
+        for (std::size_t i = 0; i < dlc; ++i) {
             frame.data[i] = rx[5 + i];
         }
 

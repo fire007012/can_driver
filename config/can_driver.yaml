@@ -107,7 +107,6 @@ can_driver_node:
       ip_max_acceleration: 0.8
       ip_max_jerk: 4.0
       ip_goal_tolerance: 0.001
-      direction_sign: -1.0
 
 
     - name: wrist_pitch_joint    # 腕部俯仰（第 4 轴）

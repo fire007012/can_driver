@@ -279,6 +279,26 @@ if(CATKIN_ENABLE_TESTING)
     endif()
   endif()
 
+  catkin_add_gtest(test_udp_can_transport
+    tests/test_udp_can_transport.cpp
+  )
+  if(TARGET test_udp_can_transport)
+    target_include_directories(test_udp_can_transport PRIVATE include ${GTEST_INCLUDE_DIRS})
+    if (TARGET GTest::GTest)
+      target_link_libraries(test_udp_can_transport
+        can_driver_transport
+        ${catkin_LIBRARIES}
+        GTest::GTest GTest::Main
+      )
+    else()
+      target_link_libraries(test_udp_can_transport
+        can_driver_transport
+        ${catkin_LIBRARIES}
+        ${GTEST_LIBRARIES} ${GTEST_MAIN_LIBRARIES}
+      )
+    endif()
+  endif()
+
   catkin_add_gtest(test_safe_command
     tests/test_safe_command.cpp
   )
