@@ -1,7 +1,7 @@
 #!/usr/bin/env bash
 set -euo pipefail
 
-# 自动发现 ECB 电机并回填 can_driver.yaml 的 ECB_AUTO_PROBE 标记块。
+# 自动发现 ECB 电机并回填标准 can_driver.yaml 的 ECB_AUTO_PROBE 标记块。
 # 用法：
 #   scripts/discover_ecb_and_enable_yaml.sh [index] [--setup-logtool]
 # 说明：
@@ -10,7 +10,7 @@ set -euo pipefail
 
 SELECT_INDEX="1"
 SETUP_LOGTOOL="0"
-YAML_PATHS=("config/can_driver.yaml" "config/can_driver_ecb.yaml")
+YAML_PATHS=("config/can_driver.yaml")
 SDK_EXAMPLE_DIR="lib/innfos-cpp-sdk/example"
 SDK_BUILD_DIR="${SDK_EXAMPLE_DIR}/build"
 SDK_LIB_DIR="lib/innfos-cpp-sdk/sdk/lib/linux_x86_64"
@@ -380,6 +380,7 @@ PY
 for yaml_path in "${YAML_PATHS[@]}"; do
   log "yaml updated: ${yaml_path}"
 done
-log "next: roslaunch can_driver can_driver_ecb.launch"
+log "next: keep only the required joints in config/can_driver.yaml for this machine"
+log "next: roslaunch can_driver can_driver.launch"
 log "then: scripts/test_ecb_motor_motion.sh 2 0.8 2.0 1.2 2.0 /can_driver_node"
 log "repeat for more motors: scripts/test_ecb_motor_motion.sh 3|4|5 0.8 2.0 1.2 2.0 /can_driver_node"

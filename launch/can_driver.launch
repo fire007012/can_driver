@@ -8,6 +8,9 @@
   <arg name="use_controllers" default="false"/>
   <arg name="start_controllers" default="joint_state_controller arm_controller wheel_controller"/>
 
+  <!-- ECB SDK 依赖该路径定位 logtool；对非 ECB 协议无副作用。 -->
+  <env name="ACTUATOR_TOOL_PATH" value="$(find can_driver)/lib/innfos-cpp-sdk/tools/logtool/linux_x86_64"/>
+
   <!-- 1. 加载硬件参数（关节映射、控制频率） -->
   <rosparam file="$(find can_driver)/config/can_driver.yaml" command="load"/>
 
