@@ -138,13 +138,13 @@ can_driver_node:
       velocity_scale: 65536
       direction_sign: -1.0
 
-    # - name: left_gripper_finger_joint  # 左夹爪（第 7 轴）
-    #   motor_id: 0x17
-    #   protocol: PP
-    #   can_device: can1
-    #   control_mode: csp
-    #   position_scale: 65536  # 16-bit 编码器，PPR → 驱动自动换算为 2π/65536 rad/count
-    #   velocity_scale: 65536
+    - name: left_gripper_finger_joint  # 左夹爪（第 7 轴）
+      motor_id: 0x17
+      protocol: PP
+      can_device: can1
+      control_mode: csp
+      position_scale: 65536  # 16-bit 编码器，PPR → 驱动自动换算为 2π/65536 rad/count
+      velocity_scale: 65536
 
     # --- 底盘履带关节（DM 协议，速度模式）---
     # 达妙履带只作为 velocity 语义关节接入，由协议后端自行决定具体报文格式。
