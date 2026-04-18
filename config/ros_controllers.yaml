@@ -46,13 +46,11 @@ arm_controller:
 
   # 受控关节列表，名称须与 can_driver.yaml 中的 name 字段及 URDF 完全一致。
   joints:
-    - rotary_table    # 转台（第 1 轴）
-    - larger_arm      # 大臂（第 2 轴）
-    - smaller_arm     # 小臂（第 3 轴）
-    - wrist_x         # 腕部 X 轴（第 4 轴）
-    - wrist_y         # 腕部 Y 轴（第 5 轴）
-    - wrist_z         # 腕部 Z 轴（第 6 轴）
-    - actuator        # 末端执行器（第 7 轴）
+    - elbow_pitch_joint        # 小臂俯仰（第 3 轴）
+    # - wrist_pitch_joint        # 腕部俯仰（第 4 轴）
+    # - wrist_roll_joint         # 腕部滚转（第 5 轴）
+    # - wrist_yaw_joint          # 腕部偏航（第 6 轴）
+    # - left_gripper_finger_joint  # 左夹爪（第 7 轴）
 
   # 轨迹执行约束（可选，未填则使用插件默认值）
   # constraints:

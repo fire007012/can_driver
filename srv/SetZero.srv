@@ -1,0 +1,10 @@
+uint16 motor_id
+float64 zero_offset_rad
+bool use_current_position_as_zero
+bool apply_to_motor
+---
+bool success
+string message
+float64 previous_zero_offset_rad
+float64 applied_zero_offset_rad
+float64 current_position_rad

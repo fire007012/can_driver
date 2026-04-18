@@ -38,8 +38,8 @@ bool scaleAndClampToInt32(double cmdValue,
                           const std::string &jointName,
                           int32_t &rawValueOut)
 {
-    // scale<=0 或 NaN/Inf 都会导致不可逆变换，直接拒绝本次下发。
-    if (!std::isfinite(cmdValue) || !std::isfinite(scale) || scale <= 0.0) {
+    // scale==0 或 NaN/Inf 都会导致不可逆变换，直接拒绝本次下发。
+    if (!std::isfinite(cmdValue) || !std::isfinite(scale) || scale == 0.0) {
         ROS_ERROR_THROTTLE(1.0,
                            "[CanDriverHW] Invalid command/scale for joint '%s' (cmd=%g, scale=%g).",
                            jointName.c_str(),

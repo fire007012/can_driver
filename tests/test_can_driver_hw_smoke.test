@@ -1,0 +1,6 @@
+<launch>
+  <test test-name="test_can_driver_hw_smoke"
+        pkg="can_driver"
+        type="test_can_driver_hw_smoke"
+        time-limit="180.0" />
+</launch>

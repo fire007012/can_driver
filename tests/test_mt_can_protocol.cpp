@@ -2,10 +2,13 @@
 #include <ros/time.h>
 
 #include "can_driver/MtCan.h"
+#include "can_driver/SharedDriverState.h"
 
 #include <array>
+#include <chrono>
 #include <cstdint>
 #include <memory>
+#include <mutex>
 #include <vector>
 
 namespace {
@@ -13,9 +16,10 @@ namespace {
 // Mock 传输层，隔离 MtCan 协议编解码逻辑。
 class MockTransport : public CanTransport {
 public:
-    void send(const Frame &frame) override
+    SendResult send(const Frame &frame) override
     {
         sentFrames.push_back(frame);
+        return SendResult::Ok;
     }
 
     std::size_t addReceiveHandler(ReceiveHandler handler) override
@@ -45,6 +49,30 @@ public:
     ReceiveHandler receiveHandler;
 };
 
+class MockTxDispatcher : public CanTxDispatcher {
+public:
+    explicit MockTxDispatcher(std::shared_ptr<MockTransport> transport)
+        : transport(std::move(transport))
+    {
+    }
+
+    void submit(const Request &request) override
+    {
+        requests.push_back(request);
+        if (autoSend && transport) {
+            const auto eventTime = std::chrono::steady_clock::now();
+            const auto result = transport->send(request.frame);
+            if (request.completion) {
+                request.completion(true, result, eventTime);
+            }
+        }
+    }
+
+    std::shared_ptr<MockTransport> transport;
+    std::vector<Request> requests;
+    bool autoSend{true};
+};
+
 class MtCanTest : public ::testing::Test {
 protected:
     static void SetUpTestSuite()
@@ -54,15 +82,61 @@ protected:
 
     MtCanTest()
         : transport(std::make_shared<MockTransport>())
-        , mt(transport)
+        , txDispatcher(std::make_shared<MockTxDispatcher>(transport))
+        , sharedState(std::make_shared<can_driver::SharedDriverState>())
+        , mt(transport, txDispatcher, sharedState, "can0")
     {
     }
 
     std::shared_ptr<MockTransport> transport;
+    std::shared_ptr<MockTxDispatcher> txDispatcher;
+    std::shared_ptr<can_driver::SharedDriverState> sharedState;
     MtCan mt;
 };
 
 } // namespace
+
+class MtCanTestAccessor {
+public:
+    static void ageAllPendingRequests(MtCan &mt, std::chrono::milliseconds age)
+    {
+        const auto now = std::chrono::steady_clock::now();
+        std::lock_guard<std::mutex> lock(mt.pendingReadMutex_);
+        for (auto &entry : mt.pendingReadRequests_) {
+            entry.second.inFlight = true;
+            entry.second.lastSent = now - age;
+        }
+    }
+
+    static void expireAllPendingBackoff(MtCan &mt)
+    {
+        std::lock_guard<std::mutex> lock(mt.pendingReadMutex_);
+        for (auto &entry : mt.pendingReadRequests_) {
+            entry.second.nextEligibleSend = std::chrono::steady_clock::time_point {};
+        }
+    }
+
+    static std::size_t consecutiveTimeouts(MtCan &mt, uint8_t motorId, uint8_t command)
+    {
+        std::lock_guard<std::mutex> lock(mt.pendingReadMutex_);
+        const auto it = mt.pendingReadRequests_.find(MtCan::pendingReadKey(motorId, command));
+        return (it == mt.pendingReadRequests_.end()) ? 0u : it->second.consecutiveTimeouts;
+    }
+
+    static bool isQueued(MtCan &mt, uint8_t motorId, uint8_t command)
+    {
+        std::lock_guard<std::mutex> lock(mt.pendingReadMutex_);
+        const auto it = mt.pendingReadRequests_.find(MtCan::pendingReadKey(motorId, command));
+        return (it == mt.pendingReadRequests_.end()) ? false : it->second.queued;
+    }
+
+    static bool isInFlight(MtCan &mt, uint8_t motorId, uint8_t command)
+    {
+        std::lock_guard<std::mutex> lock(mt.pendingReadMutex_);
+        const auto it = mt.pendingReadRequests_.find(MtCan::pendingReadKey(motorId, command));
+        return (it == mt.pendingReadRequests_.end()) ? false : it->second.inFlight;
+    }
+};
 
 TEST_F(MtCanTest, SetVelocityEncodesExpectedFrame)
 {
@@ -125,6 +199,71 @@ TEST_F(MtCanTest, SetPositionWithoutVelocityUsesDefaultSpeed)
     EXPECT_EQ(frame.data[3], 0u);
 }
 
+TEST_F(MtCanTest, WritesRouteThroughUnifiedTxDispatcher)
+{
+    ASSERT_TRUE(mt.setVelocity(static_cast<MotorID>(0x01), 123));
+    ASSERT_EQ(txDispatcher->requests.size(), 1u);
+    EXPECT_EQ(txDispatcher->requests[0].category, CanTxDispatcher::Category::Control);
+    EXPECT_STREQ(txDispatcher->requests[0].source, "MtCan::sendFrame");
+}
+
+TEST_F(MtCanTest, CommandsPopulateSharedStateIntentAndTargets)
+{
+    constexpr MotorID kMotorId = static_cast<MotorID>(0x01);
+    const auto axisKey = can_driver::MakeAxisKey("can0", CanType::MT, kMotorId);
+
+    ASSERT_TRUE(mt.setVelocity(kMotorId, 4321));
+    ASSERT_TRUE(mt.Enable(kMotorId));
+
+    can_driver::SharedDriverState::AxisCommandState command;
+    ASSERT_TRUE(sharedState->getAxisCommand(axisKey, &command));
+    EXPECT_EQ(command.targetPosition, 0);
+    EXPECT_EQ(command.targetVelocity, 4321);
+    EXPECT_EQ(command.desiredMode, CanProtocol::MotorMode::Velocity);
+    EXPECT_TRUE(command.desiredModeValid);
+    EXPECT_TRUE(command.valid);
+    EXPECT_EQ(sharedState->getAxisIntent(axisKey), can_driver::AxisIntent::Enable);
+}
+
+TEST_F(MtCanTest, SetModeUpdatesDesiredModeWithoutPretendingMotionCommandExists)
+{
+    constexpr MotorID kMotorId = static_cast<MotorID>(0x01);
+    const auto axisKey = can_driver::MakeAxisKey("can0", CanType::MT, kMotorId);
+
+    ASSERT_TRUE(mt.setVelocity(kMotorId, 4321));
+    ASSERT_TRUE(mt.setMode(kMotorId, CanProtocol::MotorMode::Position));
+
+    can_driver::SharedDriverState::AxisCommandState command;
+    ASSERT_TRUE(sharedState->getAxisCommand(axisKey, &command));
+    EXPECT_EQ(command.desiredMode, CanProtocol::MotorMode::Position);
+    EXPECT_TRUE(command.desiredModeValid);
+    EXPECT_FALSE(command.valid);
+    EXPECT_EQ(command.targetPosition, 0);
+    EXPECT_EQ(command.targetVelocity, 0);
+    EXPECT_EQ(command.lastCommandSteadyNs, 0);
+}
+
+TEST_F(MtCanTest, IssueRefreshQueryMapsEnumsToExpectedCommands)
+{
+    constexpr MotorID kMotorId = static_cast<MotorID>(0x01);
+
+    mt.issueRefreshQuery(kMotorId, MtCan::RefreshQuery::State);
+    mt.issueRefreshQuery(kMotorId, MtCan::RefreshQuery::MultiTurnAngle);
+    mt.issueRefreshQuery(kMotorId, MtCan::RefreshQuery::Error);
+
+    ASSERT_EQ(txDispatcher->requests.size(), 3u);
+    ASSERT_EQ(transport->sentFrames.size(), 3u);
+    EXPECT_EQ(txDispatcher->requests[0].category, CanTxDispatcher::Category::Query);
+    EXPECT_STREQ(txDispatcher->requests[0].source, "MtCan::requestState");
+    EXPECT_EQ(txDispatcher->requests[1].category, CanTxDispatcher::Category::Query);
+    EXPECT_STREQ(txDispatcher->requests[1].source, "MtCan::requestMultiTurnAngle");
+    EXPECT_EQ(txDispatcher->requests[2].category, CanTxDispatcher::Category::Query);
+    EXPECT_STREQ(txDispatcher->requests[2].source, "MtCan::requestError");
+    EXPECT_EQ(transport->sentFrames[0].data[0], 0x9Cu);
+    EXPECT_EQ(transport->sentFrames[1].data[0], 0x92u);
+    EXPECT_EQ(transport->sentFrames[2].data[0], 0x9Au);
+}
+
 TEST_F(MtCanTest, HandleResponseParsesStateFrame)
 {
     // 响应 CAN ID=0x240+nodeId，nodeId=1 -> CAN ID 0x241。
@@ -146,6 +285,35 @@ TEST_F(MtCanTest, HandleResponseParsesStateFrame)
 
     EXPECT_EQ(mt.getCurrent(kResponseNodeId), 123);
     EXPECT_EQ(mt.getVelocity(kResponseNodeId), 600);
+}
+
+TEST_F(MtCanTest, ResponsesUpdateSharedFeedbackFreshness)
+{
+    constexpr MotorID kMotorId = static_cast<MotorID>(0x01);
+    const auto axisKey = can_driver::MakeAxisKey("can0", CanType::MT, kMotorId);
+
+    CanTransport::Frame frame {};
+    frame.id = 0x241;
+    frame.dlc = 8;
+    frame.isExtended = false;
+    frame.isRemoteRequest = false;
+    frame.data[0] = 0x9C;
+    frame.data[2] = 0x7B;
+    frame.data[3] = 0x00;
+    frame.data[4] = 0x58;
+    frame.data[5] = 0x02;
+
+    transport->simulateReceive(frame);
+
+    can_driver::SharedDriverState::AxisFeedbackState feedback;
+    ASSERT_TRUE(sharedState->getAxisFeedback(axisKey, &feedback));
+    EXPECT_TRUE(feedback.feedbackSeen);
+    EXPECT_TRUE(feedback.currentValid);
+    EXPECT_TRUE(feedback.velocityValid);
+    EXPECT_EQ(feedback.current, 123);
+    EXPECT_EQ(feedback.velocity, 600);
+    EXPECT_EQ(feedback.consecutiveTimeoutCount, 0u);
+    EXPECT_GT(feedback.lastRxSteadyNs, 0);
 }
 
 TEST_F(MtCanTest, HandleResponseIgnoresExtendedFrame)
@@ -190,6 +358,80 @@ TEST_F(MtCanTest, GetPositionPreservesLargeMultiTurnAngle)
     transport->simulateReceive(frame);
 
     EXPECT_EQ(mt.getPosition(kResponseNodeId), 2147483648LL);
+}
+
+TEST_F(MtCanTest, GetPositionWithoutCacheReturnsZeroWithoutSendingReadRequest)
+{
+    EXPECT_EQ(mt.getPosition(static_cast<MotorID>(0x01)), 0);
+    EXPECT_TRUE(transport->sentFrames.empty());
+}
+
+TEST_F(MtCanTest, IssueRefreshQueryDoesNotResendSameReadWhileRequestIsInFlight)
+{
+    mt.issueRefreshQuery(static_cast<MotorID>(0x01), MtCan::RefreshQuery::State);
+    ASSERT_EQ(transport->sentFrames.size(), 1u);
+
+    mt.issueRefreshQuery(static_cast<MotorID>(0x01), MtCan::RefreshQuery::State);
+    EXPECT_EQ(transport->sentFrames.size(), 1u);
+}
+
+TEST_F(MtCanTest, QueuedReadRequestDoesNotStartTimeoutBeforeActualSend)
+{
+    txDispatcher->autoSend = false;
+
+    mt.issueRefreshQuery(static_cast<MotorID>(0x01), MtCan::RefreshQuery::State);
+    ASSERT_EQ(txDispatcher->requests.size(), 1u);
+    EXPECT_TRUE(MtCanTestAccessor::isQueued(mt, 0x01, 0x9C));
+    EXPECT_FALSE(MtCanTestAccessor::isInFlight(mt, 0x01, 0x9C));
+
+    MtCanTestAccessor::ageAllPendingRequests(mt, std::chrono::milliseconds(500));
+    mt.issueRefreshQuery(static_cast<MotorID>(0x01), MtCan::RefreshQuery::State);
+
+    EXPECT_EQ(txDispatcher->requests.size(), 1u);
+    EXPECT_EQ(MtCanTestAccessor::consecutiveTimeouts(mt, 0x01, 0x9C), 0u);
+    EXPECT_TRUE(MtCanTestAccessor::isQueued(mt, 0x01, 0x9C));
+}
+
+TEST_F(MtCanTest, IssueRefreshQueryBacksOffAfterRepeatedReadTimeouts)
+{
+    mt.issueRefreshQuery(static_cast<MotorID>(0x01), MtCan::RefreshQuery::State);
+    ASSERT_EQ(transport->sentFrames.size(), 1u);
+
+    MtCanTestAccessor::ageAllPendingRequests(mt, std::chrono::milliseconds(40));
+    mt.issueRefreshQuery(static_cast<MotorID>(0x01), MtCan::RefreshQuery::State);
+    EXPECT_EQ(transport->sentFrames.size(), 1u);
+    EXPECT_EQ(MtCanTestAccessor::consecutiveTimeouts(mt, 0x01, 0x9C), 1u);
+
+    MtCanTestAccessor::expireAllPendingBackoff(mt);
+    mt.issueRefreshQuery(static_cast<MotorID>(0x01), MtCan::RefreshQuery::State);
+    EXPECT_EQ(transport->sentFrames.size(), 2u);
+
+    can_driver::SharedDriverState::AxisFeedbackState feedback;
+    ASSERT_TRUE(
+        sharedState->getAxisFeedback(can_driver::MakeAxisKey("can0", CanType::MT, static_cast<MotorID>(0x01)),
+                                     &feedback));
+    EXPECT_EQ(feedback.consecutiveTimeoutCount, 1u);
+    EXPECT_TRUE(feedback.degraded);
+}
+
+TEST_F(MtCanTest, SlowRefreshRateDoesNotPrematurelyTimeoutReadRequests)
+{
+    mt.setRefreshRateHz(5.0);
+    mt.initializeMotorRefresh({static_cast<MotorID>(0x01), static_cast<MotorID>(0x02), static_cast<MotorID>(0x03)});
+    transport->clearSent();
+
+    mt.issueRefreshQuery(static_cast<MotorID>(0x01), MtCan::RefreshQuery::State);
+    ASSERT_EQ(transport->sentFrames.size(), 1u);
+
+    MtCanTestAccessor::ageAllPendingRequests(mt, std::chrono::milliseconds(700));
+    mt.issueRefreshQuery(static_cast<MotorID>(0x01), MtCan::RefreshQuery::State);
+    EXPECT_EQ(transport->sentFrames.size(), 1u);
+    EXPECT_EQ(MtCanTestAccessor::consecutiveTimeouts(mt, 0x01, 0x9C), 0u);
+
+    MtCanTestAccessor::ageAllPendingRequests(mt, std::chrono::milliseconds(1300));
+    mt.issueRefreshQuery(static_cast<MotorID>(0x01), MtCan::RefreshQuery::State);
+    EXPECT_EQ(transport->sentFrames.size(), 1u);
+    EXPECT_EQ(MtCanTestAccessor::consecutiveTimeouts(mt, 0x01, 0x9C), 1u);
 }
 
 TEST_F(MtCanTest, EnableDisableAndFaultStateAreObservable)

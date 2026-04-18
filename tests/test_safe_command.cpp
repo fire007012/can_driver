@@ -72,7 +72,8 @@ TEST_F(RosTimeFixture, ScaleAndClampNegativeScale)
 {
     int32_t out = 42;
     const bool ok = scaleAndClampToInt32(1.0, -1.0, "joint", out);
-    EXPECT_FALSE(ok);
+    EXPECT_TRUE(ok);
+    EXPECT_EQ(out, -1);
 }
 
 TEST_F(RosTimeFixture, ScaleAndClampTinyScaleZeroCmd)

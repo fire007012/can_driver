@@ -1,4 +1,5 @@
 #include <gtest/gtest.h>
+#include <cerrno>
 #include <can_driver/SocketCanController.h>
 #include <linux/can.h>
 
@@ -8,6 +9,23 @@ public:
   static can_frame toSock(SocketCanController& c, const CanTransport::Frame& f){ return c.toLinuxCanFrame(f); }
   static CanTransport::Frame fromSock(SocketCanController& c, const can_frame& f){ return c.fromLinuxCanFrame(f); }
   static void dispatch(SocketCanController& c, const CanTransport::Frame& f){ c.dispatchReceive(f); }
+  static bool localLoopback(){ return SocketCanController::shouldEnableLocalLoopback(); }
+  static bool recvOwn(bool loopback){ return SocketCanController::shouldReceiveOwnMessages(loopback); }
+  static bool isBackpressure(int errorCode){ return SocketCanController::isBackpressureSendError(errorCode); }
+  static bool isLinkUnavailable(int errorCode){ return SocketCanController::isLinkUnavailableSendError(errorCode); }
+  static SocketCanController::Stats stats(SocketCanController& c){ return c.snapshotStats(); }
+  static void seedStats(SocketCanController& c){
+    c.txOkCount_.store(3);
+    c.txBackpressureCount_.store(2);
+    c.txLinkUnavailableCount_.store(1);
+    c.txErrorCount_.store(4);
+    c.txPartialCount_.store(5);
+    c.rxOkCount_.store(6);
+    c.rxErrorCount_.store(7);
+    c.rxShortReadCount_.store(8);
+    c.lastTxLinkUnavailableSteadyNs_.store(10);
+    c.lastRxSteadyNs_.store(9);
+  }
 };
 
 TEST(SocketCanController, EncodeDecodeRoundtripAndBounds){
@@ -50,11 +68,42 @@ TEST(SocketCanController, HandlerLifecycleAndDispatch){
 }
 
 TEST(SocketCanController, ShutdownResetsState){
-  // shutdown 后 handler ID 重新从 1 开始，说明内部状态已清空。
+  // shutdown 后 handler ID 和统计都应回到初始态。
   SocketCanController ctrl;
   auto id1 = ctrl.addReceiveHandler([](auto const&){});
   ctrl.removeReceiveHandler(id1);
+  SocketCanControllerTestAccessor::seedStats(ctrl);
   ctrl.shutdown();
   auto id2 = ctrl.addReceiveHandler([](auto const&){});
   EXPECT_EQ(id2,1u);
+
+  const auto stats = SocketCanControllerTestAccessor::stats(ctrl);
+  EXPECT_EQ(stats.txOk, 0u);
+  EXPECT_EQ(stats.txBackpressure, 0u);
+  EXPECT_EQ(stats.txLinkUnavailable, 0u);
+  EXPECT_EQ(stats.txError, 0u);
+  EXPECT_EQ(stats.txPartial, 0u);
+  EXPECT_EQ(stats.rxOk, 0u);
+  EXPECT_EQ(stats.rxError, 0u);
+  EXPECT_EQ(stats.rxShortRead, 0u);
+  EXPECT_EQ(stats.lastTxLinkUnavailableSteadyNs, 0);
+  EXPECT_EQ(stats.lastRxSteadyNs, 0);
+}
+
+TEST(SocketCanController, LoopbackPolicyPreservesLocalSniffing){
+  EXPECT_TRUE(SocketCanControllerTestAccessor::localLoopback());
+  EXPECT_FALSE(SocketCanControllerTestAccessor::recvOwn(false));
+  EXPECT_TRUE(SocketCanControllerTestAccessor::recvOwn(true));
+}
+
+TEST(SocketCanController, SendErrorClassificationMatchesNonBlockingPolicy){
+  EXPECT_TRUE(SocketCanControllerTestAccessor::isBackpressure(EAGAIN));
+  EXPECT_TRUE(SocketCanControllerTestAccessor::isBackpressure(EWOULDBLOCK));
+  EXPECT_TRUE(SocketCanControllerTestAccessor::isBackpressure(ENOBUFS));
+  EXPECT_FALSE(SocketCanControllerTestAccessor::isBackpressure(EINVAL));
+
+  EXPECT_TRUE(SocketCanControllerTestAccessor::isLinkUnavailable(ENETDOWN));
+  EXPECT_TRUE(SocketCanControllerTestAccessor::isLinkUnavailable(ENODEV));
+  EXPECT_TRUE(SocketCanControllerTestAccessor::isLinkUnavailable(ENXIO));
+  EXPECT_FALSE(SocketCanControllerTestAccessor::isLinkUnavailable(EBUSY));
 }

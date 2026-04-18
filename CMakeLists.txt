@@ -18,6 +18,7 @@ find_package(catkin REQUIRED COMPONENTS
   message_generation
   roscpp
   std_msgs
+  std_srvs
   urdf
 )
 
@@ -63,10 +64,12 @@ add_message_files(
 ## Generate services in the 'srv' folder
 add_service_files(
   FILES
+  ApplyLimits.srv
   Init.srv
   Shutdown.srv
   Recover.srv
   MotorCommand.srv
+  SetZero.srv
   SetZeroLimit.srv
 )
 
@@ -116,7 +119,7 @@ generate_messages(
 catkin_package(
   INCLUDE_DIRS include
   LIBRARIES can_driver_transport
-  CATKIN_DEPENDS actionlib actionlib_msgs controller_manager hardware_interface joint_limits_interface message_runtime roscpp std_msgs urdf
+  CATKIN_DEPENDS actionlib actionlib_msgs controller_manager hardware_interface joint_limits_interface message_runtime roscpp std_msgs std_srvs urdf
 )
 
 # Enable testing
@@ -138,10 +141,19 @@ include_directories(
 
 ## Declare a C++ library
 add_library(can_driver_transport
+  src/CanDriverRuntime.cpp
   src/DeviceManager.cpp
+  src/DeviceRuntime.cpp
   src/JointConfigParser.cpp
   src/MtCan.cpp
   src/EyouCan.cpp
+  src/driver_ros_endpoints.cpp
+  src/command_gate.cpp
+  src/lifecycle_driver_ops.cpp
+  src/lifecycle_service_gateway.cpp
+  src/motor_action_executor.cpp
+  src/motor_maintenance_service.cpp
+  src/operational_coordinator.cpp
   src/SocketCanController.cpp
   src/SafeCommand.cpp
   src/CanDriverHW.cpp
@@ -294,6 +306,26 @@ if(CATKIN_ENABLE_TESTING)
     endif()
   endif()
 
+  catkin_add_gtest(test_device_runtime
+    tests/test_device_runtime.cpp
+  )
+  if(TARGET test_device_runtime)
+    target_include_directories(test_device_runtime PRIVATE include ${GTEST_INCLUDE_DIRS})
+    if (TARGET GTest::GTest)
+      target_link_libraries(test_device_runtime
+        can_driver_transport
+        ${catkin_LIBRARIES}
+        GTest::GTest GTest::Main
+      )
+    else()
+      target_link_libraries(test_device_runtime
+        can_driver_transport
+        ${catkin_LIBRARIES}
+        ${GTEST_LIBRARIES} ${GTEST_MAIN_LIBRARIES}
+      )
+    endif()
+  endif()
+
   catkin_add_gtest(test_limits_enforcement
     tests/test_limits_enforcement.cpp
   )
@@ -334,6 +366,26 @@ if(CATKIN_ENABLE_TESTING)
     endif()
   endif()
 
+  catkin_add_gtest(test_refresh_scheduler
+    tests/test_refresh_scheduler.cpp
+  )
+  if(TARGET test_refresh_scheduler)
+    target_include_directories(test_refresh_scheduler PRIVATE include ${GTEST_INCLUDE_DIRS})
+    if (TARGET GTest::GTest)
+      target_link_libraries(test_refresh_scheduler
+        can_driver_transport
+        ${catkin_LIBRARIES}
+        GTest::GTest GTest::Main
+      )
+    else()
+      target_link_libraries(test_refresh_scheduler
+        can_driver_transport
+        ${catkin_LIBRARIES}
+        ${GTEST_LIBRARIES} ${GTEST_MAIN_LIBRARIES}
+      )
+    endif()
+  endif()
+
   catkin_add_gtest(test_eyou_can_protocol
     tests/test_eyou_can_protocol.cpp
   )
@@ -354,7 +406,28 @@ if(CATKIN_ENABLE_TESTING)
     endif()
   endif()
 
-  catkin_add_gtest(test_can_driver_hw_smoke
+  catkin_add_gtest(test_eyou_can_csp
+    tests/test_eyou_can_csp.cpp
+  )
+  if(TARGET test_eyou_can_csp)
+    target_include_directories(test_eyou_can_csp PRIVATE include ${GTEST_INCLUDE_DIRS})
+    if (TARGET GTest::GTest)
+      target_link_libraries(test_eyou_can_csp
+        can_driver_transport
+        ${catkin_LIBRARIES}
+        GTest::GTest GTest::Main
+      )
+    else()
+      target_link_libraries(test_eyou_can_csp
+        can_driver_transport
+        ${catkin_LIBRARIES}
+        ${GTEST_LIBRARIES} ${GTEST_MAIN_LIBRARIES}
+      )
+    endif()
+  endif()
+
+  add_rostest_gtest(test_can_driver_hw_smoke
+    tests/test_can_driver_hw_smoke.test
     tests/test_can_driver_hw_smoke.cpp
   )
   if(TARGET test_can_driver_hw_smoke)
@@ -367,6 +440,46 @@ if(CATKIN_ENABLE_TESTING)
       )
     else()
       target_link_libraries(test_can_driver_hw_smoke
+        can_driver_transport
+        ${catkin_LIBRARIES}
+        ${GTEST_LIBRARIES} ${GTEST_MAIN_LIBRARIES}
+      )
+    endif()
+  endif()
+
+  catkin_add_gtest(test_can_driver_operational_coordinator
+    tests/test_operational_coordinator.cpp
+  )
+  if(TARGET test_can_driver_operational_coordinator)
+    target_include_directories(test_can_driver_operational_coordinator PRIVATE include ${GTEST_INCLUDE_DIRS})
+    if (TARGET GTest::GTest)
+      target_link_libraries(test_can_driver_operational_coordinator
+        can_driver_transport
+        ${catkin_LIBRARIES}
+        GTest::GTest GTest::Main
+      )
+    else()
+      target_link_libraries(test_can_driver_operational_coordinator
+        can_driver_transport
+        ${catkin_LIBRARIES}
+        ${GTEST_LIBRARIES} ${GTEST_MAIN_LIBRARIES}
+      )
+    endif()
+  endif()
+
+  catkin_add_gtest(test_can_driver_lifecycle_driver_ops
+    tests/test_lifecycle_driver_ops.cpp
+  )
+  if(TARGET test_can_driver_lifecycle_driver_ops)
+    target_include_directories(test_can_driver_lifecycle_driver_ops PRIVATE include ${GTEST_INCLUDE_DIRS})
+    if (TARGET GTest::GTest)
+      target_link_libraries(test_can_driver_lifecycle_driver_ops
+        can_driver_transport
+        ${catkin_LIBRARIES}
+        GTest::GTest GTest::Main
+      )
+    else()
+      target_link_libraries(test_can_driver_lifecycle_driver_ops
         can_driver_transport
         ${catkin_LIBRARIES}
         ${GTEST_LIBRARIES} ${GTEST_MAIN_LIBRARIES}

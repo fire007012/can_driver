@@ -85,4 +85,38 @@ constexpr std::uint16_t toCanId(MotorID id)
     return static_cast<std::uint16_t>(id);
 }
 
+namespace can_driver {
+
+/**
+ * @brief 返回系统层 motor_id（对外服务、状态发布、配置解析使用的稳定 ID）。
+ */
+constexpr std::uint16_t toSystemMotorId(MotorID id)
+{
+    return static_cast<std::uint16_t>(id);
+}
+
+/**
+ * @brief 返回协议在线上使用的 node id。
+ *
+ * 目前 MT/PP 协议都以低 8 位作为总线节点号；
+ * 系统层仍保留完整 16 位 motor_id，以避免上层寻址语义被协议细节污染。
+ */
+constexpr std::uint8_t toProtocolNodeId(MotorID id)
+{
+    return static_cast<std::uint8_t>(toSystemMotorId(id) & 0xFFu);
+}
+
+/**
+ * @brief 当仅知道协议 node id 时，构造一个最保守的系统 motor_id 回退值。
+ *
+ * 该回退值只用于协议单测/未完成注册映射时的兜底；
+ * 真正运行中应优先使用配置阶段建立的“系统 id -> node id”映射。
+ */
+constexpr MotorID motorIdFromProtocolNodeId(std::uint8_t nodeId)
+{
+    return static_cast<MotorID>(static_cast<std::uint16_t>(nodeId));
+}
+
+} // namespace can_driver
+
 #endif // MOTORID_H

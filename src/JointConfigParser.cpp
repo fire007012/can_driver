@@ -1,3 +1,4 @@
+#include "can_driver/AxisCommandSemantics.h"
 #include "can_driver/JointConfigParser.h"
 
 #include <cmath>
@@ -5,6 +6,96 @@
 #include <stdexcept>
 
 namespace joint_config_parser {
+
+namespace {
+
+bool parsePositiveOptionalDouble(const XmlRpc::XmlRpcValue &jointValue,
+                                 const char *fieldName,
+                                 const std::string &jointName,
+                                 double *out,
+                                 std::string &errorMsg)
+{
+    if (!jointValue.hasMember(fieldName)) {
+        return true;
+    }
+
+    const auto &value = jointValue[fieldName];
+    if (value.getType() != XmlRpc::XmlRpcValue::TypeInt &&
+        value.getType() != XmlRpc::XmlRpcValue::TypeDouble) {
+        errorMsg = "Joint '" + jointName + "': invalid " + fieldName + ".";
+        return false;
+    }
+
+    const double parsed = (value.getType() == XmlRpc::XmlRpcValue::TypeInt)
+                              ? static_cast<double>(static_cast<int>(value))
+                              : static_cast<double>(value);
+    if (!std::isfinite(parsed) || parsed <= 0.0) {
+        errorMsg = "Joint '" + jointName + "': invalid " + fieldName + ".";
+        return false;
+    }
+
+    *out = parsed;
+    return true;
+}
+
+bool parseNonNegativeOptionalDouble(const XmlRpc::XmlRpcValue &jointValue,
+                                    const char *fieldName,
+                                    const std::string &jointName,
+                                    double *out,
+                                    std::string &errorMsg)
+{
+    if (!jointValue.hasMember(fieldName)) {
+        return true;
+    }
+
+    const auto &value = jointValue[fieldName];
+    if (value.getType() != XmlRpc::XmlRpcValue::TypeInt &&
+        value.getType() != XmlRpc::XmlRpcValue::TypeDouble) {
+        errorMsg = "Joint '" + jointName + "': invalid " + fieldName + ".";
+        return false;
+    }
+
+    const double parsed = (value.getType() == XmlRpc::XmlRpcValue::TypeInt)
+                              ? static_cast<double>(static_cast<int>(value))
+                              : static_cast<double>(value);
+    if (!std::isfinite(parsed) || parsed < 0.0) {
+        errorMsg = "Joint '" + jointName + "': invalid " + fieldName + ".";
+        return false;
+    }
+
+    *out = parsed;
+    return true;
+}
+
+bool parseDirectionSign(const XmlRpc::XmlRpcValue &jointValue,
+                        const std::string &jointName,
+                        double *out,
+                        std::string &errorMsg)
+{
+    if (!jointValue.hasMember("direction_sign")) {
+        return true;
+    }
+
+    const auto &value = jointValue["direction_sign"];
+    if (value.getType() != XmlRpc::XmlRpcValue::TypeInt &&
+        value.getType() != XmlRpc::XmlRpcValue::TypeDouble) {
+        errorMsg = "Joint '" + jointName + "': direction_sign must be either 1 or -1.";
+        return false;
+    }
+
+    const double parsed = (value.getType() == XmlRpc::XmlRpcValue::TypeInt)
+                              ? static_cast<double>(static_cast<int>(value))
+                              : static_cast<double>(value);
+    if (parsed != 1.0 && parsed != -1.0) {
+        errorMsg = "Joint '" + jointName + "': direction_sign must be either 1 or -1.";
+        return false;
+    }
+
+    *out = parsed;
+    return true;
+}
+
+} // namespace
 
 // 支持 int 或 string（十进制/十六进制）两种配置形式。
 bool parseMotorId(const XmlRpc::XmlRpcValue &value,
@@ -64,18 +155,29 @@ bool parse(const XmlRpc::XmlRpcValue &jointList,
         jc.name = static_cast<std::string>(jv["name"]);
         jc.canDevice = static_cast<std::string>(jv["can_device"]);
         jc.controlMode = static_cast<std::string>(jv["control_mode"]);
-        if (jc.controlMode != "velocity" && jc.controlMode != "position") {
+        if (can_driver::axisControlModeFromString(jc.controlMode) ==
+            can_driver::AxisControlMode::Unknown) {
             errorMsg = "Joint '" + jc.name + "': unknown control_mode '" + jc.controlMode +
-                       "' (use velocity or position).";
+                       "' (use velocity, position, or csp).";
             return false;
         }
 
-        // scale 为可选参数，未配置时使用 1.0（即不缩放）。
+        // scale 支持两种填写方式：
+        //   1. 直接填换算系数（小数，如 9.587e-05），raw * scale = rad
+        //   2. 填每圈脉冲数 PPR（>=2 的整数，如 65536），自动换算为 2π/PPR
         if (jv.hasMember("position_scale")) {
-            jc.positionScale = static_cast<double>(jv["position_scale"]);
+            const auto &sv = jv["position_scale"];
+            const double val = (sv.getType() == XmlRpc::XmlRpcValue::TypeInt)
+                                   ? static_cast<double>(static_cast<int>(sv))
+                                   : static_cast<double>(sv);
+            jc.positionScale = (val >= 2.0) ? (2.0 * M_PI / val) : val;
         }
         if (jv.hasMember("velocity_scale")) {
-            jc.velocityScale = static_cast<double>(jv["velocity_scale"]);
+            const auto &sv = jv["velocity_scale"];
+            const double val = (sv.getType() == XmlRpc::XmlRpcValue::TypeInt)
+                                   ? static_cast<double>(static_cast<int>(sv))
+                                   : static_cast<double>(sv);
+            jc.velocityScale = (val >= 2.0) ? (2.0 * M_PI / val) : val;
         }
         if (!std::isfinite(jc.positionScale) || jc.positionScale <= 0.0) {
             errorMsg = "Joint '" + jc.name + "': invalid position_scale.";
@@ -83,6 +185,25 @@ bool parse(const XmlRpc::XmlRpcValue &jointList,
         }
         if (!std::isfinite(jc.velocityScale) || jc.velocityScale <= 0.0) {
             errorMsg = "Joint '" + jc.name + "': invalid velocity_scale.";
+            return false;
+        }
+        if (!parseDirectionSign(jv, jc.name, &jc.directionSign, errorMsg)) {
+            return false;
+        }
+        if (!parsePositiveOptionalDouble(jv, "ip_max_velocity", jc.name,
+                                         &jc.ipMaxVelocity, errorMsg)) {
+            return false;
+        }
+        if (!parsePositiveOptionalDouble(jv, "ip_max_acceleration", jc.name,
+                                         &jc.ipMaxAcceleration, errorMsg)) {
+            return false;
+        }
+        if (!parsePositiveOptionalDouble(jv, "ip_max_jerk", jc.name,
+                                         &jc.ipMaxJerk, errorMsg)) {
+            return false;
+        }
+        if (!parseNonNegativeOptionalDouble(jv, "ip_goal_tolerance", jc.name,
+                                            &jc.ipGoalTolerance, errorMsg)) {
             return false;
         }
 

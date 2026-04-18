@@ -14,11 +14,13 @@ public:
      * @brief 电机运行模式
      *
      * Position 代表位置环（如点到点控制），Velocity 代表速度环（连续转速）。
+     * CSP 代表周期同步位置模式（Cyclic Synchronous Position）。
      * 若具体协议支持更多模式，可以在派生类中转译后再调用 setMode。
      */
     enum class MotorMode : uint8_t {
         Position = 0,
         Velocity = 1,
+        CSP = 5,
     };
 
     virtual ~CanProtocol() = default;
@@ -67,6 +69,15 @@ public:
     virtual bool setPosition(MotorID motorId, int32_t position) = 0;
 
     /**
+     * @brief 快写位置命令（用于 CSP 模式）
+     * @param motorId 电机 ID
+     * @param position 目标位置（协议原始单位）
+     * @return 成功返回 true，失败返回 false
+     * @note 使用 CMD=0x05 快写命令，无需等待返回确认
+     */
+    virtual bool quickSetPosition(MotorID motorId, int32_t position) = 0;
+
+    /**
      * @brief 使能指定电机
      * @param motorId 目标电机 ID
      *
@@ -91,27 +102,38 @@ public:
     virtual bool Stop(MotorID motorId) = 0;
 
     /**
-     * @brief 读取或返回缓存的实际位置
+     * @brief 清除或复位当前故障状态
+     * @param motorId 目标电机 ID
+     * @return 协议支持并下发成功返回 true；不支持或失败返回 false
+     *
+     * 该接口语义必须与 Enable/Disable 分离，调用方不得再用 Enable 伪装恢复流程。
+     */
+    virtual bool ResetFault(MotorID motorId)
+    {
+        (void)motorId;
+        return false;
+    }
+
+    /**
+     * @brief 返回缓存的实际位置
      * @param motorId 目标电机 ID
      * @return 位置值（协议单位）
-     *
-     * 没有实时数据时可主动触发一次读取，并在读取完成后更新缓存。
      */
     [[nodiscard]] virtual int64_t getPosition(MotorID motorId) const = 0;
 
     /**
-     * @brief 读取或返回缓存的实际电流
+     * @brief 返回缓存的实际电流
      * @param motorId 目标电机 ID
      * @return 电流数值（协议单位）
      */
     [[nodiscard]] virtual int16_t getCurrent(MotorID motorId) const = 0;
 
     /**
-     * @brief 读取或返回缓存的实际速度
+     * @brief 返回缓存的实际速度
      * @param motorId 目标电机 ID
      * @return 速度数值（协议单位）
      */
-    [[nodiscard]] virtual int16_t getVelocity(MotorID motorId) const = 0;
+    [[nodiscard]] virtual int32_t getVelocity(MotorID motorId) const = 0;
 
     /**
      * @brief 返回缓存的使能状态（未实现协议默认 false）。
@@ -161,6 +183,43 @@ public:
     {
         (void)motorId;
         (void)offsetRaw;
+        return false;
+    }
+
+    /**
+     * @brief 读取设备侧位置零偏（协议原始单位）
+     * @param motorId 目标电机 ID
+     * @param offsetRaw 输出偏置值
+     * @return 读取成功返回 true，否则 false
+     */
+    virtual bool readPositionOffset(MotorID motorId, int32_t* offsetRaw)
+    {
+        (void)motorId;
+        (void)offsetRaw;
+        return false;
+    }
+
+    /**
+     * @brief 读取设备序列号（协议原始 32 位值）
+     * @param motorId 目标电机 ID
+     * @param serialNumber 输出序列号
+     * @return 读取成功返回 true，否则 false
+     */
+    virtual bool readSerialNumber(MotorID motorId, uint32_t* serialNumber)
+    {
+        (void)motorId;
+        (void)serialNumber;
+        return false;
+    }
+
+    /**
+     * @brief 提交参数到设备 EEPROM/非易失存储
+     * @param motorId 目标电机 ID
+     * @return 提交成功返回 true，否则 false
+     */
+    virtual bool persistParameters(MotorID motorId)
+    {
+        (void)motorId;
         return false;
     }
 

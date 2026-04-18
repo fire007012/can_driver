@@ -1,0 +1,4 @@
+scripts/__pycache__/
+src/*.bak
+lib/myactuator_rmd-main/
+lib/myactuator_rmd_ros-main/

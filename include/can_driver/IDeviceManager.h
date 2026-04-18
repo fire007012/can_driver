@@ -11,6 +11,10 @@
 #include <utility>
 #include <vector>
 
+namespace can_driver {
+class SharedDriverState;
+}
+
 class IDeviceManager {
 public:
     virtual ~IDeviceManager() = default;
@@ -24,12 +28,18 @@ public:
                               CanType type,
                               const std::vector<MotorID> &ids) = 0;
     virtual void setRefreshRateHz(double hz) = 0;
+    virtual void setDeviceRefreshRateHz(const std::string &device, double hz) = 0;
     virtual void setPpFastWriteEnabled(bool enabled) = 0;
+    virtual void setPpDefaultPositionVelocityRaw(int32_t velocityRaw) = 0;
+    virtual void setPpPositionDefaultVelocityRaw(int32_t velocityRaw) = 0;
+    virtual void setPpCspDefaultVelocityRaw(int32_t velocityRaw) = 0;
+    virtual void shutdownDevice(const std::string &device) = 0;
     virtual void shutdownAll() = 0;
 
     virtual std::shared_ptr<CanProtocol> getProtocol(const std::string &device, CanType type) const = 0;
     virtual std::shared_ptr<std::mutex> getDeviceMutex(const std::string &device) const = 0;
     virtual bool isDeviceReady(const std::string &device) const = 0;
+    virtual std::shared_ptr<can_driver::SharedDriverState> getSharedDriverState() const = 0;
     virtual std::size_t deviceCount() const = 0;
 };
 

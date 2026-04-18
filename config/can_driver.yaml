@@ -17,16 +17,22 @@ can_driver_node:
   # 调试模式：true 时 direct topic 命令绕过 ros_control 回退逻辑。
   # 行为：收到一次 direct 命令后将保持生效，直到下一次 direct 命令或 STOP/DISABLE。
   # 注意：该模式仅用于单电机联调，默认关闭。
-  debug_bypass_ros_control: true
+  debug_bypass_ros_control: false
 
   # 电机状态查询频率（协议层轮询频率，单位 Hz）。
   # >0：固定频率；<=0：使用协议默认自适应策略。
-  motor_query_hz: 100.0
+  motor_query_hz: 20.0
 
   # PP 协议快写模式开关（CMD=0x05）。
   # false: 使用普通写命令（CMD=0x01，带写返回）
   # true : 位置/速度命令使用快写命令（CMD=0x05，无返回、立即生效）
   pp_fast_write_enabled: true
+
+  # PP 协议在 position / csp 路径下，会先给 0x09 写一个“默认速度”作为预配置。
+  # 这里直接填写 rad/s；驱动会按每个 joint 的 velocity_scale 自动换算成协议 raw。
+  # 未填写时默认按 10RPM ≈ 1.0472rad/s 处理。
+  pp_position_default_velocity_rad_s: 1.0472
+  pp_csp_default_velocity_rad_s: 3
 
   # 上电启动位置同步窗口（秒）。
   # 启动时会读取电机当前位置并对齐 position 命令，
@@ -51,6 +57,19 @@ can_driver_node:
   # false : 恢复后立即按当前命令继续下发
   safety_hold_after_device_recover: true
 
+  # lifecycle init 时当前 socket 是否接收自己发出的帧。
+  # 默认 false；仅在 vcan/loopback 测试场景下建议打开。
+  init_loopback: false
+
+  # PP 零点本地持久化：将 zero offset 保存到本机文件，并在下次初始化时自动恢复。
+  # 这与 apply_to_motor 不同；即使不写电机 EEPROM，也可以只在驱动侧持久保存。
+  pp_local_zero_offset_persistence_enabled: true
+  # apply_to_motor=true 时，是否额外发送 0x4D 持久化到电机非易失存储。
+  # false: 立即写入当前电机 offset，但不做 EEPROM 持久化，也不会因为 0x4D 失败而回滚
+  # true : 保持旧行为，写 offset 后继续发 0x4D
+  pp_zero_offset_persist_on_apply_to_motor: false
+  # pp_local_zero_offset_file: /home/dianhua/.ros/can_driver_pp_zero_offsets.txt
+
   # --------------------------------------------------------------------------
   # joints：关节列表
   # --------------------------------------------------------------------------
@@ -60,78 +79,80 @@ can_driver_node:
   # --------------------------------------------------------------------------
   joints:
 
-    # --- 底盘差速驱动轮 ---
-    # 由 diff_drive_controller/DiffDriveController 控制（见 ros_controllers.yaml）
-    # 使用 MT 协议（迈信 EP 系列），CAN ID 范围 0x141~0x1FF
+    # # --- 机械臂关节（PP 协议，CSP 模式）---
+    # # 使用 PP 协议（EyouCan），CSP 周期同步位置模式
+    # # 驱动启动时自动调用 setMode(CSP)，失败则中止初始化
 
-    - name: left_wheel          # 关节名，须与 URDF 一致
-      motor_id: 0x141           # 电机 CAN Node ID（十六进制），MT 协议范围 0x01~0xFF
-      protocol: MT              # 协议类型：MT = 迈信协议；PP = EyouCan(PP) 协议
-      can_device: can0         # 虚拟 CAN 接口（测试用），实物联调时改回 can0
-      control_mode: velocity    # 控制模式：velocity = 速度环；position = 位置环
+    # - name: shoulder_pitch_joint  # 大臂俯仰（第 2 轴）
+    #   motor_id: 0x05
+    #   protocol: PP
+    #   can_device: can0
+    #   control_mode: csp
+    #   position_scale: 65536  # 16-bit 编码器，PPR → 驱动自动换算为 2π/65536 rad/count
+    #   velocity_scale: 65536
+    #   ip_max_velocity: 1.0
+    #   ip_max_acceleration: 2.0
+    #   ip_max_jerk: 10.0
+    #   ip_goal_tolerance: 0.001
 
-    - name: right_wheel
-      motor_id: 0x142
-      protocol: MT
-      can_device: can0
-      control_mode: velocity
-
-    # --- 机械臂关节 ---
-    # 由 position_controllers/JointTrajectoryController 控制（见 ros_controllers.yaml）
-    # 使用 PP 协议（EyouCan），CAN ID 范围 0x00~0xFF（即 motor_id 本身）
-    # 注意：MT 和 PP 的响应帧 ID 范围不重叠，can0/can1 可各自混用两种协议
-
-    - name: rotary_table        # 转台（第 1 轴）
-      motor_id: 0x16
-      protocol: PP
-      can_device: can0         # 虚拟 CAN 接口（测试用），实物联调时改回 can1
-      control_mode: position
-      # 每个原始计数（raw）对应的弧度：2*pi / 65536
-      # raw * position_scale = rad
-      position_scale: 9.587379924285257e-05
-      # 速度原始单位为 脉冲/秒，转换到 rad/s 同样使用 2*pi/65536
-      velocity_scale: 9.587379924285257e-05
-
-    - name: larger_arm          # 大臂（第 2 轴）
-      motor_id: 0x05
-      protocol: PP
-      can_device: can0        # 虚拟 CAN 接口（测试用），实物联调时改回 can1
-      control_mode: position
-
-    - name: smaller_arm         # 小臂（第 3 轴）
+    - name: elbow_pitch_joint   # 小臂俯仰（第 3 轴）
       motor_id: 0x13
       protocol: PP
-      can_device: can0         # 虚拟 CAN 接口（测试用），实物联调时改回 can1
-      control_mode: position
+      can_device: can1
+      control_mode: csp
+      position_scale: 65536  # 16-bit 编码器，PPR → 驱动自动换算为 2π/65536 rad/count
+      velocity_scale: 65536
+      direction_sign: -1.0   # 物理方向与系统正方向相反时填写 -1.0
+      ip_max_velocity: 1.0
+      ip_max_acceleration: 0.8
+      ip_max_jerk: 4.0
+      ip_goal_tolerance: 0.001
+      direction_sign: -1.0
 
-    - name: wrist_x             # 腕部 X 轴（第 4 轴）
+
+    - name: wrist_pitch_joint    # 腕部俯仰（第 4 轴）
       motor_id: 0x14
       protocol: PP
-      can_device: can0         # 虚拟 CAN 接口（测试用），实物联调时改回 can1
-      control_mode: position
+      can_device: can1
+      control_mode: csp
+      position_scale: 65536  # 16-bit 编码器，PPR → 驱动自动换算为 2π/65536 rad/count
+      velocity_scale: 65536
+      ip_max_velocity: 1.0
+      ip_max_acceleration: 2.0
+      ip_max_jerk: 10.0
+      ip_goal_tolerance: 0.001
 
-    - name: wrist_y             # 腕部 Y 轴（第 5 轴）
+    - name: wrist_roll_joint     # 腕部滚转（第 5 轴）
+      motor_id: 0x16
+      protocol: PP
+      can_device: can1
+      control_mode: csp
+      position_scale: 65536  # 16-bit 编码器，PPR → 驱动自动换算为 2π/65536 rad/count
+      velocity_scale: 65536
+
+    - name: wrist_yaw_joint      # 腕部偏航（第 6 轴）
       motor_id: 0x15
       protocol: PP
-      can_device: can0         # 虚拟 CAN 接口（测试用），实物联调时改回 can1
-      control_mode: position
+      can_device: can1
+      control_mode: csp
+      position_scale: 65536  # 16-bit 编码器，PPR → 驱动自动换算为 2π/65536 rad/count
+      velocity_scale: 65536
+      direction_sign: -1.0
 
-    - name: wrist_z             # 腕部 Z 轴（第 6 轴）
-      motor_id: 0x10
-      protocol: PP
-      can_device: can0         # 虚拟 CAN 接口（测试用），实物联调时改回 can1
-      control_mode: position
-
-    - name: actuator            # 末端执行器（夹爪/工具）
-      motor_id: 0x17
-      protocol: PP
-      can_device: can0         # 虚拟 CAN 接口（测试用），实物联调时改回 can1
-      control_mode: position
+    # - name: left_gripper_finger_joint  # 左夹爪（第 7 轴）
+    #   motor_id: 0x17
+    #   protocol: PP
+    #   can_device: can1
+    #   control_mode: csp
+    #   position_scale: 65536  # 16-bit 编码器，PPR → 驱动自动换算为 2π/65536 rad/count
+    #   velocity_scale: 65536
 
     # --------------------------------------------------------------------------
     # 可选字段（未填写时默认 1.0）：
-    #   position_scale: 1.0   # 协议原始位置值 → rad 的换算系数（raw * scale = rad）
-    #   velocity_scale: 1.0   # 协议原始速度值 → rad/s 的换算系数
-    # 示例：若电机上报单位为 0.01°，换算到 rad：
-    #   position_scale: 0.0001745329   # = 0.01 * π/180
+    #   position_scale / velocity_scale 支持两种填写方式：
+    #   1. 直接填换算系数（小数），含义：raw * scale = rad
+    #      示例：position_scale: 9.587379924285257e-05   # = 2π/65536
+    #   2. 填每圈脉冲数 PPR（>=2 的整数），驱动自动换算为 2π/PPR
+    #      示例：position_scale: 65536                   # 16-bit 编码器
+    #   direction_sign 仅用于方向修正，只允许填写 1.0 或 -1.0
     # --------------------------------------------------------------------------

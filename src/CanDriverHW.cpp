@@ -1,26 +1,81 @@
+#include "can_driver/AxisReadinessEvaluator.h"
+#include "can_driver/AxisCommandSemantics.h"
 #include "can_driver/CanDriverHW.h"
+#include "can_driver/CanDriverIoRuntime.h"
 #include "can_driver/SafeCommand.h"
+#include "can_driver/driver_ros_endpoints.hpp"
 
 #include <algorithm>
 #include <chrono>
 #include <cmath>
 #include <cstdint>
+#include <cstdlib>
+#include <fstream>
 #include <set>
+#include <sstream>
 #include <string>
 #include <thread>
+#include <tuple>
+#include <unordered_map>
 #include <xmlrpcpp/XmlRpcValue.h>
 
-CanDriverHW::CanDriverHW()
-    : deviceManager_(std::make_shared<DeviceManager>())
+namespace {
+
+using can_driver::toProtocolNodeId;
+
+long long steadyAgeMs(std::int64_t stampNs)
 {
+    if (stampNs <= 0) {
+        return -1;
+    }
+    const auto nowNs = can_driver::SharedDriverSteadyNowNs();
+    return (nowNs > stampNs) ? static_cast<long long>((nowNs - stampNs) / 1000000) : 0;
+}
+
+constexpr double kDefaultPpVelocityRadS = (10.0 * 2.0 * M_PI / 60.0);
+
+bool sharedFeedbackFresh(const can_driver::SharedDriverState::AxisFeedbackState &feedback)
+{
+    if (!feedback.feedbackSeen || feedback.lastRxSteadyNs <= 0) {
+        return false;
+    }
+
+    const auto nowNs = can_driver::SharedDriverSteadyNowNs();
+    const can_driver::AxisReadinessEvaluator::Config config;
+    if (config.feedbackFreshnessTimeoutNs <= 0 || nowNs <= feedback.lastRxSteadyNs) {
+        return true;
+    }
+    return (nowNs - feedback.lastRxSteadyNs) <= config.feedbackFreshnessTimeoutNs;
+}
+
+} // namespace
+
+CanDriverHW::CanDriverHW()
+    : runtime_(),
+      deviceManager_(runtime_.deviceManager()),
+      motorActionExecutor_(runtime_.motorActionExecutor()),
+      lifecycleDriverOps_(runtime_.lifecycleDriverOps()),
+      commandGate_(runtime_.commandGate()),
+      active_(runtime_.activeFlag()),
+      lifecycleCoordinator_(runtime_.lifecycleCoordinator()),
+      deviceLoopbackByName_(runtime_.deviceLoopbackByName())
+{
+    configureCommandGate();
+    configureLifecycleCoordinator();
 }
 
 CanDriverHW::CanDriverHW(std::shared_ptr<IDeviceManager> deviceManager)
-    : deviceManager_(std::move(deviceManager))
+    : runtime_(std::move(deviceManager)),
+      deviceManager_(runtime_.deviceManager()),
+      motorActionExecutor_(runtime_.motorActionExecutor()),
+      lifecycleDriverOps_(runtime_.lifecycleDriverOps()),
+      commandGate_(runtime_.commandGate()),
+      active_(runtime_.activeFlag()),
+      lifecycleCoordinator_(runtime_.lifecycleCoordinator()),
+      deviceLoopbackByName_(runtime_.deviceLoopbackByName())
 {
-    if (!deviceManager_) {
-        deviceManager_ = std::make_shared<DeviceManager>();
-    }
+    configureCommandGate();
+    configureLifecycleCoordinator();
 }
 
 // ---------------------------------------------------------------------------
@@ -29,18 +84,19 @@ CanDriverHW::CanDriverHW(std::shared_ptr<IDeviceManager> deviceManager)
 CanDriverHW::~CanDriverHW()
 {
     resetInternalState();
-
-    initSrv_.shutdown();
-    shutdownSrv_.shutdown();
-    recoverSrv_.shutdown();
-    motorCmdSrv_.shutdown();
-    setZeroLimitSrv_.shutdown();
 }
 
 // ---------------------------------------------------------------------------
 // init
 // ---------------------------------------------------------------------------
 bool CanDriverHW::init(ros::NodeHandle &nh, ros::NodeHandle &pnh)
+{
+    return init(nh, pnh, InitOptions{});
+}
+
+bool CanDriverHW::init(ros::NodeHandle &nh,
+                       ros::NodeHandle &pnh,
+                       const InitOptions &options)
 {
     (void)nh;
     resetInternalState();
@@ -53,41 +109,39 @@ bool CanDriverHW::init(ros::NodeHandle &nh, ros::NodeHandle &pnh)
     }
     registerJointInterfaces();
     loadJointLimits(pnh);
-    startMotorRefreshThreads();
-    if (!syncStartupPositionAndCommands()) {
-        resetInternalState();
-        return false;
+    if (options.enable_ros_endpoints) {
+        rosEndpoints_ = std::make_unique<DriverRosEndpoints>(*this, pnh);
     }
-    setupRosComm(pnh);
 
-    ROS_INFO("[CanDriverHW] Initialized with %zu joints on %zu CAN device(s).",
-             joints_.size(), deviceManager_->deviceCount());
-    active_.store(true, std::memory_order_release);
+    std::set<std::string> configuredDevices;
+    for (const auto &jc : joints_) {
+        configuredDevices.insert(jc.canDevice);
+    }
+
+    ROS_INFO("[CanDriverHW] Initialized with %zu joints on %zu configured CAN device(s).",
+             joints_.size(), configuredDevices.size());
+    lifecycleCoordinator_.SetConfigured();
+    if (rosEndpoints_) {
+        rosEndpoints_->publishLifecycleStateNow();
+    }
     return true;
 }
 
 void CanDriverHW::resetInternalState()
 {
-    active_.store(false, std::memory_order_release);
-    stateTimer_.stop();
-
-    for (auto &kv : cmdVelSubs_) {
-        kv.second.shutdown();
+    if (rosEndpoints_) {
+        rosEndpoints_->shutdown();
+        rosEndpoints_.reset();
     }
-    for (auto &kv : cmdPosSubs_) {
-        kv.second.shutdown();
-    }
-    cmdVelSubs_.clear();
-    cmdPosSubs_.clear();
 
     joints_.clear();
     jointIndexByName_.clear();
     jointGroups_.clear();
     rawCommandBuffer_.clear();
     commandValidBuffer_.clear();
+    preparedCommandBuffer_.clear();
     jointZeroOffsetRadByMotorId_.clear();
-    lastDeviceReadyState_.clear();
-    deviceManager_->shutdownAll();
+    runtime_.reset();
 }
 
 bool CanDriverHW::loadRuntimeParams(const ros::NodeHandle &pnh)
@@ -139,8 +193,34 @@ bool CanDriverHW::loadRuntimeParams(const ros::NodeHandle &pnh)
                  startupPositionSyncTimeoutSec_);
         startupPositionSyncTimeoutSec_ = 1.0;
     }
+    if (!pnh.getParam("startup_probe_query_hz", startupProbeQueryHz_)) {
+        startupProbeQueryHz_ = 5.0;
+    }
+    if (!std::isfinite(startupProbeQueryHz_) || startupProbeQueryHz_ <= 0.0) {
+        ROS_WARN("[CanDriverHW] Invalid startup_probe_query_hz=%.9g, fallback to 5.0 Hz.",
+                 startupProbeQueryHz_);
+        startupProbeQueryHz_ = 5.0;
+    }
     if (!pnh.getParam("pp_fast_write_enabled", ppFastWriteEnabled_)) {
         ppFastWriteEnabled_ = false;
+    }
+    if (!pnh.getParam("pp_position_default_velocity_rad_s", ppPositionDefaultVelocityRadS_)) {
+        ppPositionDefaultVelocityRadS_ = kDefaultPpVelocityRadS;
+    }
+    if (!std::isfinite(ppPositionDefaultVelocityRadS_) || ppPositionDefaultVelocityRadS_ <= 0.0) {
+        ROS_WARN("[CanDriverHW] Invalid pp_position_default_velocity_rad_s=%.9g, fallback to %.6f rad/s.",
+                 ppPositionDefaultVelocityRadS_,
+                 kDefaultPpVelocityRadS);
+        ppPositionDefaultVelocityRadS_ = kDefaultPpVelocityRadS;
+    }
+    if (!pnh.getParam("pp_csp_default_velocity_rad_s", ppCspDefaultVelocityRadS_)) {
+        ppCspDefaultVelocityRadS_ = kDefaultPpVelocityRadS;
+    }
+    if (!std::isfinite(ppCspDefaultVelocityRadS_) || ppCspDefaultVelocityRadS_ <= 0.0) {
+        ROS_WARN("[CanDriverHW] Invalid pp_csp_default_velocity_rad_s=%.9g, fallback to %.6f rad/s.",
+                 ppCspDefaultVelocityRadS_,
+                 kDefaultPpVelocityRadS);
+        ppCspDefaultVelocityRadS_ = kDefaultPpVelocityRadS;
     }
     if (!pnh.getParam("safety_stop_on_fault", safetyStopOnFault_)) {
         safetyStopOnFault_ = true;
@@ -159,29 +239,60 @@ bool CanDriverHW::loadRuntimeParams(const ros::NodeHandle &pnh)
     if (!pnh.getParam("safety_hold_after_device_recover", safetyHoldAfterDeviceRecover_)) {
         safetyHoldAfterDeviceRecover_ = true;
     }
+    if (!pnh.getParam("pp_local_zero_offset_persistence_enabled",
+                      ppLocalZeroOffsetPersistenceEnabled_)) {
+        ppLocalZeroOffsetPersistenceEnabled_ = false;
+    }
+    if (!pnh.getParam("pp_zero_offset_persist_on_apply_to_motor",
+                      ppZeroOffsetPersistOnApplyToMotor_)) {
+        ppZeroOffsetPersistOnApplyToMotor_ = true;
+    }
+    if (!pnh.getParam("pp_local_zero_offset_file", ppLocalZeroOffsetFilePath_) ||
+        ppLocalZeroOffsetFilePath_.empty()) {
+        ppLocalZeroOffsetFilePath_ = defaultLocalZeroOffsetFilePath();
+    }
+
+    jointZeroOffsetRadByMotorId_.clear();
+    if (ppLocalZeroOffsetPersistenceEnabled_ && !loadPersistedLocalZeroOffsets()) {
+        ROS_ERROR("[CanDriverHW] Failed to load local zero offset persistence file '%s'.",
+                  ppLocalZeroOffsetFilePath_.c_str());
+        return false;
+    }
 
     deviceManager_->setPpFastWriteEnabled(ppFastWriteEnabled_);
+    deviceManager_->setRefreshRateHz(motorQueryHz_);
 
     if (motorQueryHz_ > 0.0) {
         ROS_INFO("[CanDriverHW] motor_query_hz=%.3f Hz.", motorQueryHz_);
     }
     ROS_INFO("[CanDriverHW] pp_fast_write_enabled=%s.",
              ppFastWriteEnabled_ ? "true" : "false");
+    ROS_INFO("[CanDriverHW] pp_position_default_velocity_rad_s=%.6f.",
+             ppPositionDefaultVelocityRadS_);
+    ROS_INFO("[CanDriverHW] pp_csp_default_velocity_rad_s=%.6f.",
+             ppCspDefaultVelocityRadS_);
     ROS_INFO("[CanDriverHW] startup_position_sync_timeout_sec=%.3f s.",
              startupPositionSyncTimeoutSec_);
+    ROS_INFO("[CanDriverHW] startup_probe_query_hz=%.3f Hz.",
+             startupProbeQueryHz_);
     ROS_INFO("[CanDriverHW] safety_stop_on_fault=%s, safety_require_enabled_for_motion=%s, max_position_step_rad=%.6f.",
              safetyStopOnFault_ ? "true" : "false",
              safetyRequireEnabledForMotion_ ? "true" : "false",
              maxPositionStepRad_);
     ROS_INFO("[CanDriverHW] safety_hold_after_device_recover=%s.",
              safetyHoldAfterDeviceRecover_ ? "true" : "false");
+    ROS_INFO("[CanDriverHW] pp_local_zero_offset_persistence_enabled=%s, file='%s'.",
+             ppLocalZeroOffsetPersistenceEnabled_ ? "true" : "false",
+             ppLocalZeroOffsetFilePath_.c_str());
+    ROS_INFO("[CanDriverHW] pp_zero_offset_persist_on_apply_to_motor=%s.",
+             ppZeroOffsetPersistOnApplyToMotor_ ? "true" : "false");
     ROS_WARN_STREAM_COND(debugBypassRosControl_,
                          "[CanDriverHW] debug_bypass_ros_control=true: "
                          "direct topic commands will bypass ros_control fallback.");
     return true;
 }
 
-bool CanDriverHW::syncStartupPositionAndCommands()
+bool CanDriverHW::syncStartupPositionAndCommands(const std::string &deviceFilter)
 {
     struct JointSnapshot {
         double pos{0.0};
@@ -191,31 +302,187 @@ bool CanDriverHW::syncStartupPositionAndCommands()
     };
 
     std::vector<JointSnapshot> snapshots(joints_.size());
+    std::vector<std::size_t> targetJointIndices;
+    targetJointIndices.reserve(joints_.size());
+    for (std::size_t i = 0; i < joints_.size(); ++i) {
+        if (!deviceFilter.empty() && joints_[i].canDevice != deviceFilter) {
+            continue;
+        }
+        targetJointIndices.push_back(i);
+    }
+    if (targetJointIndices.empty()) {
+        return true;
+    }
 
-    // 给协议刷新线程一个短暂窗口拉取首轮反馈。
+    // 给协议刷新线程一个短暂窗口拉取首轮真实反馈。
     const double timeout = startupPositionSyncTimeoutSec_;
     const auto sleepDur = std::chrono::milliseconds(20);
     const int maxPasses = std::max(1, static_cast<int>(std::ceil(timeout / 0.02)));
+    const auto sharedState = deviceManager_ ? deviceManager_->getSharedDriverState() : nullptr;
 
-    for (int pass = 0; pass < maxPasses; ++pass) {
-        for (const auto &group : jointGroups_) {
-            auto proto = getProtocol(group.canDevice, group.protocol);
-            auto devMutex = getDeviceMutex(group.canDevice);
-            if (!proto || !devMutex) {
-                continue;
-            }
+    if (sharedState) {
+        bool allValid = false;
+        std::vector<std::string> missingJoints;
+        for (int pass = 0; pass < maxPasses; ++pass) {
+            allValid = true;
+            missingJoints.clear();
 
-            std::lock_guard<std::mutex> devLock(*devMutex);
-            for (const std::size_t i : group.jointIndices) {
+            for (const std::size_t i : targetJointIndices) {
                 const auto &jc = joints_[i];
-                snapshots[i].pos = static_cast<double>(proto->getPosition(jc.motorId)) * jc.positionScale;
-                snapshots[i].vel = static_cast<double>(proto->getVelocity(jc.motorId)) * jc.velocityScale;
-                snapshots[i].eff = static_cast<double>(proto->getCurrent(jc.motorId));
+                can_driver::SharedDriverState::AxisFeedbackState feedback;
+                const auto axisKey =
+                    can_driver::MakeAxisKey(jc.canDevice, jc.protocol, jc.motorId);
+                if (!sharedState->getAxisFeedback(axisKey, &feedback) ||
+                    !feedback.feedbackSeen || !feedback.positionValid ||
+                    feedback.lastRxSteadyNs <= 0) {
+                    allValid = false;
+                    missingJoints.push_back(jc.name);
+                    continue;
+                }
+
+                snapshots[i].pos =
+                    static_cast<double>(feedback.position) *
+                    can_driver::effectivePositionScale(jc);
+                snapshots[i].vel = feedback.velocityValid
+                                       ? static_cast<double>(feedback.velocity) *
+                                             can_driver::effectiveVelocityScale(jc)
+                                       : 0.0;
+                snapshots[i].eff =
+                    feedback.currentValid ? static_cast<double>(feedback.current) : 0.0;
                 snapshots[i].valid = true;
             }
+
+            if (allValid) {
+                break;
+            }
+
+            if (pass + 1 < maxPasses) {
+                std::this_thread::sleep_for(sleepDur);
+            }
         }
-        if (pass + 1 < maxPasses) {
-            std::this_thread::sleep_for(sleepDur);
+
+        if (!allValid) {
+            std::ostringstream oss;
+            for (std::size_t i = 0; i < missingJoints.size(); ++i) {
+                if (i > 0) {
+                    oss << ", ";
+                }
+                oss << missingJoints[i];
+            }
+            if (deviceFilter.empty()) {
+                ROS_ERROR("[CanDriverHW] Startup feedback sync timed out within %.3f s. "
+                          "Missing position feedback for joints: %s",
+                          timeout,
+                          oss.str().c_str());
+            } else {
+                ROS_ERROR("[CanDriverHW] Startup feedback sync timed out on device '%s' within %.3f s. "
+                          "Missing position feedback for joints: %s",
+                          deviceFilter.c_str(),
+                          timeout,
+                          oss.str().c_str());
+            }
+
+            for (const std::size_t i : targetJointIndices) {
+                const auto &jc = joints_[i];
+                can_driver::SharedDriverState::AxisFeedbackState feedback;
+                const auto axisKey =
+                    can_driver::MakeAxisKey(jc.canDevice, jc.protocol, jc.motorId);
+                const bool hasFeedback = sharedState->getAxisFeedback(axisKey, &feedback);
+                if (!hasFeedback) {
+                    ROS_ERROR("[CanDriverHW] Startup sync detail: joint '%s' has no shared feedback entry yet "
+                              "(device=%s protocol=%s motor_id=%u).",
+                              jc.name.c_str(),
+                              jc.canDevice.c_str(),
+                              (jc.protocol == CanType::MT) ? "MT" : "PP",
+                              static_cast<unsigned>(static_cast<std::uint16_t>(jc.motorId)));
+                    continue;
+                }
+
+                ROS_ERROR("[CanDriverHW] Startup sync detail: joint '%s' feedbackSeen=%s "
+                          "positionValid=%s velocityValid=%s currentValid=%s enabled=%s "
+                          "fault=%s timeoutCount=%u lastRxAgeMs=%lld rawPos=%lld rawVel=%d rawCur=%d mode=%d",
+                          jc.name.c_str(),
+                          feedback.feedbackSeen ? "true" : "false",
+                          feedback.positionValid ? "true" : "false",
+                          feedback.velocityValid ? "true" : "false",
+                          feedback.currentValid ? "true" : "false",
+                          feedback.enabled ? "true" : "false",
+                          feedback.fault ? "true" : "false",
+                          static_cast<unsigned>(feedback.consecutiveTimeoutCount),
+                          steadyAgeMs(feedback.lastRxSteadyNs),
+                          static_cast<long long>(feedback.position),
+                          static_cast<int>(feedback.velocity),
+                          static_cast<int>(feedback.current),
+                          static_cast<int>(feedback.mode));
+                }
+
+            if (const auto concreteDeviceManager =
+                    std::dynamic_pointer_cast<DeviceManager>(deviceManager_)) {
+                std::set<std::string> devicesToReport;
+                if (!deviceFilter.empty()) {
+                    devicesToReport.insert(deviceFilter);
+                } else {
+                    for (const std::size_t i : targetJointIndices) {
+                        devicesToReport.insert(joints_[i].canDevice);
+                    }
+                }
+
+                for (const auto &device : devicesToReport) {
+                    const auto transport = concreteDeviceManager->getTransport(device);
+                    if (!transport) {
+                        ROS_ERROR("[CanDriverHW] Startup sync transport detail: device '%s' has no transport instance.",
+                                  device.c_str());
+                        continue;
+                    }
+
+                    const auto stats = transport->snapshotStats();
+                    ROS_ERROR("[CanDriverHW] Startup sync transport detail on '%s': tx_ok=%llu "
+                              "tx_backpressure=%llu tx_link_down=%llu tx_error=%llu "
+                              "rx_ok=%llu rx_error=%llu rx_short=%llu last_rx_age_ms=%lld",
+                              device.c_str(),
+                              static_cast<unsigned long long>(stats.txOk),
+                              static_cast<unsigned long long>(stats.txBackpressure),
+                              static_cast<unsigned long long>(stats.txLinkUnavailable),
+                              static_cast<unsigned long long>(stats.txError),
+                              static_cast<unsigned long long>(stats.rxOk),
+                              static_cast<unsigned long long>(stats.rxError),
+                              static_cast<unsigned long long>(stats.rxShortRead),
+                              steadyAgeMs(stats.lastRxSteadyNs));
+                }
+            }
+            return false;
+        }
+    } else {
+        ROS_WARN("[CanDriverHW] Shared driver state unavailable during startup sync; "
+                 "falling back to cached protocol values.");
+        for (int pass = 0; pass < maxPasses; ++pass) {
+            for (const auto &group : jointGroups_) {
+                if (!deviceFilter.empty() && group.canDevice != deviceFilter) {
+                    continue;
+                }
+                auto proto = getProtocol(group.canDevice, group.protocol);
+                auto devMutex = getDeviceMutex(group.canDevice);
+                if (!proto || !devMutex) {
+                    continue;
+                }
+
+                std::lock_guard<std::mutex> devLock(*devMutex);
+                for (const std::size_t i : group.jointIndices) {
+                    const auto &jc = joints_[i];
+                    snapshots[i].pos =
+                        static_cast<double>(proto->getPosition(jc.motorId)) *
+                        can_driver::effectivePositionScale(jc);
+                    snapshots[i].vel =
+                        static_cast<double>(proto->getVelocity(jc.motorId)) *
+                        can_driver::effectiveVelocityScale(jc);
+                    snapshots[i].eff =
+                        static_cast<double>(proto->getCurrent(jc.motorId));
+                    snapshots[i].valid = true;
+                }
+            }
+            if (pass + 1 < maxPasses) {
+                std::this_thread::sleep_for(sleepDur);
+            }
         }
     }
 
@@ -224,14 +491,18 @@ bool CanDriverHW::syncStartupPositionAndCommands()
         std::lock_guard<std::mutex> lock(jointStateMutex_);
         for (std::size_t i = 0; i < joints_.size(); ++i) {
             auto &jc = joints_[i];
+            if (!deviceFilter.empty() && jc.canDevice != deviceFilter) {
+                continue;
+            }
             if (snapshots[i].valid) {
                 jc.pos = snapshots[i].pos;
                 jc.vel = snapshots[i].vel;
                 jc.eff = snapshots[i].eff;
             }
 
-            if (jc.controlMode == "position") {
+            if (can_driver::controlModeUsesPositionSemantics(jc.controlMode)) {
                 // 上电后将位置命令对齐到当前反馈，避免控制循环首拍跳变。
+                // CSP 模式与 position 模式共用 posCmd，同样需要对齐。
                 jc.posCmd = jc.pos;
                 if (jc.hasLimits && jc.limits.has_position_limits) {
                     if (jc.pos < jc.limits.min_position || jc.pos > jc.limits.max_position) {
@@ -259,7 +530,12 @@ bool CanDriverHW::syncStartupPositionAndCommands()
         return false;
     }
 
-    ROS_INFO("[CanDriverHW] Startup position sync finished.");
+    if (deviceFilter.empty()) {
+        ROS_INFO("[CanDriverHW] Startup position sync finished.");
+    } else {
+        ROS_INFO("[CanDriverHW] Startup position sync finished for device '%s'.",
+                 deviceFilter.c_str());
+    }
     return true;
 }
 
@@ -280,9 +556,11 @@ bool CanDriverHW::parseAndSetupJoints(const ros::NodeHandle &pnh)
 
     std::set<std::string> seenJointNames;
     std::set<uint16_t> seenMotorIds;
+    std::set<std::tuple<std::string, CanType, std::uint8_t>> seenProtocolNodes;
     for (const auto &p : parsed) {
         const std::string &jointName = p.name;
         const uint16_t motorId = static_cast<uint16_t>(p.motorId);
+        const std::uint8_t protocolNodeId = toProtocolNodeId(p.motorId);
 
         if (!seenJointNames.insert(jointName).second) {
             ROS_ERROR("[CanDriverHW] Duplicate joint name '%s' in joints config.", jointName.c_str());
@@ -294,6 +572,16 @@ bool CanDriverHW::parseAndSetupJoints(const ros::NodeHandle &pnh)
                       static_cast<unsigned>(motorId));
             return false;
         }
+        if (!seenProtocolNodes.emplace(p.canDevice, p.protocol, protocolNodeId).second) {
+            ROS_ERROR("[CanDriverHW] Joint '%s' aliases protocol node id 0x%02X on device '%s' "
+                      "protocol '%s'. Distinct system motor_id values must not collapse onto the "
+                      "same on-wire node id.",
+                      jointName.c_str(),
+                      static_cast<unsigned>(protocolNodeId),
+                      p.canDevice.c_str(),
+                      (p.protocol == CanType::MT) ? "MT" : "PP");
+            return false;
+        }
 
         JointConfig jc;
         jc.name = p.name;
@@ -303,22 +591,21 @@ bool CanDriverHW::parseAndSetupJoints(const ros::NodeHandle &pnh)
         jc.protocol = p.protocol;
         jc.positionScale = p.positionScale;
         jc.velocityScale = p.velocityScale;
+        jc.directionSign = p.directionSign;
+        jc.ipMaxVelocity = p.ipMaxVelocity;
+        jc.ipMaxAcceleration = p.ipMaxAcceleration;
+        jc.ipMaxJerk = p.ipMaxJerk;
+        jc.ipGoalTolerance = p.ipGoalTolerance;
 
         joints_.push_back(jc);
         jointIndexByName_[jc.name] = joints_.size() - 1;
-
-        if (!deviceManager_->ensureTransport(jc.canDevice)) {
-            return false;
-        }
-        if (!deviceManager_->ensureProtocol(jc.canDevice, jc.protocol)) {
-            ROS_ERROR("[CanDriverHW] Failed to ensure protocol on '%s'.", jc.canDevice.c_str());
-            return false;
-        }
     }
 
     rebuildJointGroups();
     rawCommandBuffer_.assign(joints_.size(), 0);
     commandValidBuffer_.assign(joints_.size(), 0);
+    preparedCommandBuffer_.assign(joints_.size(), can_driver::CanDriverPreparedCommand{});
+    syncLifecycleTargets();
     return true;
 }
 
@@ -337,7 +624,6 @@ void CanDriverHW::rebuildJointGroups()
         group.protocol = entry.first.second;
         group.jointIndices = entry.second;
         jointGroups_.push_back(std::move(group));
-        lastDeviceReadyState_[entry.first.first] = false;
     }
 }
 
@@ -348,7 +634,7 @@ void CanDriverHW::registerJointInterfaces()
             jc.name, &jc.pos, &jc.vel, &jc.eff);
         jntStateIface_.registerHandle(stateHandle);
 
-        if (jc.controlMode == "velocity") {
+        if (can_driver::controlModeUsesVelocitySemantics(jc.controlMode)) {
             hardware_interface::JointHandle velHandle(stateHandle, &jc.velCmd);
             velIface_.registerHandle(velHandle);
         } else {
@@ -400,7 +686,7 @@ void CanDriverHW::loadJointLimits(const ros::NodeHandle &pnh)
         if (hasLimits) {
             jc.limits = limits;
             jc.hasLimits = true;
-            if (jc.controlMode == "velocity") {
+            if (can_driver::controlModeUsesVelocitySemantics(jc.controlMode)) {
                 joint_limits_interface::VelocityJointSaturationHandle handle(
                     velIface_.getHandle(jc.name), limits);
                 velLimitsIface_.registerHandle(handle);
@@ -416,127 +702,539 @@ void CanDriverHW::loadJointLimits(const ros::NodeHandle &pnh)
     }
 }
 
-void CanDriverHW::startMotorRefreshThreads()
+void CanDriverHW::configureLifecycleCoordinator()
 {
-    deviceManager_->setRefreshRateHz(motorQueryHz_);
+    runtime_.configureLifecycleCoordinator({
+        [this]() {
+            std::set<std::string> devices;
+            for (const auto &joint : joints_) {
+                devices.insert(joint.canDevice);
+            }
+            return std::vector<std::string>(devices.begin(), devices.end());
+        },
+        [this]() {
+            std::lock_guard<std::mutex> stateLock(jointStateMutex_);
+            for (auto &jc : joints_) {
+                jc.hasDirectPosCmd = false;
+                jc.hasDirectVelCmd = false;
+                jc.stopIssuedOnFault = false;
+            }
+        },
+        [this](std::string *detail) {
+            return lifecycleDriverOps_.enableHealthy(detail);
+        },
+        [this](std::string *detail) {
+            return lifecycleDriverOps_.motionHealthy(detail);
+        },
+        [this]() {
+            return (motorQueryHz_ > 0.0)
+                       ? std::min(startupProbeQueryHz_, motorQueryHz_)
+                       : startupProbeQueryHz_;
+        },
+        [this](const std::string &device, double refreshRateHz) {
+            deviceManager_->setDeviceRefreshRateHz(device, refreshRateHz);
+        },
+        [this](const std::string &device) {
+            return applyPersistedPpZeroOffsets(device);
+        },
+        [this](const std::string &device) {
+            return syncStartupPositionAndCommands(device);
+        },
+        [this](const std::string &device) {
+            return applyPerAxisPpDefaultVelocities(device);
+        },
+        [this](const std::string &device) {
+            return applyInitialModes(device);
+        },
+    });
+}
 
-    std::map<std::string, std::vector<MotorID>> mtIds;
-    std::map<std::string, std::vector<MotorID>> ppIds;
-    for (const auto &jc : joints_) {
-        if (jc.protocol == CanType::MT) {
-            mtIds[jc.canDevice].push_back(jc.motorId);
+void CanDriverHW::configureCommandGate()
+{
+    runtime_.configureCommandGate(
+        [this]() {
+            return captureCommandSnapshots();
+        },
+        [this]() {
+            holdCommandsForLifecycleTransition();
+        });
+}
+
+void CanDriverHW::configureMotorMaintenanceService(MotorMaintenanceService &service)
+{
+    service.configure(
+        [this]() {
+            return active_.load(std::memory_order_acquire);
+        },
+        &motorActionExecutor_,
+        [this](uint16_t motorId, JointConfig *joint) {
+            return lookupJointByMotorId(motorId, joint);
+        },
+        [this](const std::string &jointName) {
+            clearDirectCommand(jointName);
+        },
+        [this](uint16_t motorId, can_driver::AxisControlMode mode) {
+            return commitModeSwitch(motorId, mode);
+        },
+        [this](uint16_t motorId, double zeroOffset, double previousZeroOffset) {
+            return commitZero(motorId, zeroOffset, previousZeroOffset);
+        },
+        [this](uint16_t motorId, double* zeroOffset) {
+            return getZeroOffset(motorId, zeroOffset);
+        },
+        [this](uint16_t motorId, double baseMin, double baseMax, double zeroOffset) {
+            return commitLimits(motorId, baseMin, baseMax, zeroOffset);
+        },
+        [this](const JointConfig &joint, can_driver::SharedDriverState::AxisFeedbackState *feedback) {
+            return getFreshAxisFeedback(joint, feedback);
+        },
+        [this](const JointConfig &joint, const char *operation, std::string *message) {
+            return requireAxisDisabledForConfiguration(joint, operation, message);
+        },
+        [this](const std::string &device, CanType type) {
+            return getProtocol(device, type);
+        },
+        [this](const std::string &device) {
+            return getDeviceMutex(device);
+        },
+        ppZeroOffsetPersistOnApplyToMotor_);
+}
+
+std::vector<CanDriverHW::DirectCommandEndpoint> CanDriverHW::directCommandEndpoints() const
+{
+    std::vector<DirectCommandEndpoint> endpoints;
+    endpoints.reserve(joints_.size());
+    for (std::size_t i = 0; i < joints_.size(); ++i) {
+        endpoints.push_back(DirectCommandEndpoint{joints_[i].name, i});
+    }
+    return endpoints;
+}
+
+std::vector<CanDriverHW::JointRuntimeStateView> CanDriverHW::snapshotJointRuntimeStates() const
+{
+    std::vector<JointRuntimeStateView> result;
+    result.reserve(joints_.size());
+
+    const auto sharedState = deviceManager_ ? deviceManager_->getSharedDriverState() : nullptr;
+    std::unordered_map<std::string, bool> deviceReadyByName;
+
+    std::lock_guard<std::mutex> lock(jointStateMutex_);
+    for (const auto& joint : joints_) {
+        JointRuntimeStateView item;
+        item.jointName = joint.name;
+        item.controlMode = joint.controlMode;
+        item.position = joint.pos;
+        item.velocity = joint.vel;
+        item.effort = joint.eff;
+
+        const auto deviceReadyIt = deviceReadyByName.find(joint.canDevice);
+        if (deviceReadyIt != deviceReadyByName.end()) {
+            item.deviceReady = deviceReadyIt->second;
         } else {
-            ppIds[jc.canDevice].push_back(jc.motorId);
+            const bool deviceReady =
+                deviceManager_ ? deviceManager_->isDeviceReady(joint.canDevice) : false;
+            deviceReadyByName.emplace(joint.canDevice, deviceReady);
+            item.deviceReady = deviceReady;
+        }
+
+        if (sharedState) {
+            can_driver::SharedDriverState::AxisFeedbackState feedback;
+            const auto axisKey =
+                can_driver::MakeAxisKey(joint.canDevice, joint.protocol, joint.motorId);
+            if (sharedState->getAxisFeedback(axisKey, &feedback)) {
+                item.enabled = feedback.enabledValid && feedback.enabled;
+                item.fault = feedback.faultValid && feedback.fault;
+                item.feedbackFresh = sharedFeedbackFresh(feedback);
+            }
+
+            can_driver::SharedDriverState::AxisCommandState command;
+            if (sharedState->getAxisCommand(axisKey, &command)) {
+                item.commandValid = command.valid;
+            }
+        }
+
+        result.push_back(std::move(item));
+    }
+
+    return result;
+}
+
+void CanDriverHW::acceptDirectCommand(std::size_t jointIndex,
+                                      bool isVelocity,
+                                      double value,
+                                      const ros::Time &stamp)
+{
+    if (!active_.load(std::memory_order_acquire) || jointIndex >= joints_.size()) {
+        return;
+    }
+
+    std::lock_guard<std::mutex> lock(jointStateMutex_);
+    auto &jc = joints_[jointIndex];
+    if (isVelocity) {
+        jc.directVelCmd = value;
+        jc.hasDirectVelCmd = true;
+        jc.lastDirectVelTime = stamp;
+    } else {
+        jc.directPosCmd = value;
+        jc.hasDirectPosCmd = true;
+        jc.lastDirectPosTime = stamp;
+    }
+}
+
+bool CanDriverHW::lookupJointByMotorId(uint16_t motorId,
+                                       can_driver::CanDriverJointConfig *joint) const
+{
+    if (joint == nullptr) {
+        return false;
+    }
+    for (const auto &candidate : joints_) {
+        if (static_cast<uint16_t>(candidate.motorId) == motorId) {
+            *joint = candidate;
+            return true;
         }
     }
-    for (auto &kv : mtIds) {
-        deviceManager_->startRefresh(kv.first, CanType::MT, kv.second);
-    }
-    for (auto &kv : ppIds) {
-        deviceManager_->startRefresh(kv.first, CanType::PP, kv.second);
-    }
+    return false;
 }
 
-void CanDriverHW::setupRosComm(ros::NodeHandle &pnh)
+void CanDriverHW::clearDirectCommand(const std::string &jointName)
 {
-    initSrv_     = pnh.advertiseService("init",          &CanDriverHW::onInit,         this);
-    shutdownSrv_ = pnh.advertiseService("shutdown",      &CanDriverHW::onShutdown,     this);
-    recoverSrv_  = pnh.advertiseService("recover",       &CanDriverHW::onRecover,      this);
-    motorCmdSrv_ = pnh.advertiseService("motor_command", &CanDriverHW::onMotorCommand, this);
-    setZeroLimitSrv_ = pnh.advertiseService("set_zero_limit",
-                                            &CanDriverHW::onSetZeroLimit,
-                                            this);
-
-    const auto makeDirectCmdCallback =
-        [this](std::size_t idx, bool isVelocity) {
-            return [this, idx, isVelocity](const std_msgs::Float64::ConstPtr &msg) {
-                if (!active_.load(std::memory_order_acquire)) {
-                    return;
-                }
-                std::lock_guard<std::mutex> lock(jointStateMutex_);
-                auto &jc = joints_[idx];
-                if (isVelocity) {
-                    jc.directVelCmd = msg->data;
-                    jc.hasDirectVelCmd = true;
-                    jc.lastDirectVelTime = ros::Time::now();
-                } else {
-                    jc.directPosCmd = msg->data;
-                    jc.hasDirectPosCmd = true;
-                    jc.lastDirectPosTime = ros::Time::now();
-                }
-            };
-        };
-
-    for (auto &jc : joints_) {
-        const std::string velTopic = "motor/" + jc.name + "/cmd_velocity";
-        const std::string posTopic = "motor/" + jc.name + "/cmd_position";
-        const std::size_t idx = jointIndexByName_[jc.name];
-        cmdVelSubs_[jc.name] = pnh.subscribe<std_msgs::Float64>(
-            velTopic, static_cast<uint32_t>(directCmdQueueSize_),
-            makeDirectCmdCallback(idx, true));
-
-        cmdPosSubs_[jc.name] = pnh.subscribe<std_msgs::Float64>(
-            posTopic, static_cast<uint32_t>(directCmdQueueSize_),
-            makeDirectCmdCallback(idx, false));
+    std::lock_guard<std::mutex> lock(jointStateMutex_);
+    const auto it = jointIndexByName_.find(jointName);
+    if (it == jointIndexByName_.end()) {
+        return;
     }
-
-    motorStatesPub_ = pnh.advertise<can_driver::MotorState>("motor_states", 10);
-    stateTimer_ = pnh.createTimer(ros::Duration(statePublishPeriodSec_),
-                                  &CanDriverHW::publishMotorStates, this);
+    joints_[it->second].hasDirectPosCmd = false;
+    joints_[it->second].hasDirectVelCmd = false;
 }
 
-void CanDriverHW::clearDirectCmd(const std::string &jointName)
+bool CanDriverHW::commitModeSwitch(uint16_t motorId, can_driver::AxisControlMode mode)
+{
+    std::lock_guard<std::mutex> lock(jointStateMutex_);
+    for (std::size_t i = 0; i < joints_.size(); ++i) {
+        auto &joint = joints_[i];
+        if (static_cast<uint16_t>(joint.motorId) != motorId) {
+            continue;
+        }
+        joint.controlMode = can_driver::axisControlModeName(mode);
+        joint.hasDirectPosCmd = false;
+        joint.hasDirectVelCmd = false;
+        joint.posCmd = joint.pos;
+        joint.velCmd = 0.0;
+        joint.requireCommandAlignment = true;
+        commandValidBuffer_[i] = 0;
+        return true;
+    }
+    return false;
+}
+
+bool CanDriverHW::getZeroOffset(uint16_t motorId, double* zeroOffset) const
+{
+    if (zeroOffset == nullptr) {
+        return false;
+    }
+    std::lock_guard<std::mutex> lock(jointStateMutex_);
+    const auto it = jointZeroOffsetRadByMotorId_.find(motorId);
+    if (it == jointZeroOffsetRadByMotorId_.end()) {
+        *zeroOffset = 0.0;
+        return true;
+    }
+    *zeroOffset = it->second;
+    return true;
+}
+
+bool CanDriverHW::commitZero(uint16_t motorId,
+                             double zeroOffset,
+                             double previousZeroOffset)
+{
+    std::lock_guard<std::mutex> lock(jointStateMutex_);
+    for (auto &joint : joints_) {
+        if (static_cast<uint16_t>(joint.motorId) != motorId) {
+            continue;
+        }
+        jointZeroOffsetRadByMotorId_[motorId] = zeroOffset;
+        if (ppLocalZeroOffsetPersistenceEnabled_ && !savePersistedLocalZeroOffsets()) {
+            jointZeroOffsetRadByMotorId_[motorId] = previousZeroOffset;
+            return false;
+        }
+        return true;
+    }
+    return false;
+}
+
+bool CanDriverHW::commitLimits(uint16_t motorId,
+                               double baseMin,
+                               double baseMax,
+                               double zeroOffset)
+{
+    std::lock_guard<std::mutex> lock(jointStateMutex_);
+    for (auto &joint : joints_) {
+        if (static_cast<uint16_t>(joint.motorId) != motorId) {
+            continue;
+        }
+        joint.hasLimits = true;
+        joint.limits.has_position_limits = true;
+        joint.limits.min_position = baseMin;
+        joint.limits.max_position = baseMax;
+        jointZeroOffsetRadByMotorId_[motorId] = zeroOffset;
+        return true;
+    }
+    return false;
+}
+
+bool CanDriverHW::applyPersistedPpZeroOffsets(const std::string &deviceFilter)
+{
+    if (!ppLocalZeroOffsetPersistenceEnabled_) {
+        return true;
+    }
+
+    bool appliedAny = false;
+    std::map<uint16_t, double> persistedOffsets;
+    {
+        std::lock_guard<std::mutex> lock(jointStateMutex_);
+        persistedOffsets = jointZeroOffsetRadByMotorId_;
+    }
+
+    for (const auto &joint : joints_) {
+        if (joint.protocol != CanType::PP ||
+            !can_driver::controlModeUsesPositionSemantics(joint.controlMode)) {
+            continue;
+        }
+        if (!deviceFilter.empty() && joint.canDevice != deviceFilter) {
+            continue;
+        }
+        const auto it = persistedOffsets.find(static_cast<uint16_t>(joint.motorId));
+        if (it == persistedOffsets.end()) {
+            continue;
+        }
+
+        int32_t rawOffset = 0;
+        if (!can_driver::safe_command::scaleAndClampToInt32(
+                it->second,
+                can_driver::effectivePositionScale(joint),
+                joint.name + ".persisted_zero_offset",
+                rawOffset)) {
+            ROS_ERROR("[CanDriverHW] Failed to convert persisted zero offset for joint '%s'.",
+                      joint.name.c_str());
+            return false;
+        }
+
+        const auto status = motorActionExecutor_.execute(
+            makeMotorTarget(joint),
+            [rawOffset](const std::shared_ptr<CanProtocol> &proto, MotorID id) {
+                return proto->setPositionOffset(id, rawOffset);
+            },
+            "Restore persisted zero offset");
+        if (status != MotorActionExecutor::Status::Ok) {
+            ROS_ERROR("[CanDriverHW] Failed to restore persisted zero offset for joint '%s'.",
+                      joint.name.c_str());
+            return false;
+        }
+        ROS_INFO("[CanDriverHW] Restored persisted zero offset %.6f rad for joint '%s'.",
+                 it->second,
+                 joint.name.c_str());
+        appliedAny = true;
+    }
+
+    if (!appliedAny && deviceFilter.empty()) {
+        ROS_INFO("[CanDriverHW] No persisted PP zero offsets to restore.");
+    }
+    return true;
+}
+
+std::string CanDriverHW::defaultLocalZeroOffsetFilePath() const
+{
+    const char *home = std::getenv("HOME");
+    const std::filesystem::path root =
+        (home != nullptr && home[0] != '\0') ? std::filesystem::path(home) / ".ros"
+                                             : std::filesystem::temp_directory_path();
+    return (root / "can_driver_pp_zero_offsets.txt").string();
+}
+
+bool CanDriverHW::loadPersistedLocalZeroOffsets()
+{
+    const std::filesystem::path path(ppLocalZeroOffsetFilePath_);
+    if (!std::filesystem::exists(path)) {
+        return true;
+    }
+
+    std::ifstream in(path);
+    if (!in.is_open()) {
+        return false;
+    }
+
+    std::map<uint16_t, double> loaded;
+    std::string line;
+    while (std::getline(in, line)) {
+        if (line.empty() || line[0] == '#') {
+            continue;
+        }
+        std::istringstream iss(line);
+        uint16_t motorId = 0;
+        double zeroOffset = 0.0;
+        if (!(iss >> motorId >> zeroOffset)) {
+            return false;
+        }
+        loaded[motorId] = zeroOffset;
+    }
+
+    jointZeroOffsetRadByMotorId_ = std::move(loaded);
+    return true;
+}
+
+bool CanDriverHW::savePersistedLocalZeroOffsets() const
+{
+    const std::filesystem::path path(ppLocalZeroOffsetFilePath_);
+    std::error_code ec;
+    std::filesystem::create_directories(path.parent_path(), ec);
+    if (ec) {
+        return false;
+    }
+
+    const std::filesystem::path tmp = path.string() + ".tmp";
+    std::ofstream out(tmp, std::ios::trunc);
+    if (!out.is_open()) {
+        return false;
+    }
+    out.setf(std::ios::fixed);
+    out.precision(17);
+    for (const auto &entry : jointZeroOffsetRadByMotorId_) {
+        out << entry.first << ' ' << entry.second << '\n';
+    }
+    out.close();
+    if (!out) {
+        return false;
+    }
+    std::filesystem::rename(tmp, path, ec);
+    if (ec) {
+        return false;
+    }
+    return true;
+}
+
+void CanDriverHW::holdCommandsForLifecycleTransition()
 {
     std::lock_guard<std::mutex> stateLock(jointStateMutex_);
-    const auto it = jointIndexByName_.find(jointName);
-    if (it != jointIndexByName_.end()) {
-        joints_[it->second].hasDirectPosCmd = false;
-        joints_[it->second].hasDirectVelCmd = false;
+    for (std::size_t i = 0; i < joints_.size(); ++i) {
+        auto &jc = joints_[i];
+        jc.hasDirectPosCmd = false;
+        jc.hasDirectVelCmd = false;
+        if (can_driver::controlModeUsesVelocitySemantics(jc.controlMode)) {
+            jc.velCmd = 0.0;
+        } else {
+            jc.posCmd = jc.pos;
+        }
+        jc.requireCommandAlignment = false;
+        commandValidBuffer_[i] = 0;
     }
 }
 
-const CanDriverHW::JointConfig *CanDriverHW::findJointByMotorId(uint16_t motorId) const
+std::vector<CommandGate::Snapshot> CanDriverHW::captureCommandSnapshots() const
 {
+    std::lock_guard<std::mutex> stateLock(jointStateMutex_);
+    std::vector<CommandGate::Snapshot> snapshots(joints_.size());
+    for (std::size_t i = 0; i < joints_.size(); ++i) {
+        const auto &jc = joints_[i];
+        const auto mode = can_driver::axisControlModeFromString(jc.controlMode);
+        auto &snapshot = snapshots[i];
+        snapshot.controlMode = mode;
+        snapshot.commandValue = can_driver::controlModeSelectedCommandValue(jc, mode);
+        snapshot.hasDirectCommand = can_driver::controlModeHasDirectCommand(jc, mode);
+        snapshot.targetNearActual = can_driver::controlModeTargetNearActual(jc, mode);
+    }
+    return snapshots;
+}
+
+void CanDriverHW::syncLifecycleTargets()
+{
+    std::vector<MotorActionExecutor::Target> targets;
+    targets.reserve(joints_.size());
     for (const auto &jc : joints_) {
-        if (static_cast<uint16_t>(jc.motorId) == motorId) {
-            return &jc;
+        targets.push_back(MotorActionExecutor::Target{jc.name, jc.canDevice, jc.protocol, jc.motorId});
+    }
+    lifecycleDriverOps_.setTargets(std::move(targets));
+}
+
+MotorActionExecutor::Target CanDriverHW::makeMotorTarget(const JointConfig &jc) const
+{
+    return MotorActionExecutor::Target{jc.name, jc.canDevice, jc.protocol, jc.motorId};
+}
+
+bool CanDriverHW::applyInitialModes(const std::string &deviceFilter)
+{
+    bool allOk = true;
+    for (const auto &jc : joints_) {
+        if (!deviceFilter.empty() && jc.canDevice != deviceFilter) {
+            continue;
+        }
+        if (can_driver::axisControlModeFromString(jc.controlMode) !=
+            can_driver::AxisControlMode::Csp) {
+            continue;
+        }
+        const auto status = motorActionExecutor_.execute(
+            makeMotorTarget(jc),
+            [](const std::shared_ptr<CanProtocol> &proto, MotorID id) {
+                return proto->setMode(id, CanProtocol::MotorMode::CSP);
+            },
+            "Set initial CSP mode");
+        if (status != MotorActionExecutor::Status::Ok) {
+            ROS_ERROR("[CanDriverHW] applyInitialModes: setMode(CSP) failed for joint '%s'. "
+                      "Refusing to activate to prevent motion in wrong mode.",
+                      jc.name.c_str());
+            allOk = false;
+        } else {
+            ROS_INFO("[CanDriverHW] applyInitialModes: joint '%s' set to CSP mode.",
+                     jc.name.c_str());
         }
     }
-    return nullptr;
+    return allOk;
 }
 
-CanDriverHW::MotorOpStatus CanDriverHW::executeOnMotor(
-    const JointConfig &jc,
-    const std::function<bool(const std::shared_ptr<CanProtocol> &, MotorID)> &op,
-    const char *operationName)
+bool CanDriverHW::applyPerAxisPpDefaultVelocities(const std::string &deviceFilter)
 {
-    if (!isDeviceReady(jc.canDevice)) {
-        return MotorOpStatus::DeviceNotReady;
+    bool appliedAny = false;
+    for (const auto &group : jointGroups_) {
+        if (group.protocol != CanType::PP) {
+            continue;
+        }
+        if (!deviceFilter.empty() && group.canDevice != deviceFilter) {
+            continue;
+        }
+
+        auto protocol = std::dynamic_pointer_cast<EyouCan>(getProtocol(group.canDevice, group.protocol));
+        if (!protocol) {
+            ROS_WARN("[CanDriverHW] Skip per-axis PP default velocity override on '%s' because "
+                     "the protocol instance is not EyouCan.",
+                     group.canDevice.c_str());
+            continue;
+        }
+
+        for (const auto jointIndex : group.jointIndices) {
+            const auto &joint = joints_[jointIndex];
+            int32_t rawVelocity = 0;
+            if (!can_driver::safe_command::scaleAndClampToInt32(ppPositionDefaultVelocityRadS_,
+                                                                joint.velocityScale,
+                                                                joint.name + ".pp_position_default_velocity_rad_s",
+                                                                rawVelocity)) {
+                return false;
+            }
+            protocol->setMotorDefaultPositionVelocityRaw(joint.motorId, rawVelocity);
+
+            if (!can_driver::safe_command::scaleAndClampToInt32(ppCspDefaultVelocityRadS_,
+                                                                joint.velocityScale,
+                                                                joint.name + ".pp_csp_default_velocity_rad_s",
+                                                                rawVelocity)) {
+                return false;
+            }
+            protocol->setMotorDefaultCspVelocityRaw(joint.motorId, rawVelocity);
+            appliedAny = true;
+        }
     }
 
-    auto proto = getProtocol(jc.canDevice, jc.protocol);
-    auto devMutex = getDeviceMutex(jc.canDevice);
-    if (!proto || !devMutex) {
-        return MotorOpStatus::ProtocolUnavailable;
+    if (appliedAny) {
+        ROS_INFO("[CanDriverHW] Applied per-axis PP default velocity overrides from rad/s configuration%s.",
+                 deviceFilter.empty() ? "" : (" on " + deviceFilter).c_str());
     }
-
-    std::lock_guard<std::mutex> devLock(*devMutex);
-    try {
-        return op(proto, jc.motorId) ? MotorOpStatus::Ok : MotorOpStatus::Rejected;
-    } catch (const std::exception &e) {
-        ROS_ERROR("[CanDriverHW] %s failed on '%s' motor %u: %s",
-                  operationName,
-                  jc.canDevice.c_str(),
-                  static_cast<unsigned>(static_cast<uint16_t>(jc.motorId)),
-                  e.what());
-        return MotorOpStatus::Exception;
-    } catch (...) {
-        ROS_ERROR("[CanDriverHW] %s failed on '%s' motor %u (unknown exception).",
-                  operationName,
-                  jc.canDevice.c_str(),
-                  static_cast<unsigned>(static_cast<uint16_t>(jc.motorId)));
-        return MotorOpStatus::Exception;
-    }
+    return true;
 }
 
 // ---------------------------------------------------------------------------
@@ -547,43 +1245,8 @@ void CanDriverHW::read(const ros::Time & /*time*/, const ros::Duration & /*perio
     if (!active_.load(std::memory_order_acquire)) {
         return;
     }
-
-    struct JointSnapshot {
-        double pos{0.0};
-        double vel{0.0};
-        double eff{0.0};
-        bool   valid{false};
-    };
-    std::vector<JointSnapshot> snapshots(joints_.size());
-
-    for (const auto &group : jointGroups_) {
-        const std::string &device = group.canDevice;
-        const CanType protocol = group.protocol;
-        auto proto = getProtocol(device, protocol);
-        auto devMutex = getDeviceMutex(device);
-        if (!proto || !devMutex) {
-            continue;
-        }
-
-        std::lock_guard<std::mutex> devLock(*devMutex);
-        for (const std::size_t i : group.jointIndices) {
-            const auto &jc = joints_[i];
-            snapshots[i].pos = static_cast<double>(proto->getPosition(jc.motorId)) * jc.positionScale;
-            snapshots[i].vel = static_cast<double>(proto->getVelocity(jc.motorId)) * jc.velocityScale;
-            snapshots[i].eff = static_cast<double>(proto->getCurrent(jc.motorId));
-            snapshots[i].valid = true;
-        }
-    }
-
-    std::lock_guard<std::mutex> lock(jointStateMutex_);
-    for (std::size_t i = 0; i < joints_.size(); ++i) {
-        if (!snapshots[i].valid) {
-            continue;
-        }
-        joints_[i].pos = snapshots[i].pos;
-        joints_[i].vel = snapshots[i].vel;
-        joints_[i].eff = snapshots[i].eff;
-    }
+    can_driver::CanDriverIoRuntime::SyncJointFeedback(
+        *deviceManager_, jointGroups_, &joints_, &jointStateMutex_);
 }
 
 // ---------------------------------------------------------------------------
@@ -595,259 +1258,62 @@ void CanDriverHW::write(const ros::Time & /*time*/, const ros::Duration &period)
         return;
     }
 
+    if (lifecycleCoordinator_.mode() != can_driver::SystemOpMode::Running) {
+        std::lock_guard<std::mutex> lock(jointStateMutex_);
+        std::fill(commandValidBuffer_.begin(), commandValidBuffer_.end(), 0);
+        return;
+    }
+    if (!commandGate_.consumeFreshCommandLatchIfSatisfied()) {
+        std::lock_guard<std::mutex> lock(jointStateMutex_);
+        std::fill(commandValidBuffer_.begin(), commandValidBuffer_.end(), 0);
+        return;
+    }
+
 #if SOFTWARE_LOOPBACK_MODE
     // ========== 软件回环模式 ==========
     // 不发送 CAN 帧，命令值已经在 write() 被 ros_control 写入 posCmd/velCmd
     // read() 会直接读取这些值作为反馈
 #else
     // ========== 真实 CAN 模式 ==========
+    bool anyFaultObserved = false;
 
     // 应用关节限位（钳制命令值到安全范围）
     posLimitsIface_.enforceLimits(period);
     velLimitsIface_.enforceLimits(period);
-
-    {
-        std::lock_guard<std::mutex> lock(jointStateMutex_);
-        const ros::Time now = ros::Time::now();
-        const auto clampWithJointLimits = [](const JointConfig &jc, double cmdValue) -> double {
-            if (!jc.hasLimits || !std::isfinite(cmdValue)) {
-                return cmdValue;
-            }
-
-            if (jc.controlMode == "velocity" && jc.limits.has_velocity_limits) {
-                return std::clamp(cmdValue, -jc.limits.max_velocity, jc.limits.max_velocity);
-            }
-            if (jc.controlMode == "position" && jc.limits.has_position_limits) {
-                return std::clamp(cmdValue, jc.limits.min_position, jc.limits.max_position);
-            }
-            return cmdValue;
-        };
-
-        for (std::size_t i = 0; i < joints_.size(); ++i) {
-            auto &jc = joints_[i];
-
-            bool useDirect = false;
-            double cmdValue = 0.0;
-            bool hasCommand = true;
-            if (jc.controlMode == "velocity") {
-                if (jc.hasDirectVelCmd) {
-                    if (debugBypassRosControl_) {
-                        useDirect = true;
-                        cmdValue = jc.directVelCmd;
-                    } else {
-                        const double age = (now - jc.lastDirectVelTime).toSec();
-                        if (age <= directCmdTimeoutSec_) {
-                            useDirect = true;
-                            cmdValue = jc.directVelCmd;
-                        } else {
-                            jc.hasDirectVelCmd = false;
-                        }
-                    }
-                }
-                if (!useDirect) {
-                    if (debugBypassRosControl_) {
-                        hasCommand = false;
-                    } else {
-                        cmdValue = jc.velCmd;
-                    }
-                }
-            } else {
-                if (jc.hasDirectPosCmd) {
-                    if (debugBypassRosControl_) {
-                        useDirect = true;
-                        cmdValue = jc.directPosCmd;
-                    } else {
-                        const double age = (now - jc.lastDirectPosTime).toSec();
-                        if (age <= directCmdTimeoutSec_) {
-                            useDirect = true;
-                            cmdValue = jc.directPosCmd;
-                        } else {
-                            jc.hasDirectPosCmd = false;
-                        }
-                    }
-                }
-                if (!useDirect) {
-                    if (debugBypassRosControl_) {
-                        hasCommand = false;
-                    } else {
-                        cmdValue = jc.posCmd;
-                    }
-                }
-            }
-
-            if (!hasCommand) {
-                commandValidBuffer_[i] = 0;
-                continue;
-            }
-
-            cmdValue = clampWithJointLimits(jc, cmdValue);
-            if (jc.controlMode == "position" && maxPositionStepRad_ > 0.0 &&
-                std::isfinite(cmdValue) && std::isfinite(jc.pos)) {
-                const double delta = cmdValue - jc.pos;
-                if (std::fabs(delta) > maxPositionStepRad_) {
-                    const double limitedCmd =
-                        jc.pos + std::copysign(maxPositionStepRad_, delta);
-                    ROS_WARN_THROTTLE(
-                        1.0,
-                        "[CanDriverHW] Joint '%s' position step limited: cur=%.6f, req=%.6f, limited=%.6f (max_step=%.6f).",
-                        jc.name.c_str(),
-                        jc.pos,
-                        cmdValue,
-                        limitedCmd,
-                        maxPositionStepRad_);
-                    cmdValue = limitedCmd;
-                }
-                cmdValue = clampWithJointLimits(jc, cmdValue);
-            }
-
-            const double scale =
-                (jc.controlMode == "velocity") ? jc.velocityScale : jc.positionScale;
-            commandValidBuffer_[i] = static_cast<uint8_t>(
-                can_driver::safe_command::scaleAndClampToInt32(
-                    cmdValue, scale, jc.name, rawCommandBuffer_[i]));
-        }
+    const can_driver::CanDriverIoRuntime::WriteConfig writeConfig{
+        directCmdTimeoutSec_,
+        debugBypassRosControl_,
+        safetyStopOnFault_,
+        safetyRequireEnabledForMotion_,
+        maxPositionStepRad_,
+        safetyHoldAfterDeviceRecover_,
+    };
+    can_driver::CanDriverIoRuntime::PrepareCommands(
+        &joints_,
+        &rawCommandBuffer_,
+        &commandValidBuffer_,
+        &preparedCommandBuffer_,
+        &jointStateMutex_,
+        writeConfig);
+    can_driver::CanDriverIoRuntime::DispatchPreparedCommands(*deviceManager_,
+                                                             jointGroups_,
+                                                             &joints_,
+                                                             rawCommandBuffer_,
+                                                             &commandValidBuffer_,
+                                                             preparedCommandBuffer_,
+                                                             &jointStateMutex_,
+                                                             &commandGate_,
+                                                             writeConfig,
+                                                             &anyFaultObserved);
+    bool unhealthy = anyFaultObserved;
+    std::string healthDetail;
+    if (!unhealthy && !lifecycleHealthHealthy(&healthDetail)) {
+        unhealthy = true;
+        ROS_WARN_THROTTLE(1.0,
+                          "[CanDriverHW] Auto-fault because lifecycle health check failed: %s",
+                          healthDetail.empty() ? "unknown reason" : healthDetail.c_str());
     }
-
-    for (const auto &group : jointGroups_) {
-        const std::string &device = group.canDevice;
-        const CanType protocol = group.protocol;
-        const bool isReady = isDeviceReady(device);
-        const auto stateIt = lastDeviceReadyState_.find(device);
-        const bool hadReadyState = (stateIt != lastDeviceReadyState_.end());
-        const bool wasReady = hadReadyState ? stateIt->second : false;
-        lastDeviceReadyState_[device] = isReady;
-
-        if (!isReady) {
-            if (!hadReadyState || wasReady) {
-                ROS_ERROR_THROTTLE(
-                    1.0,
-                    "[CanDriverHW] Device '%s' not ready, clear direct commands and block motion.",
-                    device.c_str());
-            } else {
-                ROS_WARN_THROTTLE(
-                    1.0,
-                    "[CanDriverHW] Device '%s' not ready, skip command write.",
-                    device.c_str());
-            }
-
-            {
-                std::lock_guard<std::mutex> lock(jointStateMutex_);
-                for (const std::size_t idx : group.jointIndices) {
-                    auto &jc = joints_[idx];
-                    jc.hasDirectPosCmd = false;
-                    jc.hasDirectVelCmd = false;
-                    jc.stopIssuedOnFault = false;
-                    if (jc.controlMode == "position") {
-                        jc.posCmd = jc.pos;
-                    } else {
-                        jc.velCmd = 0.0;
-                    }
-                    commandValidBuffer_[idx] = 0;
-                }
-            }
-            continue;
-        }
-
-        if (safetyHoldAfterDeviceRecover_ && hadReadyState && !wasReady && isReady) {
-            ROS_WARN_THROTTLE(
-                1.0,
-                "[CanDriverHW] Device '%s' recovered, hold one cycle and require fresh command.",
-                device.c_str());
-            std::lock_guard<std::mutex> lock(jointStateMutex_);
-            for (const std::size_t idx : group.jointIndices) {
-                auto &jc = joints_[idx];
-                jc.hasDirectPosCmd = false;
-                jc.hasDirectVelCmd = false;
-                jc.stopIssuedOnFault = false;
-                if (jc.controlMode == "position") {
-                    jc.posCmd = jc.pos;
-                } else {
-                    jc.velCmd = 0.0;
-                }
-                commandValidBuffer_[idx] = 0;
-            }
-            continue;
-        }
-
-        auto proto = getProtocol(device, protocol);
-        auto devMutex = getDeviceMutex(device);
-        if (!proto || !devMutex) {
-            continue;
-        }
-
-        std::lock_guard<std::mutex> devLock(*devMutex);
-        for (const std::size_t idx : group.jointIndices) {
-            if (!commandValidBuffer_[idx]) {
-                continue;
-            }
-            const auto &jc = joints_[idx];
-            try {
-                if (safetyStopOnFault_) {
-                    const bool hasFault = proto->hasFault(jc.motorId);
-                    bool needIssueStop = false;
-                    {
-                        std::lock_guard<std::mutex> lock(jointStateMutex_);
-                        if (hasFault) {
-                            if (!joints_[idx].stopIssuedOnFault) {
-                                joints_[idx].stopIssuedOnFault = true;
-                                needIssueStop = true;
-                            }
-                        } else {
-                            joints_[idx].stopIssuedOnFault = false;
-                        }
-                    }
-
-                    if (hasFault) {
-                        if (needIssueStop) {
-                            if (!proto->Stop(jc.motorId)) {
-                                ROS_WARN_THROTTLE(
-                                    1.0,
-                                    "[CanDriverHW] Joint '%s' has fault, auto Stop rejected on '%s'.",
-                                    jc.name.c_str(),
-                                    device.c_str());
-                            } else {
-                                ROS_WARN_THROTTLE(
-                                    1.0,
-                                    "[CanDriverHW] Joint '%s' has fault, auto Stop sent and motion command blocked.",
-                                    jc.name.c_str());
-                            }
-                        }
-                        continue;
-                    }
-                }
-
-                if (safetyRequireEnabledForMotion_ && !proto->isEnabled(jc.motorId)) {
-                    ROS_WARN_THROTTLE(
-                        1.0,
-                        "[CanDriverHW] Joint '%s' is not enabled, motion command blocked.",
-                        jc.name.c_str());
-                    continue;
-                }
-
-                if (jc.controlMode == "velocity") {
-                    if (!proto->setVelocity(jc.motorId, rawCommandBuffer_[idx])) {
-                        ROS_WARN_THROTTLE(1.0,
-                                          "[CanDriverHW] setVelocity rejected on '%s'.",
-                                          device.c_str());
-                    }
-                } else {
-                    if (!proto->setPosition(jc.motorId, rawCommandBuffer_[idx])) {
-                        ROS_WARN_THROTTLE(1.0,
-                                          "[CanDriverHW] setPosition rejected on '%s'.",
-                                          device.c_str());
-                    }
-                }
-            } catch (const std::exception &e) {
-                ROS_ERROR_THROTTLE(1.0, "[CanDriverHW] write() command failed on '%s': %s",
-                                   device.c_str(), e.what());
-            } catch (...) {
-                ROS_ERROR_THROTTLE(
-                    1.0,
-                    "[CanDriverHW] write() command failed on '%s' (unknown exception).",
-                    device.c_str());
-            }
-        }
-    }
+    lifecycleCoordinator_.UpdateFromFeedback(unhealthy);
 #endif
 }
 
@@ -881,407 +1347,94 @@ bool CanDriverHW::isDeviceReady(const std::string &device) const
     return deviceManager_->isDeviceReady(device);
 }
 
-void CanDriverHW::publishMotorStates(const ros::TimerEvent & /*e*/)
+bool CanDriverHW::getFreshAxisFeedback(
+    const JointConfig &joint,
+    can_driver::SharedDriverState::AxisFeedbackState *feedback) const
+{
+    if (feedback == nullptr || !deviceManager_) {
+        return false;
+    }
+
+    const auto sharedState = deviceManager_->getSharedDriverState();
+    if (!sharedState) {
+        return false;
+    }
+
+    if (!sharedState->getAxisFeedback(
+            can_driver::MakeAxisKey(joint.canDevice, joint.protocol, joint.motorId), feedback)) {
+        return false;
+    }
+
+    return sharedFeedbackFresh(*feedback);
+}
+
+bool CanDriverHW::requireAxisDisabledForConfiguration(const JointConfig &joint,
+                                                      const char *operation,
+                                                      std::string *message) const
+{
+    can_driver::SharedDriverState::AxisFeedbackState feedback;
+    if (!getFreshAxisFeedback(joint, &feedback) || !feedback.enabledValid) {
+        if (message != nullptr) {
+            *message = std::string(operation ? operation : "Configuration") +
+                       " requires fresh enable-state feedback while the motor is disabled.";
+        }
+        return false;
+    }
+
+    if (feedback.enabled) {
+        if (message != nullptr) {
+            *message = std::string(operation ? operation : "Configuration") +
+                       " requires the motor to be disabled first.";
+        }
+        return false;
+    }
+
+    return true;
+}
+
+bool CanDriverHW::lifecycleHealthHealthy(std::string *detail) const
+{
+    const auto mode = lifecycleCoordinator_.mode();
+    if (mode == can_driver::SystemOpMode::Armed) {
+        return lifecycleDriverOps_.enableHealthy(detail);
+    }
+    if (mode == can_driver::SystemOpMode::Running) {
+        return lifecycleDriverOps_.motionHealthy(detail);
+    }
+    return true;
+}
+
+void CanDriverHW::publishMotorStates(ros::Publisher &publisher)
 {
     if (!active_.load(std::memory_order_acquire)) {
         return;
     }
-
-    struct StatusSnapshot {
-        bool enabled{false};
-        bool fault{false};
-        bool valid{false};
-    };
-    std::vector<StatusSnapshot> statusSnapshots(joints_.size());
-    for (const auto &group : jointGroups_) {
-        auto proto = getProtocol(group.canDevice, group.protocol);
-        auto devMutex = getDeviceMutex(group.canDevice);
-        if (!proto || !devMutex) {
-            continue;
-        }
-
-        std::lock_guard<std::mutex> devLock(*devMutex);
-        for (const std::size_t idx : group.jointIndices) {
-            const auto &jc = joints_[idx];
-            statusSnapshots[idx].enabled = proto->isEnabled(jc.motorId);
-            statusSnapshots[idx].fault = proto->hasFault(jc.motorId);
-            statusSnapshots[idx].valid = true;
-        }
+    auto publishResult = can_driver::CanDriverIoRuntime::BuildMotorStateMessages(
+        *deviceManager_, jointGroups_, joints_, &jointStateMutex_);
+    bool unhealthy = publishResult.anyFault;
+    std::string healthDetail;
+    if (!unhealthy && !lifecycleHealthHealthy(&healthDetail)) {
+        unhealthy = true;
+        ROS_WARN_THROTTLE(1.0,
+                          "[CanDriverHW] Auto-fault because lifecycle health check failed: %s",
+                          healthDetail.empty() ? "unknown reason" : healthDetail.c_str());
     }
-
-    std::vector<can_driver::MotorState> msgs;
-    msgs.reserve(joints_.size());
-    {
-        std::lock_guard<std::mutex> lock(jointStateMutex_);
-        for (std::size_t i = 0; i < joints_.size(); ++i) {
-            const auto &jc = joints_[i];
-            can_driver::MotorState msg;
-            msg.motor_id = static_cast<uint16_t>(jc.motorId);
-            msg.name     = jc.name;
-
-            const double rawPos = jc.pos / jc.positionScale;
-            const double rawVel = jc.vel / jc.velocityScale;
-            msg.position = can_driver::safe_command::clampToInt32(rawPos);
-            msg.velocity = can_driver::safe_command::clampToInt16(rawVel);
-            msg.current  = can_driver::safe_command::clampToInt16(jc.eff);
-
-            if (jc.controlMode == "velocity")
-                msg.mode = can_driver::MotorState::MODE_VELOCITY;
-            else
-                msg.mode = can_driver::MotorState::MODE_POSITION;
-            if (statusSnapshots[i].valid) {
-                msg.enabled = statusSnapshots[i].enabled;
-                msg.fault = statusSnapshots[i].fault;
-            }
-
-            msgs.push_back(msg);
-        }
-    }
+    lifecycleCoordinator_.UpdateFromFeedback(unhealthy);
     if (!active_.load(std::memory_order_acquire)) {
         return;
     }
-    for (const auto &msg : msgs) {
-        motorStatesPub_.publish(msg);
+    for (const auto &msg : publishResult.messages) {
+        publisher.publish(msg);
     }
 }
 
-// ---------------------------------------------------------------------------
-// Service 回调
-// ---------------------------------------------------------------------------
-bool CanDriverHW::onInit(can_driver::Init::Request &req,
-                         can_driver::Init::Response &res)
+void CanDriverHW::publishLifecycleState(ros::Publisher &publisher)
 {
-    res.success = initDevice(req.device, req.loopback);
-    if (res.success) {
-        active_.store(true, std::memory_order_release);
-        stateTimer_.start();
-    }
-    res.message = res.success ? "OK" : "Failed to initialize " + req.device;
-    return true;
-}
-
-bool CanDriverHW::onShutdown(can_driver::Shutdown::Request & /*req*/,
-                              can_driver::Shutdown::Response &res)
-{
-    active_.store(false, std::memory_order_release);
-    stateTimer_.stop();
-    deviceManager_->shutdownAll();
-
-    {
-        std::lock_guard<std::mutex> stateLock(jointStateMutex_);
-        for (auto &jc : joints_) {
-            jc.hasDirectPosCmd = false;
-            jc.hasDirectVelCmd = false;
-            jc.stopIssuedOnFault = false;
-        }
+    if (!publisher) {
+        return;
     }
 
-    res.success = true;
-    res.message = "All CAN devices shut down.";
-    ROS_INFO("[CanDriverHW] All devices shut down.");
-    return true;
-}
-
-bool CanDriverHW::onRecover(can_driver::Recover::Request &req,
-                             can_driver::Recover::Response &res)
-{
-    if (!active_.load(std::memory_order_acquire)) {
-        res.success = false;
-        res.message = "Driver inactive.";
-        return true;
-    }
-
-    // 优先精确匹配；若为通配值则对全部电机使能
-    constexpr uint16_t kRecoverAllLegacy = 0;      // 兼容旧语义
-    constexpr uint16_t kRecoverAllExplicit = 0xFFFF;
-    const bool hasExactMatch = std::any_of(
-        joints_.begin(), joints_.end(),
-        [&req](const JointConfig &jc) {
-            return static_cast<uint16_t>(jc.motorId) == req.motor_id;
-        });
-    const bool recoverAll =
-        (req.motor_id == kRecoverAllExplicit) ||
-        (req.motor_id == kRecoverAllLegacy && !hasExactMatch);
-
-    bool found = false;
-    bool hasFailure = false;
-    MotorOpStatus firstFailure = MotorOpStatus::Ok;
-    for (const auto &jc : joints_) {
-        if (recoverAll || static_cast<uint16_t>(jc.motorId) == req.motor_id) {
-            const auto status = executeOnMotor(
-                jc,
-                [](const std::shared_ptr<CanProtocol> &proto, MotorID id) {
-                    return proto->Enable(id);
-                },
-                "Recover");
-            if (status == MotorOpStatus::Ok) {
-                found = true;
-            } else if (!hasFailure) {
-                hasFailure = true;
-                firstFailure = status;
-            }
-        }
-    }
-    if (found) {
-        res.success = true;
-        res.message = "Recovered.";
-    } else if (hasFailure) {
-        res.success = false;
-        if (firstFailure == MotorOpStatus::DeviceNotReady) {
-            res.message = "CAN device not ready.";
-        } else if (firstFailure == MotorOpStatus::ProtocolUnavailable) {
-            res.message = "Protocol not available.";
-        } else if (firstFailure == MotorOpStatus::Rejected) {
-            res.message = "Recover command rejected.";
-        } else {
-            res.message = "Recover execution failed.";
-        }
-    } else {
-        res.success = false;
-        res.message = "Motor not found.";
-    }
-    return true;
-}
-
-bool CanDriverHW::onMotorCommand(can_driver::MotorCommand::Request &req,
-                                  can_driver::MotorCommand::Response &res)
-{
-    if (!active_.load(std::memory_order_acquire)) {
-        res.success = false;
-        res.message = "Driver inactive.";
-        return true;
-    }
-
-    const auto *target = findJointByMotorId(req.motor_id);
-    if (!target) {
-        res.success = false;
-        res.message = "Motor ID not found.";
-        return true;
-    }
-
-    auto handleFailure = [&res](MotorOpStatus status, const char *rejectedMsg) {
-        if (status == MotorOpStatus::DeviceNotReady) {
-            res.success = false;
-            res.message = "CAN device not ready.";
-        } else if (status == MotorOpStatus::ProtocolUnavailable) {
-            res.success = false;
-            res.message = "Protocol not available.";
-        } else if (status == MotorOpStatus::Rejected) {
-            res.success = false;
-            res.message = rejectedMsg;
-        } else {
-            res.success = false;
-            res.message = "Command execution failed.";
-        }
-    };
-
-    if (req.command == can_driver::MotorCommand::Request::CMD_SET_MODE) {
-        if (req.value != 0.0 && req.value != 1.0) {
-            res.success = false;
-            res.message = "CMD_SET_MODE value must be 0 or 1.";
-            return true;
-        }
-        const auto mode = (req.value == 0.0)
-                              ? CanProtocol::MotorMode::Position
-                              : CanProtocol::MotorMode::Velocity;
-        const auto status = executeOnMotor(
-            *target,
-            [&mode](const std::shared_ptr<CanProtocol> &proto, MotorID id) {
-                return proto->setMode(id, mode);
-            },
-            "Set mode");
-        if (status != MotorOpStatus::Ok) {
-            handleFailure(status, "Set mode command rejected.");
-            return true;
-        }
-        res.success = true;
-        res.message = "OK";
-        return true;
-    }
-
-    struct CmdEntry {
-        uint8_t cmd;
-        const char *name;
-        bool clearDirect;
-        std::function<bool(const std::shared_ptr<CanProtocol> &, MotorID)> action;
-    };
-    const std::vector<CmdEntry> table = {
-        {can_driver::MotorCommand::Request::CMD_ENABLE,
-         "Enable",
-         false,
-         [](const std::shared_ptr<CanProtocol> &proto, MotorID id) { return proto->Enable(id); }},
-        {can_driver::MotorCommand::Request::CMD_DISABLE,
-         "Disable",
-         true,
-         [](const std::shared_ptr<CanProtocol> &proto, MotorID id) { return proto->Disable(id); }},
-        {can_driver::MotorCommand::Request::CMD_STOP,
-         "Stop",
-         true,
-         [](const std::shared_ptr<CanProtocol> &proto, MotorID id) { return proto->Stop(id); }},
-    };
-
-    for (const auto &entry : table) {
-        if (req.command != entry.cmd) {
-            continue;
-        }
-        const auto status = executeOnMotor(*target, entry.action, entry.name);
-        if (status != MotorOpStatus::Ok) {
-            const std::string rejectedMsg = std::string(entry.name) + " command rejected.";
-            handleFailure(status, rejectedMsg.c_str());
-            return true;
-        }
-        if (entry.clearDirect) {
-            clearDirectCmd(target->name);
-        }
-        res.success = true;
-        res.message = "OK";
-        return true;
-    }
-
-    res.success = false;
-    res.message = "Unknown command.";
-    return true;
-}
-
-bool CanDriverHW::onSetZeroLimit(can_driver::SetZeroLimit::Request &req,
-                                 can_driver::SetZeroLimit::Response &res)
-{
-    if (!active_.load(std::memory_order_acquire)) {
-        res.success = false;
-        res.message = "Driver inactive.";
-        return true;
-    }
-
-    const JointConfig *target = findJointByMotorId(req.motor_id);
-    if (!target) {
-        res.success = false;
-        res.message = "Motor ID not found.";
-        return true;
-    }
-    if (target->controlMode != "position") {
-        res.success = false;
-        res.message = "Only position-control joints support zero/position limits.";
-        return true;
-    }
-
-    double baseMin = req.min_position_rad;
-    double baseMax = req.max_position_rad;
-    if (req.use_urdf_limits) {
-        urdf::Model urdf;
-        if (!urdf.initParam("robot_description")) {
-            res.success = false;
-            res.message = "robot_description not found; cannot read URDF limits.";
-            return true;
-        }
-        auto urdfJoint = urdf.getJoint(target->name);
-        if (!urdfJoint) {
-            res.success = false;
-            res.message = "Joint not found in URDF: " + target->name;
-            return true;
-        }
-        joint_limits_interface::JointLimits urdfLimits;
-        if (!joint_limits_interface::getJointLimits(urdfJoint, urdfLimits) ||
-            !urdfLimits.has_position_limits) {
-            res.success = false;
-            res.message = "URDF has no position limits for joint: " + target->name;
-            return true;
-        }
-        baseMin = urdfLimits.min_position;
-        baseMax = urdfLimits.max_position;
-    }
-
-    const double appliedMin = baseMin + req.zero_offset_rad;
-    const double appliedMax = baseMax + req.zero_offset_rad;
-    if (!std::isfinite(appliedMin) || !std::isfinite(appliedMax) || appliedMin >= appliedMax) {
-        res.success = false;
-        res.message = "Invalid limit range after zero offset.";
-        return true;
-    }
-
-    auto proto = getProtocol(target->canDevice, target->protocol);
-    auto devMutex = getDeviceMutex(target->canDevice);
-    if (!proto || !devMutex) {
-        res.success = false;
-        res.message = "Protocol not available.";
-        return true;
-    }
-
-    int64_t rawPos = 0;
-    {
-        std::lock_guard<std::mutex> devLock(*devMutex);
-        // 连续读取几次，给协议层请求-返回留出时间。
-        for (int i = 0; i < 5; ++i) {
-            rawPos = proto->getPosition(target->motorId);
-            std::this_thread::sleep_for(std::chrono::milliseconds(15));
-        }
-    }
-    const double currentPosRad = static_cast<double>(rawPos) * target->positionScale;
-    res.current_position_rad = currentPosRad;
-    if (currentPosRad < appliedMin || currentPosRad > appliedMax) {
-        res.success = false;
-        res.applied_min_rad = appliedMin;
-        res.applied_max_rad = appliedMax;
-        res.message = "Current position is outside requested limit range.";
-        return true;
-    }
-
-    if (req.apply_to_motor) {
-        int32_t rawMin = 0;
-        int32_t rawMax = 0;
-        int32_t rawOffset = 0;
-        if (!can_driver::safe_command::scaleAndClampToInt32(
-                appliedMin, target->positionScale, target->name + ".min_limit", rawMin) ||
-            !can_driver::safe_command::scaleAndClampToInt32(
-                appliedMax, target->positionScale, target->name + ".max_limit", rawMax) ||
-            !can_driver::safe_command::scaleAndClampToInt32(
-                req.zero_offset_rad, target->positionScale, target->name + ".zero_offset", rawOffset)) {
-            res.success = false;
-            res.message = "Failed to convert limits/offset to protocol raw values.";
-            return true;
-        }
-
-        const auto status = executeOnMotor(
-            *target,
-            [rawMin, rawMax, rawOffset](const std::shared_ptr<CanProtocol> &p, MotorID id) {
-                const bool okOffset = p->setPositionOffset(id, rawOffset);
-                const bool okLimits = p->configurePositionLimits(id, rawMin, rawMax, true);
-                return okOffset && okLimits;
-            },
-            "Set zero/position limits");
-
-        if (status != MotorOpStatus::Ok) {
-            res.success = false;
-            if (status == MotorOpStatus::DeviceNotReady) {
-                res.message = "CAN device not ready.";
-            } else if (status == MotorOpStatus::ProtocolUnavailable) {
-                res.message = "Protocol not available.";
-            } else if (status == MotorOpStatus::Rejected) {
-                res.message = "Protocol rejected zero/limit settings (or unsupported by this protocol).";
-            } else {
-                res.message = "Set zero/limit execution failed.";
-            }
-            return true;
-        }
-    }
-
-    {
-        std::lock_guard<std::mutex> lock(jointStateMutex_);
-        for (auto &jc : joints_) {
-            if (static_cast<uint16_t>(jc.motorId) != req.motor_id) {
-                continue;
-            }
-            jc.hasLimits = true;
-            jc.limits.has_position_limits = true;
-            jc.limits.min_position = appliedMin;
-            jc.limits.max_position = appliedMax;
-            jointZeroOffsetRadByMotorId_[req.motor_id] = req.zero_offset_rad;
-            break;
-        }
-    }
-
-    res.success = true;
-    res.applied_min_rad = appliedMin;
-    res.applied_max_rad = appliedMax;
-    res.message = "OK";
-    return true;
+    std_msgs::String msg;
+    msg.data = can_driver::SystemOpModeName(lifecycleCoordinator_.mode());
+    publisher.publish(msg);
 }
