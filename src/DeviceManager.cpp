@@ -70,6 +70,34 @@ can_driver::PpAxisRefreshSnapshot buildPpAxisRefreshSnapshot(
     return snapshot;
 }
 
+can_driver::DmAxisRefreshSnapshot buildDmAxisRefreshSnapshot(
+    const std::shared_ptr<can_driver::SharedDriverState> &sharedState,
+    const std::string &deviceName,
+    std::uint8_t motorId)
+{
+    can_driver::DmAxisRefreshSnapshot snapshot;
+    if (!sharedState) {
+        return snapshot;
+    }
+
+    const auto axisKey =
+        can_driver::MakeAxisKey(deviceName, CanType::DM, static_cast<MotorID>(motorId));
+
+    can_driver::SharedDriverState::AxisFeedbackState feedback;
+    if (sharedState->getAxisFeedback(axisKey, &feedback)) {
+        snapshot.feedbackSeen = feedback.feedbackSeen;
+        if (feedback.enabledValid) {
+            snapshot.enabled = feedback.enabled;
+        }
+        if (feedback.faultValid) {
+            snapshot.fault = feedback.fault;
+        }
+    }
+
+    snapshot.intent = sharedState->getAxisIntent(axisKey);
+    return snapshot;
+}
+
 } // namespace
 
 bool DeviceManager::isUdpDevice(const std::string &device) const
@@ -158,6 +186,9 @@ void DeviceManager::syncDeviceRefreshRuntimeLocked(const std::string &device)
     const auto ppIt = eyouProtocols_.find(device);
     runtime->ppProtocol = (ppIt != eyouProtocols_.end()) ? ppIt->second
                                                          : std::shared_ptr<EyouCan>();
+    const auto dmIt = damiaoProtocols_.find(device);
+    runtime->dmProtocol = (dmIt != damiaoProtocols_.end()) ? dmIt->second
+                                                           : std::shared_ptr<DamiaoCan>();
 
     if (runtime->worker) {
         return;
@@ -270,6 +301,53 @@ void DeviceManager::syncDeviceRefreshRuntimeLocked(const std::string &device)
                 std::lock_guard<std::mutex> lock(runtime->scheduleMutex);
                 runtime->nextPpTick = std::chrono::steady_clock::time_point {};
             }
+
+            if (runtime->dmActive.load(std::memory_order_acquire)) {
+                const auto protocol = runtime->dmProtocol.lock();
+                bool due = false;
+                std::vector<std::uint8_t> motorIds;
+                {
+                    std::lock_guard<std::mutex> lock(runtime->scheduleMutex);
+                    due = (runtime->nextDmTick == std::chrono::steady_clock::time_point {}) ||
+                          (now >= runtime->nextDmTick);
+                    if (due) {
+                        motorIds = runtime->dmMotorIds;
+                    }
+                }
+                if (protocol && due) {
+                    const auto sharedState = runtime->sharedState.lock();
+                    for (const auto motorId : motorIds) {
+                        can_driver::DmRefreshPlan plan;
+                        {
+                            std::lock_guard<std::mutex> lock(runtime->scheduleMutex);
+                            auto &scheduleState = runtime->dmScheduleStates[motorId];
+                            plan = can_driver::BuildDmRefreshPlan(
+                                now,
+                                buildDmAxisRefreshSnapshot(sharedState,
+                                                           runtime->deviceName,
+                                                           motorId),
+                                &scheduleState);
+                        }
+                        for (std::size_t i = 0; i < plan.count; ++i) {
+                            const bool issued = protocol->issueRefreshQuery(
+                                static_cast<MotorID>(motorId), plan.items[i]);
+                            if (!issued) {
+                                continue;
+                            }
+                            std::lock_guard<std::mutex> lock(runtime->scheduleMutex);
+                            auto &scheduleState = runtime->dmScheduleStates[motorId];
+                            can_driver::NoteDmRefreshQueryIssued(
+                                now, &scheduleState, plan.items[i]);
+                        }
+                    }
+                    const auto nextSleep = clampRefreshSleep(protocol->refreshSleepInterval());
+                    std::lock_guard<std::mutex> lock(runtime->scheduleMutex);
+                    runtime->nextDmTick = std::chrono::steady_clock::now() + nextSleep;
+                }
+            } else {
+                std::lock_guard<std::mutex> lock(runtime->scheduleMutex);
+                runtime->nextDmTick = std::chrono::steady_clock::time_point {};
+            }
         },
         [weakRuntime]() {
             const auto runtime = weakRuntime.lock();
@@ -302,6 +380,16 @@ void DeviceManager::syncDeviceRefreshRuntimeLocked(const std::string &device)
                     sleepFor = hasPending ? std::min(sleepFor, ppWait) : ppWait;
                     hasPending = true;
                 }
+                if (runtime->dmActive.load(std::memory_order_acquire)) {
+                    if (runtime->nextDmTick == std::chrono::steady_clock::time_point {}) {
+                        return std::chrono::milliseconds(1);
+                    }
+                    const auto dmWait = std::chrono::duration_cast<std::chrono::milliseconds>(
+                        runtime->nextDmTick > now ? (runtime->nextDmTick - now)
+                                                  : std::chrono::steady_clock::duration::zero());
+                    sleepFor = hasPending ? std::min(sleepFor, dmWait) : dmWait;
+                    hasPending = true;
+                }
             }
 
             if (!hasPending) {
@@ -320,7 +408,8 @@ void DeviceManager::startDeviceRefreshWorkerLocked(const std::string &device)
 
     const auto &runtime = it->second;
     const bool anyActive = runtime->mtActive.load(std::memory_order_acquire) ||
-                           runtime->ppActive.load(std::memory_order_acquire);
+                           runtime->ppActive.load(std::memory_order_acquire) ||
+                           runtime->dmActive.load(std::memory_order_acquire);
     if (!anyActive || !runtime->worker) {
         return;
     }
@@ -352,6 +441,10 @@ void DeviceManager::applyRefreshRateLocked(const std::string &device, double hz)
         ppIt != eyouProtocols_.end() && ppIt->second) {
         ppIt->second->setRefreshRateHz(hz);
     }
+    if (const auto dmIt = damiaoProtocols_.find(device);
+        dmIt != damiaoProtocols_.end() && dmIt->second) {
+        dmIt->second->setRefreshRateHz(hz);
+    }
     if (const auto ecbIt = ecbProtocols_.find(device);
         ecbIt != ecbProtocols_.end() && ecbIt->second) {
         ecbIt->second->setRefreshRateHz(hz);
@@ -365,6 +458,7 @@ void DeviceManager::applyRefreshRateLocked(const std::string &device, double hz)
         std::lock_guard<std::mutex> scheduleLock(runtimeIt->second->scheduleMutex);
         runtimeIt->second->nextMtTick = std::chrono::steady_clock::time_point {};
         runtimeIt->second->nextPpTick = std::chrono::steady_clock::time_point {};
+        runtimeIt->second->nextDmTick = std::chrono::steady_clock::time_point {};
     }
     if (runtimeIt->second->worker) {
         runtimeIt->second->worker->notify();
@@ -398,6 +492,7 @@ void DeviceManager::resetDeviceRuntimeLocked(const std::string &device)
 {
     mtProtocols_.erase(device);
     eyouProtocols_.erase(device);
+    damiaoProtocols_.erase(device);
     ecbProtocols_.erase(device);
     txDispatchers_.erase(device);
 }
@@ -526,6 +621,13 @@ bool DeviceManager::ensureProtocol(const std::string &device, CanType type)
             eyou->setDefaultCspVelocityRaw(ppCspDefaultVelocityRaw_);
             eyouProtocols_[device] = std::move(eyou);
         }
+    } else if (type == CanType::DM) {
+        if (damiaoProtocols_.find(device) == damiaoProtocols_.end()) {
+            auto damiao =
+                std::make_shared<DamiaoCan>(transport, txDispatcher, sharedState_, device);
+            damiao->setRefreshRateHz(effectiveRefreshRateHzLocked(device));
+            damiaoProtocols_[device] = std::move(damiao);
+        }
     } else {
         return false;
     }
@@ -618,11 +720,14 @@ bool DeviceManager::initDevice(const std::string &device,
     // 按协议拆分电机列表，避免不必要地创建协议实例。
     std::vector<MotorID> mtIds;
     std::vector<MotorID> ppIds;
+    std::vector<MotorID> dmIds;
     for (const auto &entry : motors) {
         if (entry.first == CanType::MT) {
             mtIds.push_back(entry.second);
         } else if (entry.first == CanType::PP) {
             ppIds.push_back(entry.second);
+        } else if (entry.first == CanType::DM) {
+            dmIds.push_back(entry.second);
         }
     }
     // 初始化协议对象并启动状态刷新任务。
@@ -640,6 +745,12 @@ bool DeviceManager::initDevice(const std::string &device,
         eyou->setDefaultPositionVelocityRaw(ppPositionDefaultVelocityRaw_);
         eyou->setDefaultCspVelocityRaw(ppCspDefaultVelocityRaw_);
         eyouProtocols_[device] = std::move(eyou);
+    }
+    if (!dmIds.empty() && damiaoProtocols_.find(device) == damiaoProtocols_.end()) {
+        auto damiao = std::make_shared<DamiaoCan>(
+            transport, txDispatchers_[device], sharedState_, device);
+        damiao->setRefreshRateHz(effectiveRefreshRateHzLocked(device));
+        damiaoProtocols_[device] = std::move(damiao);
     }
 
     syncDeviceRefreshRuntimeLocked(device);
@@ -675,6 +786,20 @@ bool DeviceManager::initDevice(const std::string &device,
         runtime->ppScheduleCycleCount = 0;
         runtime->nextPpTick = std::chrono::steady_clock::time_point {};
     }
+    if (!dmIds.empty()) {
+        damiaoProtocols_[device]->initializeMotorRefresh(dmIds);
+        runtime->dmActive.store(true, std::memory_order_release);
+        std::lock_guard<std::mutex> lock(runtime->scheduleMutex);
+        runtime->dmMotorIds = normalizeMotorIds(dmIds);
+        runtime->dmScheduleStates.clear();
+        runtime->nextDmTick = std::chrono::steady_clock::time_point {};
+    } else {
+        runtime->dmActive.store(false, std::memory_order_release);
+        std::lock_guard<std::mutex> lock(runtime->scheduleMutex);
+        runtime->dmMotorIds.clear();
+        runtime->dmScheduleStates.clear();
+        runtime->nextDmTick = std::chrono::steady_clock::time_point {};
+    }
     startDeviceRefreshWorkerLocked(device);
 
     ROS_INFO("[CanDriverHW] Initialized '%s'.", device.c_str());
@@ -703,7 +828,8 @@ void DeviceManager::startRefresh(const std::string &device,
                 runtime->nextMtTick = std::chrono::steady_clock::time_point {};
             }
             if (runtime->mtActive.load(std::memory_order_acquire) ||
-                runtime->ppActive.load(std::memory_order_acquire)) {
+                runtime->ppActive.load(std::memory_order_acquire) ||
+                runtime->dmActive.load(std::memory_order_acquire)) {
                 startDeviceRefreshWorkerLocked(device);
             } else {
                 stopDeviceRefreshWorkerLocked(device);
@@ -727,7 +853,32 @@ void DeviceManager::startRefresh(const std::string &device,
                 runtime->nextPpTick = std::chrono::steady_clock::time_point {};
             }
             if (runtime->mtActive.load(std::memory_order_acquire) ||
-                runtime->ppActive.load(std::memory_order_acquire)) {
+                runtime->ppActive.load(std::memory_order_acquire) ||
+                runtime->dmActive.load(std::memory_order_acquire)) {
+                startDeviceRefreshWorkerLocked(device);
+            } else {
+                stopDeviceRefreshWorkerLocked(device);
+            }
+        }
+    } else if (type == CanType::DM) {
+        auto it = damiaoProtocols_.find(device);
+        if (it != damiaoProtocols_.end()) {
+            it->second->initializeMotorRefresh(ids);
+            syncDeviceRefreshRuntimeLocked(device);
+            auto runtime = deviceRefreshRuntimes_[device];
+            runtime->dmActive.store(!ids.empty(), std::memory_order_release);
+            const auto normalizedIds = normalizeMotorIds(ids);
+            {
+                std::lock_guard<std::mutex> scheduleLock(runtime->scheduleMutex);
+                if (runtime->dmMotorIds != normalizedIds) {
+                    runtime->dmMotorIds = normalizedIds;
+                    runtime->dmScheduleStates.clear();
+                }
+                runtime->nextDmTick = std::chrono::steady_clock::time_point {};
+            }
+            if (runtime->mtActive.load(std::memory_order_acquire) ||
+                runtime->ppActive.load(std::memory_order_acquire) ||
+                runtime->dmActive.load(std::memory_order_acquire)) {
                 startDeviceRefreshWorkerLocked(device);
             } else {
                 stopDeviceRefreshWorkerLocked(device);
@@ -835,6 +986,7 @@ void DeviceManager::shutdownAll()
     stopAllDeviceRefreshWorkersLocked();
     mtProtocols_.clear();
     eyouProtocols_.clear();
+    damiaoProtocols_.clear();
     ecbProtocols_.clear();
     txDispatchers_.clear();
     transports_.clear();
@@ -860,6 +1012,11 @@ std::shared_ptr<CanProtocol> DeviceManager::getProtocol(const std::string &devic
     } else if (type == CanType::PP) {
         auto it = eyouProtocols_.find(device);
         if (it != eyouProtocols_.end()) {
+            return std::static_pointer_cast<CanProtocol>(it->second);
+        }
+    } else if (type == CanType::DM) {
+        auto it = damiaoProtocols_.find(device);
+        if (it != damiaoProtocols_.end()) {
             return std::static_pointer_cast<CanProtocol>(it->second);
         }
     } else if (type == CanType::ECB) {

@@ -2,6 +2,8 @@
 
 本文档用于 1MINTASCA/Innfos ECB 网络电机在 can_driver 中的配置、验证与排障。
 
+仓库内随包提供的 SDK 路径为 `lib/innfos-cpp-sdk`。
+
 ## 1. 兼容结论
 
 当前 can_driver 已支持 ECB 协议，接入路径是“协议层接入”，不是 UDP-CAN 透传。
@@ -14,7 +16,7 @@
 
 ## 2. 配置模板
 
-在 `config/can_driver.yaml` 或 `config/can_driver_ecb.yaml` 的 `joints` 内添加 ECB 关节。生产/联调都建议直接使用固定 IP：
+在标准 `config/can_driver.yaml` 的 `joints` 内添加 ECB 关节。是否启用 ECB 由 joint 的 `protocol: ECB` 决定，不再单独维护专用 ECB 配置文件。生产/联调都建议直接使用固定 IP：
 
 ```yaml
 - name: ecb_joint_02
@@ -82,6 +84,7 @@
 - 当前已确认固定 IP：`ID 2 -> 192.168.1.30`
 - `ID 3/4/5` 的固定 IP 不要手填猜测值，请先通过发现脚本拿到现场实际结果再写入
 - `scripts/discover_ecb_and_enable_yaml.sh` 现在会把所有扫到的 ECB 电机一起回填成固定 IP 条目，不再只写单台
+- 若当前机器只接 ECB，请直接在 `config/can_driver.yaml` 中保留 ECB joints，并移除/注释未接入的非 ECB joints，避免无关 SocketCAN 设备初始化失败
 
 ## 3. 单位与角度问题（重点）
 
@@ -134,14 +137,15 @@ scripts/discover_ecb_and_enable_yaml.sh 1
 说明：
 
 - 参数 `1` 表示选择第 1 台被发现的电机；如果有多台，可改为 `2/3/...`
-- 脚本会调用 SDK 的 `01_lookupActuators` 自动扫描，并把 `config/can_driver.yaml` 和 `config/can_driver_ecb.yaml` 中 `ECB_AUTO_PROBE` 段一起改为固定 IP + ID
+- 脚本会调用 SDK 的 `01_lookupActuators` 自动扫描，并把 `config/can_driver.yaml` 中 `ECB_AUTO_PROBE` 段改为固定 IP + ID
 - 若现场同时在线多台 ECB，会一次性回填多条 `ecb_joint_02/03/04/05...`
-- 回填后优先使用 `roslaunch can_driver can_driver_ecb.launch` 重启驱动再进行运动测试
+- 回填后直接使用标准入口 `roslaunch can_driver can_driver.launch` 重启驱动再进行运动测试
+- 若当前机器只接 ECB，请先确认 `config/can_driver.yaml` 中已经移除/注释未接入的非 ECB joints
 
 示例：
 
 ```bash
-roslaunch can_driver can_driver_ecb.launch
+roslaunch can_driver can_driver.launch
 bash scripts/test_ecb_motor_motion.sh 2 0.8 2.0 1.2 2.0 /can_driver_node
 bash scripts/test_ecb_motor_motion.sh 3 0.8 2.0 1.2 2.0 /can_driver_node
 bash scripts/test_ecb_motor_motion.sh 4 0.8 2.0 1.2 2.0 /can_driver_node
@@ -166,7 +170,8 @@ bash scripts/test_ecb_motor_motion.sh 5 0.8 2.0 1.2 2.0 /can_driver_node
 
 1. 服务不可达
 - 检查 `rosservice list` 是否存在 `/can_driver_node/motor_command`
-- 若你当前只接 ECB，优先用 `roslaunch can_driver can_driver_ecb.launch`
+- 使用标准入口 `roslaunch can_driver can_driver.launch`
+- 若你当前只接 ECB，先确认 `config/can_driver.yaml` 中只保留当前机器实际接入的 ECB joints
 
 2. 命令发出但无动作
 - 先 Enable，再 CMD_SET_MODE，再发 topic 命令
@@ -214,6 +219,7 @@ bash scripts/test_ecb_motor_motion.sh 5 0.8 2.0 1.2 2.0 /can_driver_node
 ## 6. 运行建议
 
 - 生产环境优先 fixed IP + ID，避免每次启动扫描带来的不确定性。
-- 仅接 ECB 时优先使用 `can_driver_ecb.launch`，避免被 `can0/can1` 的 MT/PP 配置连带启动失败。
+- 所有协议统一走 `config/can_driver.yaml` 和 `launch/can_driver.launch`；ECB 后端由 `protocol: ECB` 自动分流。
+- 仅接 ECB 时，建议把 `config/can_driver.yaml` 精简为当前机器真实接入的 ECB joints，避免被无关 `can0/can1` 配置连带启动失败。
 - 首次联调建议先速度小幅正反，再做小角度位置闭环，再放大位移。
 - 保持单节点独占控制，避免多个节点同时写同一 joint 的 direct topic。

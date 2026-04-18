@@ -217,6 +217,9 @@ private:
         if (protocol == CanType::PP) {
             return "pp";
         }
+        if (protocol == CanType::DM) {
+            return "dm";
+        }
         return "ecb";
     }
 

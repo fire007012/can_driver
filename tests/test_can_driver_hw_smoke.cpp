@@ -478,18 +478,19 @@ public:
             });
         if (seedFeedbackOnInit_) {
             const auto nowNs = can_driver::SharedDriverSteadyNowNs();
+            const bool velocityOnlyFeedback = velocityOnlyFeedbackOnInit_;
             for (const auto &entry : motors) {
                 const auto key =
                     can_driver::MakeAxisKey(device, entry.first, entry.second);
                 sharedState_->registerAxis(key);
                 sharedState_->mutateAxisFeedback(
                     key,
-                    [this, nowNs, &entry](
+                    [this, nowNs, &entry, velocityOnlyFeedback](
                         can_driver::SharedDriverState::AxisFeedbackState *feedback) {
                         feedback->feedbackSeen = true;
-                        feedback->positionValid = true;
+                        feedback->positionValid = !velocityOnlyFeedback;
                         feedback->velocityValid = true;
-                        feedback->currentValid = true;
+                        feedback->currentValid = !velocityOnlyFeedback;
                         feedback->modeValid = true;
                         feedback->position = protocol_->getPosition(entry.second);
                         feedback->velocity = protocol_->getVelocity(entry.second);
@@ -561,6 +562,7 @@ public:
 
         const auto nowNs = can_driver::SharedDriverSteadyNowNs();
         std::lock_guard<std::mutex> lifecycleLock(lifecycleMutex_);
+        const bool velocityOnlyFeedback = velocityOnlyFeedbackOnInit_;
         for (const auto &deviceEntry : initializedMotors_) {
             sharedState_->mutateDeviceHealth(
                 deviceEntry.first,
@@ -572,12 +574,12 @@ public:
                     deviceEntry.first, motorEntry.first, motorEntry.second);
                 sharedState_->mutateAxisFeedback(
                     key,
-                    [this, nowNs, &motorEntry](
+                    [this, nowNs, &motorEntry, velocityOnlyFeedback](
                         can_driver::SharedDriverState::AxisFeedbackState *feedback) {
                         feedback->feedbackSeen = true;
-                        feedback->positionValid = true;
+                        feedback->positionValid = !velocityOnlyFeedback;
                         feedback->velocityValid = true;
-                        feedback->currentValid = true;
+                        feedback->currentValid = !velocityOnlyFeedback;
                         feedback->modeValid = true;
                         feedback->position = protocol_->getPosition(motorEntry.second);
                         feedback->velocity = protocol_->getVelocity(motorEntry.second);
@@ -648,6 +650,12 @@ public:
         seedFeedbackOnInit_ = seed;
     }
 
+    void setVelocityOnlyFeedbackOnInit(bool velocityOnly)
+    {
+        std::lock_guard<std::mutex> lock(lifecycleMutex_);
+        velocityOnlyFeedbackOnInit_ = velocityOnly;
+    }
+
     void setSyncSharedFeedbackFromProtocol(bool sync)
     {
         std::lock_guard<std::mutex> lock(readyMutex_);
@@ -681,6 +689,7 @@ private:
     int ensureProtocolCalls_{0};
     int initDeviceCalls_{0};
     bool seedFeedbackOnInit_{true};
+    bool velocityOnlyFeedbackOnInit_{false};
     std::vector<double> refreshRateHzCalls_;
     std::vector<std::pair<std::string, double>> deviceRefreshRateHzCalls_;
     std::set<std::string> ensuredDevices_;
@@ -730,6 +739,19 @@ protected:
         joints[0]["control_mode"] = "csp";
         joints[0]["position_scale"] = 65536;
         joints[0]["velocity_scale"] = 65536;
+        joints[0]["direction_sign"] = directionSign;
+        return joints;
+    }
+
+    static XmlRpc::XmlRpcValue makeSingleDamiaoVelocityJoint(double directionSign = 1.0)
+    {
+        XmlRpc::XmlRpcValue joints;
+        joints.setSize(1);
+        joints[0]["name"] = "test_track";
+        joints[0]["motor_id"] = 0x01;
+        joints[0]["protocol"] = "DM";
+        joints[0]["can_device"] = "fake0";
+        joints[0]["control_mode"] = "velocity";
         joints[0]["direction_sign"] = directionSign;
         return joints;
     }
@@ -903,6 +925,28 @@ TEST_F(CanDriverHWSmokeTest, InitDefersDeviceActivationUntilLifecycleInit)
     const auto refreshCalls = fakeDm->refreshRateHzCalls();
     ASSERT_FALSE(refreshCalls.empty());
     EXPECT_DOUBLE_EQ(refreshCalls.back(), 20.0);
+}
+
+TEST_F(CanDriverHWSmokeTest, DamiaoVelocityInitAcceptsStartupFeedbackWithoutPosition)
+{
+    auto fakeDm = std::make_shared<FakeDeviceManager>();
+    fakeDm->setVelocityOnlyFeedbackOnInit(true);
+    CanDriverHW hw(fakeDm);
+
+    ros::NodeHandle nh;
+    ros::NodeHandle pnh(uniqueNs("can_driver_hw_smoke_dm_velocity_startup"));
+
+    pnh.setParam("joints", makeSingleDamiaoVelocityJoint());
+    pnh.setParam("motor_state_period_sec", 0.2);
+    pnh.setParam("startup_probe_query_hz", 2.0);
+    pnh.setParam("motor_query_hz", 20.0);
+
+    ASSERT_TRUE(hw.init(nh, pnh));
+
+    const auto initResult = hw.operationalCoordinator().RequestInit("fake0", false);
+    EXPECT_TRUE(initResult.ok) << initResult.message;
+    EXPECT_EQ(hw.lifecycleMode(), can_driver::SystemOpMode::Armed);
+    EXPECT_EQ(fakeDm->shutdownDeviceCalls(), 0);
 }
 
 TEST_F(CanDriverHWSmokeTest, InitFailsFastWhenStartupFeedbackNeverArrives)

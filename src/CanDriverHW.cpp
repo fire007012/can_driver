@@ -35,6 +35,21 @@ long long steadyAgeMs(std::int64_t stampNs)
 
 constexpr double kDefaultPpVelocityRadS = (10.0 * 2.0 * M_PI / 60.0);
 
+const char *protocolDisplayName(CanType protocol)
+{
+    switch (protocol) {
+    case CanType::MT:
+        return "MT";
+    case CanType::PP:
+        return "PP";
+    case CanType::DM:
+        return "DM";
+    case CanType::ECB:
+        return "ECB";
+    }
+    return "UNKNOWN";
+}
+
 bool sharedFeedbackFresh(const can_driver::SharedDriverState::AxisFeedbackState &feedback)
 {
     if (!feedback.feedbackSeen || feedback.lastRxSteadyNs <= 0) {
@@ -330,20 +345,34 @@ bool CanDriverHW::syncStartupPositionAndCommands(const std::string &deviceFilter
 
             for (const std::size_t i : targetJointIndices) {
                 const auto &jc = joints_[i];
+                const auto axisMode =
+                    can_driver::axisControlModeFromString(jc.controlMode);
+                const bool needsPositionFeedback =
+                    can_driver::controlModeUsesPositionSemantics(axisMode);
                 can_driver::SharedDriverState::AxisFeedbackState feedback;
                 const auto axisKey =
                     can_driver::MakeAxisKey(jc.canDevice, jc.protocol, jc.motorId);
-                if (!sharedState->getAxisFeedback(axisKey, &feedback) ||
-                    !feedback.feedbackSeen || !feedback.positionValid ||
-                    feedback.lastRxSteadyNs <= 0) {
+                const bool hasFeedback = sharedState->getAxisFeedback(axisKey, &feedback);
+                const bool hasFreshFeedback =
+                    hasFeedback && feedback.feedbackSeen && feedback.lastRxSteadyNs > 0;
+                const bool hasRequiredStartupState =
+                    needsPositionFeedback
+                        ? (hasFeedback && feedback.positionValid)
+                        : (hasFeedback &&
+                           (feedback.velocityValid || feedback.enabledValid ||
+                            feedback.faultValid || feedback.currentValid ||
+                            feedback.positionValid));
+                if (!hasFreshFeedback || !hasRequiredStartupState) {
                     allValid = false;
-                    missingJoints.push_back(jc.name);
+                    missingJoints.push_back(
+                        jc.name + (needsPositionFeedback ? "(position)" : "(velocity/state)"));
                     continue;
                 }
 
-                snapshots[i].pos =
-                    static_cast<double>(feedback.position) *
-                    can_driver::effectivePositionScale(jc);
+                snapshots[i].pos = feedback.positionValid
+                                       ? static_cast<double>(feedback.position) *
+                                             can_driver::effectivePositionScale(jc)
+                                       : 0.0;
                 snapshots[i].vel = feedback.velocityValid
                                        ? static_cast<double>(feedback.velocity) *
                                              can_driver::effectiveVelocityScale(jc)
@@ -372,12 +401,12 @@ bool CanDriverHW::syncStartupPositionAndCommands(const std::string &deviceFilter
             }
             if (deviceFilter.empty()) {
                 ROS_ERROR("[CanDriverHW] Startup feedback sync timed out within %.3f s. "
-                          "Missing position feedback for joints: %s",
+                          "Missing required startup feedback for joints: %s",
                           timeout,
                           oss.str().c_str());
             } else {
                 ROS_ERROR("[CanDriverHW] Startup feedback sync timed out on device '%s' within %.3f s. "
-                          "Missing position feedback for joints: %s",
+                          "Missing required startup feedback for joints: %s",
                           deviceFilter.c_str(),
                           timeout,
                           oss.str().c_str());
@@ -390,17 +419,11 @@ bool CanDriverHW::syncStartupPositionAndCommands(const std::string &deviceFilter
                     can_driver::MakeAxisKey(jc.canDevice, jc.protocol, jc.motorId);
                 const bool hasFeedback = sharedState->getAxisFeedback(axisKey, &feedback);
                 if (!hasFeedback) {
-                    const char *protocolName = "ECB";
-                    if (jc.protocol == CanType::MT) {
-                        protocolName = "MT";
-                    } else if (jc.protocol == CanType::PP) {
-                        protocolName = "PP";
-                    }
                     ROS_ERROR("[CanDriverHW] Startup sync detail: joint '%s' has no shared feedback entry yet "
                               "(device=%s protocol=%s motor_id=%u).",
                               jc.name.c_str(),
                               jc.canDevice.c_str(),
-                              protocolName,
+                              protocolDisplayName(jc.protocol),
                               static_cast<unsigned>(static_cast<std::uint16_t>(jc.motorId)));
                     continue;
                 }
@@ -580,19 +603,13 @@ bool CanDriverHW::parseAndSetupJoints(const ros::NodeHandle &pnh)
             return false;
         }
         if (!seenProtocolNodes.emplace(p.canDevice, p.protocol, protocolNodeId).second) {
-            const char *protocolName = "ECB";
-            if (p.protocol == CanType::MT) {
-                protocolName = "MT";
-            } else if (p.protocol == CanType::PP) {
-                protocolName = "PP";
-            }
             ROS_ERROR("[CanDriverHW] Joint '%s' aliases protocol node id 0x%02X on device '%s' "
                       "protocol '%s'. Distinct system motor_id values must not collapse onto the "
                       "same on-wire node id.",
                       jointName.c_str(),
                       static_cast<unsigned>(protocolNodeId),
                       p.canDevice.c_str(),
-                      protocolName);
+                      protocolDisplayName(p.protocol));
             return false;
         }
 

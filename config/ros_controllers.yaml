@@ -63,31 +63,35 @@ arm_controller:
 # =============================================================================
 # 作用：接收 Navigation Stack 发来的 geometry_msgs/Twist（/cmd_vel），
 #       根据差速运动学模型拆解为左右轮速度，写入 VelocityJointInterface，
-#       CanDriverHW::write() 再将速度指令转发给 MT 协议电机。
+#       CanDriverHW::write() 再将速度指令转发给 velocity 语义电机。
 #       同时将编码器反馈积分为里程计，发布 /odom topic 和 odom→base_link TF。
 #
 # 使用场景：ROS Navigation Stack（move_base）、手柄遥控底盘。
 wheel_controller:
   type: diff_drive_controller/DiffDriveController
 
-  left_wheel:  left_wheel     # 左轮关节名，须与 can_driver.yaml 一致
-  right_wheel: right_wheel    # 右轮关节名，须与 can_driver.yaml 一致
+  left_wheel:  left_front_wheel_joint
+  right_wheel: right_front_wheel_joint
 
-  # ⚠️ 以下两个参数必须按实际机器人尺寸填写，否则里程计会有系统误差
-  wheel_separation: 0.5       # 左右轮中心距（单位：米）← 按实际测量值修改
-  wheel_radius: 0.1           # 车轮半径（单位：米）← 按实际测量值修改
+  publish_rate: 50.0
+  cmd_vel_timeout: 0.3
+  base_frame_id: base_link
+  odom_frame_id: odom
+  enable_odom_tf: true
 
-  # 里程计发布设置（可选）
-  # publish_rate: 50.0        # /odom 发布频率（Hz），默认 50
-  # odom_frame_id: odom       # 里程计坐标系名称
-  # base_frame_id: base_link  # 机器人本体坐标系名称
+  # 实车履带等效参数，沿用旧底盘正式常量。
+  wheel_separation: 0.36
+  wheel_radius: 0.075
 
-  # 速度限制（可选，建议填写以保护硬件）
-  # linear:
-  #   x:
-  #     max_velocity: 1.0     # 最大线速度（m/s）
-  #     max_acceleration: 1.0 # 最大线加速度（m/s²）
-  # angular:
-  #   z:
-  #     max_velocity: 1.0     # 最大角速度（rad/s）
-  #     max_acceleration: 1.0 # 最大角加速度（rad/s²）
+  linear:
+    x:
+      has_velocity_limits: true
+      max_velocity: 0.8
+      has_acceleration_limits: true
+      max_acceleration: 1.0
+  angular:
+    z:
+      has_velocity_limits: true
+      max_velocity: 1.5
+      has_acceleration_limits: true
+      max_acceleration: 2.0

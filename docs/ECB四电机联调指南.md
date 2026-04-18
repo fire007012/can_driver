@@ -10,15 +10,15 @@
 
 ## 1. 包内接入方式
 
-当前仓库已经提供 ECB 专用配置与启动入口：
+当前仓库统一使用标准入口：
 
-- 配置文件：[`config/can_driver_ecb.yaml`](/home/rera/catkin_ws/src/can_driver/config/can_driver_ecb.yaml:1)
-- 启动文件：[`launch/can_driver_ecb.launch`](/home/rera/catkin_ws/src/can_driver/launch/can_driver_ecb.launch:1)
-- 单电机测试：[`scripts/test_ecb_motor_motion.sh`](/home/rera/catkin_ws/src/can_driver/scripts/test_ecb_motor_motion.sh:1)
-- 四电机顺序测试：[`scripts/test_ecb_four_motors.sh`](/home/rera/catkin_ws/src/can_driver/scripts/test_ecb_four_motors.sh:1)
-- 分组同时测试：[`scripts/test_ecb_group_motion.sh`](/home/rera/catkin_ws/src/can_driver/scripts/test_ecb_group_motion.sh:1)
+- 配置文件：`config/can_driver.yaml`
+- 启动文件：`launch/can_driver.launch`
+- 单电机测试：`scripts/test_ecb_motor_motion.sh`
+- 四电机顺序测试：`scripts/test_ecb_four_motors.sh`
+- 分组同时测试：`scripts/test_ecb_group_motion.sh`
 
-推荐使用 `can_driver_ecb.launch`，避免默认综合配置中的 MT/PP `can0` 设备影响 ECB 启动。
+是否启用 ECB 由 joint 的 `protocol: ECB` 决定；若当前机器只接 ECB，请在标准 `can_driver.yaml` 中保留 ECB joints，并移除/注释未接入的非 ECB joints。
 
 ## 2. 四电机配置约定
 
@@ -63,7 +63,7 @@ can_driver_node:
 说明：
 
 - 当前配置假设这 4 台 ECB 挂在同一个网络端点 `192.168.1.30` 下，通过不同 `motor_id` 区分。
-- 若现场固定 IP 与此不同，只需要修改 `config/can_driver_ecb.yaml` 和 `config/can_driver.yaml` 中对应 joint 的 `can_device/ecb_ip`。
+- 若现场固定 IP 与此不同，只需要修改 `config/can_driver.yaml` 中对应 joint 的 `can_device/ecb_ip`。
 - `position_scale` 与 `velocity_scale` 已按 ECB 原始单位换算为 SI 单位，测试脚本直接使用 `rad / rad/s`。
 
 ## 3. 启动流程
@@ -74,10 +74,10 @@ can_driver_node:
 sudo ip addr add 192.168.1.100/24 dev enp2s0
 ```
 
-启动 ECB 专用驱动：
+启动标准 can_driver：
 
 ```bash
-roslaunch can_driver can_driver_ecb.launch
+roslaunch can_driver can_driver.launch
 ```
 
 确认服务已就绪：
@@ -171,15 +171,16 @@ bash scripts/test_ecb_group_motion.sh 8.0 2.0 12.0 2.0 /can_driver_node
 
 若目标是“方便一起控制”，建议遵循下面的包内组织方式：
 
-- 统一使用 `config/can_driver_ecb.yaml` 管理 ECB 四电机配置
-- 统一使用 `launch/can_driver_ecb.launch` 启动 ECB 驱动
+- 统一使用 `config/can_driver.yaml` 管理 ECB 四电机配置
+- 统一使用 `launch/can_driver.launch` 启动 ECB 驱动
 - 单电机问题先用 `scripts/test_ecb_motor_motion.sh` 排查
 - 整体回归再用 `scripts/test_ecb_four_motors.sh`
 - 分组并发验证用 `scripts/test_ecb_group_motion.sh`
 
 这样做的好处是：
 
-- 不会被默认 `can_driver.yaml` 中的 MT/PP `can0` 配置拖累
+- 配置结构统一，ECB/DM/PP/MT 都由 joint 的 `protocol` 决定后端
+- 只要保持 `can_driver.yaml` 与当前机器真实接线一致，就不会被无关设备配置拖累
 - 四台电机共享同一套 scale、刷新周期和安全策略
 - 单机排障与多机回归的入口清晰
 
@@ -187,13 +188,13 @@ bash scripts/test_ecb_group_motion.sh 8.0 2.0 12.0 2.0 /can_driver_node
 
 1. `motor_command` 服务不存在
 
-- 先确认使用的是 `roslaunch can_driver can_driver_ecb.launch`
+- 先确认使用的是 `roslaunch can_driver can_driver.launch`
 - 再看启动日志里是否出现设备初始化失败
 
 2. 某一台能动，另一台不能动
 
 - 先单独执行对应 `motor_id` 的 `test_ecb_motor_motion.sh`
-- 再检查该 `motor_id` 是否已经在 `config/can_driver_ecb.yaml` 中配置
+- 再检查该 `motor_id` 是否已经在 `config/can_driver.yaml` 中配置
 
 3. 四台都配置了，但只有一台响应
 

@@ -26,6 +26,10 @@ enum class MtRefreshQuery : std::uint8_t {
     Error,
 };
 
+enum class DmRefreshQuery : std::uint8_t {
+    Keepalive,
+};
+
 template <typename Query, std::size_t Capacity>
 struct RefreshPlan {
     std::array<Query, Capacity> items{};
@@ -41,6 +45,7 @@ struct RefreshPlan {
 
 using PpRefreshPlan = RefreshPlan<PpRefreshQuery, 6>;
 using MtRefreshPlan = RefreshPlan<MtRefreshQuery, 3>;
+using DmRefreshPlan = RefreshPlan<DmRefreshQuery, 1>;
 
 constexpr std::size_t kPpRefreshQueryCount = 6;
 
@@ -59,6 +64,17 @@ struct PpAxisRefreshScheduleState {
     std::array<std::chrono::steady_clock::time_point, kPpRefreshQueryCount> lastDue {};
     std::array<std::chrono::steady_clock::time_point, kPpRefreshQueryCount> lastIssued {};
     std::size_t pressureCursor{0};
+};
+
+struct DmAxisRefreshSnapshot {
+    bool feedbackSeen{false};
+    bool enabled{false};
+    bool fault{false};
+    AxisIntent intent{AxisIntent::None};
+};
+
+struct DmAxisRefreshScheduleState {
+    std::chrono::steady_clock::time_point lastIssued {};
 };
 
 constexpr std::size_t kPpPressureBudgetPerCycle = 4;
@@ -217,6 +233,63 @@ inline MtRefreshPlan BuildMtRefreshPlan(std::uint64_t cycle,
     plan.push(MtRefreshQuery::MultiTurnAngle);
     plan.push(MtRefreshQuery::Error);
     return plan;
+}
+
+inline bool NeedsDmKeepalive(const DmAxisRefreshSnapshot &snapshot)
+{
+    if (snapshot.intent == AxisIntent::None) {
+        return false;
+    }
+    return snapshot.intent != AxisIntent::Run;
+}
+
+inline std::chrono::milliseconds DmRefreshPeriod(const DmAxisRefreshSnapshot &snapshot)
+{
+    if (!NeedsDmKeepalive(snapshot)) {
+        return std::chrono::milliseconds::zero();
+    }
+    if (!snapshot.feedbackSeen ||
+        snapshot.intent == AxisIntent::Enable ||
+        snapshot.intent == AxisIntent::Recover) {
+        return std::chrono::milliseconds(50);
+    }
+    return std::chrono::milliseconds(100);
+}
+
+inline DmRefreshPlan BuildDmRefreshPlan(std::chrono::steady_clock::time_point now,
+                                        const DmAxisRefreshSnapshot &snapshot,
+                                        DmAxisRefreshScheduleState *state)
+{
+    DmRefreshPlan plan;
+    const auto period = DmRefreshPeriod(snapshot);
+    if (period <= std::chrono::milliseconds::zero()) {
+        return plan;
+    }
+
+    const auto lastIssued =
+        state ? state->lastIssued : std::chrono::steady_clock::time_point {};
+    if (lastIssued != std::chrono::steady_clock::time_point {} &&
+        now >= lastIssued &&
+        (now - lastIssued) < period) {
+        return plan;
+    }
+
+    plan.push(DmRefreshQuery::Keepalive);
+    return plan;
+}
+
+inline void NoteDmRefreshQueryIssued(std::chrono::steady_clock::time_point now,
+                                     DmAxisRefreshScheduleState *state,
+                                     DmRefreshQuery query)
+{
+    if (!state) {
+        return;
+    }
+    switch (query) {
+    case DmRefreshQuery::Keepalive:
+        state->lastIssued = now;
+        return;
+    }
 }
 
 } // namespace can_driver

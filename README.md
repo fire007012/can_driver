@@ -5,6 +5,7 @@ ROS1 `hardware_interface::RobotHW` implementation for SocketCAN motor control.
 Supported protocols:
 - `MT`
 - `PP` (Eyou)
+- `DM` (Damiao tracked motor backend, velocity-only in the first stage)
 
 Supported control modes:
 - `position` - Position control (PP mode)
@@ -54,6 +55,7 @@ roslaunch can_driver can_driver.launch
 - `docs/文档导航.md`
 - `docs/架构设计.md`
 - `docs/使用指南.md`
+- `docs/达妙履带接入说明.md`
 - `docs/CAN帧测试方案.md`
 - `docs/测试计划.md`
 - `docs/单电机控制说明.md`

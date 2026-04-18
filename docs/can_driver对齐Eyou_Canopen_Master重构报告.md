@@ -701,12 +701,12 @@ Commit 1–3 已完成。下一步应立即开始 Commit 4，原因：
 - 代码与构建：`src/`、`include/`、`CMakeLists.txt`、`package.xml`
 - 运行配置：`config/`、`launch/`、`scripts/`
 - 文档：`docs/`
-- 第三方 SDK：`1MINTASCA/innfos-cpp-sdk`
+- 第三方 SDK：`lib/innfos-cpp-sdk`
 
 ### 13.2 审计结果
 
 - 构建层已去除对 `can_driver-master` 路径的依赖。
-- `1MINTASCA/innfos-cpp-sdk` 已位于根包 `can_driver/1MINTASCA/`，可独立提供 ECB 所需头文件与动态库。
+- `lib/innfos-cpp-sdk` 已位于根包 `can_driver/lib/`，可独立提供 ECB 所需头文件与动态库。
 - 与 `can_driver-master.__bak__` 对比后，根包缺失文件仅有历史临时文件：
   - `.codex`
   - `message.log`

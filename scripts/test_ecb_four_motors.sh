@@ -4,7 +4,7 @@ set -euo pipefail
 # ECB 四电机顺序联调脚本
 #
 # 默认按 2,3,4,5 顺序调用 scripts/test_ecb_motor_motion.sh，
-# 方便在 can_driver_ecb.yaml 已配置四台 ECB 电机时做整包联调。
+# 方便在标准 can_driver.yaml 已配置四台 ECB 电机时做整包联调。
 #
 # 用法：
 #   bash scripts/test_ecb_four_motors.sh [vel_rad_s] [vel_hold_s] [pos_rad] [pos_hold_s] [driver_ns]

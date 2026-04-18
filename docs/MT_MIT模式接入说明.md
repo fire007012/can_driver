@@ -192,6 +192,8 @@ MT_TEST_MIT_STREAM_HZ=30 bash scripts/test_mt_motor_motion.sh car_a 0x141 5.0 2.
 
 当前 `can_driver` 已支持在同一套硬件层中接入 ECB 网络电机，协议类型使用 `protocol: ECB`。
 
+ECB 与 MT/PP/DM 共用标准 `config/can_driver.yaml` 和 `launch/can_driver.launch`，后端由各 joint 的 `protocol` 字段自动选择。
+
 ### 6.1 配置示例
 
 固定 IP + ID（推荐生产环境）：

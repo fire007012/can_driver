@@ -117,6 +117,48 @@ TEST(JointConfigParser, ParseRejectsInvalidProtocol)
     EXPECT_NE(err.find("unknown protocol"), std::string::npos);
 }
 
+TEST(JointConfigParser, ParseAcceptsDamiaoVelocityJointWithDefaultSiScales)
+{
+    XmlRpc::XmlRpcValue motorId(1);
+    auto joint = makeJointBase("dm_track", motorId, "DM");
+    joint["control_mode"] = std::string("velocity");
+    auto list = makeJointList(joint);
+
+    std::vector<joint_config_parser::ParsedJointConfig> out;
+    std::string err;
+    ASSERT_TRUE(parse(list, out, err));
+    ASSERT_EQ(out.size(), 1u);
+    EXPECT_EQ(out[0].protocol, CanType::DM);
+    EXPECT_DOUBLE_EQ(out[0].positionScale, 1e-4);
+    EXPECT_DOUBLE_EQ(out[0].velocityScale, 1e-4);
+}
+
+TEST(JointConfigParser, ParseRejectsDamiaoPositionMode)
+{
+    XmlRpc::XmlRpcValue motorId(1);
+    auto joint = makeJointBase("dm_bad_mode", motorId, "DM");
+    joint["control_mode"] = std::string("position");
+    auto list = makeJointList(joint);
+
+    std::vector<joint_config_parser::ParsedJointConfig> out;
+    std::string err;
+    EXPECT_FALSE(parse(list, out, err));
+    EXPECT_NE(err.find("only supports control_mode 'velocity'"), std::string::npos);
+}
+
+TEST(JointConfigParser, ParseRejectsDamiaoMotorIdOutsideFeedbackNibbleRange)
+{
+    XmlRpc::XmlRpcValue motorId(0x10);
+    auto joint = makeJointBase("dm_bad_id", motorId, "DM");
+    joint["control_mode"] = std::string("velocity");
+    auto list = makeJointList(joint);
+
+    std::vector<joint_config_parser::ParsedJointConfig> out;
+    std::string err;
+    EXPECT_FALSE(parse(list, out, err));
+    EXPECT_NE(err.find("motor_id low byte in [0, 15]"), std::string::npos);
+}
+
 TEST(JointConfigParser, ParseAcceptsEcbProtocolWithFixedIp)
 {
     XmlRpc::XmlRpcValue motorId(21);
