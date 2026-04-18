@@ -211,7 +211,13 @@ private:
 
     static const char *protocolName(CanType protocol)
     {
-        return protocol == CanType::MT ? "mt" : "pp";
+        if (protocol == CanType::MT) {
+            return "mt";
+        }
+        if (protocol == CanType::PP) {
+            return "pp";
+        }
+        return "ecb";
     }
 
     static std::string axisMapKey(const AxisKey &key)

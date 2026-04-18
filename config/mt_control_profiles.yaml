@@ -1,0 +1,15 @@
+# MT 电机控制配置（多车区分）
+# 用于 scripts/mt_motor_interface.py
+
+profiles:
+  car_a:
+    description: "车辆A MT配置"
+    driver_ns: "/can_driver_node"
+    can_device: "can0"
+    mt_motor_ids: [0x141, 0x14B]
+
+  car_b:
+    description: "车辆B MT配置（示例）"
+    driver_ns: "/can_driver_node"
+    can_device: "can1"
+    mt_motor_ids: [0x141, 0x14B]

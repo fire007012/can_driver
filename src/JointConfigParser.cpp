@@ -207,6 +207,43 @@ bool parse(const XmlRpc::XmlRpcValue &jointList,
             return false;
         }
 
+        if (jv.hasMember("ecb_ip")) {
+            if (jv["ecb_ip"].getType() != XmlRpc::XmlRpcValue::TypeString) {
+                errorMsg = "Joint '" + jc.name + "': ecb_ip must be string.";
+                return false;
+            }
+            jc.ecbIp = static_cast<std::string>(jv["ecb_ip"]);
+        }
+        if (jv.hasMember("ecb_discovery")) {
+            if (jv["ecb_discovery"].getType() == XmlRpc::XmlRpcValue::TypeBoolean) {
+                jc.ecbAutoDiscovery = static_cast<bool>(jv["ecb_discovery"]);
+            } else if (jv["ecb_discovery"].getType() == XmlRpc::XmlRpcValue::TypeString) {
+                const std::string mode = static_cast<std::string>(jv["ecb_discovery"]);
+                if (mode == "auto") {
+                    jc.ecbAutoDiscovery = true;
+                } else if (mode == "fixed") {
+                    jc.ecbAutoDiscovery = false;
+                } else {
+                    errorMsg = "Joint '" + jc.name + "': ecb_discovery must be auto/fixed/bool.";
+                    return false;
+                }
+            } else {
+                errorMsg = "Joint '" + jc.name + "': ecb_discovery must be auto/fixed/bool.";
+                return false;
+            }
+        }
+        if (jv.hasMember("ecb_refresh_ms")) {
+            if (jv["ecb_refresh_ms"].getType() != XmlRpc::XmlRpcValue::TypeInt) {
+                errorMsg = "Joint '" + jc.name + "': ecb_refresh_ms must be int.";
+                return false;
+            }
+            jc.ecbRefreshMs = static_cast<int>(jv["ecb_refresh_ms"]);
+            if (jc.ecbRefreshMs <= 0) {
+                errorMsg = "Joint '" + jc.name + "': ecb_refresh_ms must be > 0.";
+                return false;
+            }
+        }
+
         if (!parseMotorId(jv["motor_id"], jc.name, jc.motorId, errorMsg)) {
             return false;
         }
@@ -217,9 +254,21 @@ bool parse(const XmlRpc::XmlRpcValue &jointList,
             jc.protocol = CanType::MT;
         } else if (protoStr == "PP") {
             jc.protocol = CanType::PP;
+        } else if (protoStr == "ECB") {
+            jc.protocol = CanType::ECB;
         } else {
-            errorMsg = "Joint '" + jc.name + "': unknown protocol '" + protoStr + "' (use MT or PP).";
+            errorMsg = "Joint '" + jc.name + "': unknown protocol '" + protoStr + "' (use MT/PP/ECB).";
             return false;
+        }
+
+        if (jc.protocol == CanType::ECB && !jc.ecbAutoDiscovery && jc.ecbIp.empty()) {
+            constexpr const char *kEcbPrefix = "ecb://";
+            if (jc.canDevice.rfind(kEcbPrefix, 0) == 0) {
+                const std::string payload = jc.canDevice.substr(6);
+                if (!payload.empty() && payload != "auto") {
+                    jc.ecbIp = payload;
+                }
+            }
         }
 
         out.push_back(jc);

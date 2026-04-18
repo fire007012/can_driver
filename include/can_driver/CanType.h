@@ -9,7 +9,8 @@
  */
 enum class CanType {
     MT, ///< 雷赛 MT 协议
-    PP  ///< Eyou PP 协议
+    PP, ///< Eyou PP 协议
+    ECB ///< Innfos ECB 协议
 };
 
 #endif // PROTOCOLTYPE_H

@@ -7,10 +7,12 @@
 #include "can_driver/DeviceRefreshWorker.h"
 #include "can_driver/EyouCan.h"
 #include "can_driver/IDeviceManager.h"
+#include "can_driver/InnfosEcbProtocol.h"
 #include "can_driver/MotorID.h"
 #include "can_driver/MtCan.h"
 #include "can_driver/SharedDriverState.h"
 #include "can_driver/SocketCanController.h"
+#include "can_driver/UdpCanTransport.h"
 
 #include <atomic>
 #include <cstdint>
@@ -18,6 +20,7 @@
 #include <memory>
 #include <mutex>
 #include <shared_mutex>
+#include <set>
 #include <string>
 #include <unordered_map>
 #include <vector>
@@ -73,6 +76,12 @@ public:
     std::size_t deviceCount() const override;
 
 private:
+    bool isUdpDevice(const std::string &device) const;
+    bool isEcbDevice(const std::string &device) const;
+    std::shared_ptr<CanTransport> getTransportBaseLocked(const std::string &device) const;
+    bool shutdownTransportLocked(const std::string &device);
+    bool initializeTransportLocked(const std::string &device, bool loopback);
+
     struct DeviceRefreshRuntime {
         std::string deviceName;
         std::weak_ptr<can_driver::SharedDriverState> sharedState;
@@ -108,9 +117,12 @@ private:
     mutable std::shared_mutex mutex_;
     // key = can device name（例如 can0/vcan0）。
     std::map<std::string, std::shared_ptr<SocketCanController>> transports_;
+    std::map<std::string, std::shared_ptr<UdpCanTransport>> udpTransports_;
     std::map<std::string, std::shared_ptr<CanTxDispatcher>> txDispatchers_;
     std::map<std::string, std::shared_ptr<MtCan>> mtProtocols_;
     std::map<std::string, std::shared_ptr<EyouCan>> eyouProtocols_;
+    std::map<std::string, std::shared_ptr<InnfosEcbProtocol>> ecbProtocols_;
+    std::set<std::string> ecbDevices_;
     std::map<std::string, std::shared_ptr<DeviceRefreshRuntime>> deviceRefreshRuntimes_;
     std::shared_ptr<can_driver::SharedDriverState> sharedState_{
         std::make_shared<can_driver::SharedDriverState>()};

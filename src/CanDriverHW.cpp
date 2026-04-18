@@ -2,6 +2,7 @@
 #include "can_driver/AxisCommandSemantics.h"
 #include "can_driver/CanDriverHW.h"
 #include "can_driver/CanDriverIoRuntime.h"
+#include "can_driver/InnfosEcbProtocol.h"
 #include "can_driver/SafeCommand.h"
 #include "can_driver/driver_ros_endpoints.hpp"
 
@@ -389,11 +390,17 @@ bool CanDriverHW::syncStartupPositionAndCommands(const std::string &deviceFilter
                     can_driver::MakeAxisKey(jc.canDevice, jc.protocol, jc.motorId);
                 const bool hasFeedback = sharedState->getAxisFeedback(axisKey, &feedback);
                 if (!hasFeedback) {
+                    const char *protocolName = "ECB";
+                    if (jc.protocol == CanType::MT) {
+                        protocolName = "MT";
+                    } else if (jc.protocol == CanType::PP) {
+                        protocolName = "PP";
+                    }
                     ROS_ERROR("[CanDriverHW] Startup sync detail: joint '%s' has no shared feedback entry yet "
                               "(device=%s protocol=%s motor_id=%u).",
                               jc.name.c_str(),
                               jc.canDevice.c_str(),
-                              (jc.protocol == CanType::MT) ? "MT" : "PP",
+                              protocolName,
                               static_cast<unsigned>(static_cast<std::uint16_t>(jc.motorId)));
                     continue;
                 }
@@ -573,13 +580,19 @@ bool CanDriverHW::parseAndSetupJoints(const ros::NodeHandle &pnh)
             return false;
         }
         if (!seenProtocolNodes.emplace(p.canDevice, p.protocol, protocolNodeId).second) {
+            const char *protocolName = "ECB";
+            if (p.protocol == CanType::MT) {
+                protocolName = "MT";
+            } else if (p.protocol == CanType::PP) {
+                protocolName = "PP";
+            }
             ROS_ERROR("[CanDriverHW] Joint '%s' aliases protocol node id 0x%02X on device '%s' "
                       "protocol '%s'. Distinct system motor_id values must not collapse onto the "
                       "same on-wire node id.",
                       jointName.c_str(),
                       static_cast<unsigned>(protocolNodeId),
                       p.canDevice.c_str(),
-                      (p.protocol == CanType::MT) ? "MT" : "PP");
+                      protocolName);
             return false;
         }
 
@@ -596,6 +609,9 @@ bool CanDriverHW::parseAndSetupJoints(const ros::NodeHandle &pnh)
         jc.ipMaxAcceleration = p.ipMaxAcceleration;
         jc.ipMaxJerk = p.ipMaxJerk;
         jc.ipGoalTolerance = p.ipGoalTolerance;
+        jc.ecbIp = p.ecbIp;
+        jc.ecbAutoDiscovery = p.ecbAutoDiscovery;
+        jc.ecbRefreshMs = p.ecbRefreshMs;
 
         joints_.push_back(jc);
         jointIndexByName_[jc.name] = joints_.size() - 1;
@@ -1329,7 +1345,29 @@ bool CanDriverHW::initDevice(const std::string &device, bool loopback)
         }
         motors.emplace_back(jc.protocol, jc.motorId);
     }
-    return deviceManager_->initDevice(device, motors, loopback);
+    const bool ok = deviceManager_->initDevice(device, motors, loopback);
+    if (!ok) {
+        return false;
+    }
+
+    for (const auto &jc : joints_) {
+        if (jc.canDevice != device || jc.protocol != CanType::ECB) {
+            continue;
+        }
+
+        const auto baseProto = deviceManager_->getProtocol(jc.canDevice, jc.protocol);
+        const auto ecbProto = std::dynamic_pointer_cast<InnfosEcbProtocol>(baseProto);
+        if (!ecbProto) {
+            ROS_ERROR("[CanDriverHW] ECB protocol cast failed on '%s'.", jc.canDevice.c_str());
+            return false;
+        }
+        ecbProto->configureMotorRouting(jc.motorId, jc.ecbIp, jc.ecbAutoDiscovery);
+        if (jc.ecbRefreshMs > 0) {
+            ecbProto->setRefreshRateHz(1000.0 / static_cast<double>(jc.ecbRefreshMs));
+        }
+    }
+
+    return true;
 }
 
 std::shared_ptr<CanProtocol> CanDriverHW::getProtocol(const std::string &device, CanType type) const

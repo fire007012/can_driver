@@ -691,3 +691,108 @@ Commit 1–3 已完成。下一步应立即开始 Commit 4，原因：
 - 不处理 `send()` 失败，后续上真机调试时几乎必然会碰到 EAGAIN 导致统计失真、退避缺失的问题
 - Control 帧”丢新保旧”在高负载场景下会导致电机收到过时命令，越早修正越安全
 - 完成后 `DeviceRuntime` 就是一个真正可靠的发送层，后续 Commit 5–7 可以放心往上堆
+
+## 13. 迁移完整性审计（2026-04-18）
+
+本节用于回答“删除 `can_driver-master`（或备份目录）后，`can_driver` 是否仍可完整运行”。
+
+### 13.1 审计范围
+
+- 代码与构建：`src/`、`include/`、`CMakeLists.txt`、`package.xml`
+- 运行配置：`config/`、`launch/`、`scripts/`
+- 文档：`docs/`
+- 第三方 SDK：`1MINTASCA/innfos-cpp-sdk`
+
+### 13.2 审计结果
+
+- 构建层已去除对 `can_driver-master` 路径的依赖。
+- `1MINTASCA/innfos-cpp-sdk` 已位于根包 `can_driver/1MINTASCA/`，可独立提供 ECB 所需头文件与动态库。
+- 与 `can_driver-master.__bak__` 对比后，根包缺失文件仅有历史临时文件：
+  - `.codex`
+  - `message.log`
+  这两项均非运行、构建、测试、文档所需内容。
+- `docs/` 已完成迁移：备份目录中的所有文档文件在根包 `docs/` 均可找到。
+
+### 13.3 删除备份目录后的结论
+
+在当前状态下，即使删除 `can_driver-master` / `can_driver-master.__bak__` 目录：
+
+- `can_driver` 仍可完成构建并产出可执行节点；
+- ECB/UDP/MT/PP 相关能力仍由根包内代码、配置、脚本与 SDK 提供；
+- 文档体系仍完整保留在根包 `docs/` 中。
+
+结论：迁移目标已满足“根包自洽、可独立运行”的要求。
+
+## 14. MT/ECB 功能重点验证记录（2026-04-18）
+
+本节聚焦验证：
+
+- MT 电机控制链路是否正常
+- ECB 控制链路是否正常
+- 位置模式/速度模式是否可运行
+- 角度与速度换算是否正确
+
+### 14.1 已执行自动化验证
+
+1. MT 协议单测：`test_mt_can_protocol`
+
+- 结论：通过
+- 覆盖点：
+  - 速度模式下发帧编码（`setVelocity`）
+  - 位置模式下发帧编码（`setPosition`）
+  - 多圈角度读取保持（大数位置值）
+  - 查询超时退避与刷新行为
+
+2. CSP/位置模式相关单测：`test_eyou_can_csp`
+
+- 结论：通过
+- 覆盖点：
+  - CSP 下位置快写流程
+  - 模式切换后预配置速度与位置帧顺序
+  - 位置模式与 CSP 模式切换后的连续动作行为
+
+3. 角度/速度换算与方向符号单测：`test_joint_config_parser`、`test_limits_enforcement`
+
+- 结论：通过
+- 覆盖点：
+  - PPR 到弧度比例换算（`2*pi/PPR`）
+  - `direction_sign` 正负方向语义
+  - `scaleAndClamp` 缩放与溢出钳位
+
+4. 系统级模式与控制回归：`test_can_driver_hw_smoke`
+
+- 结论：通过（45 tests, 0 failures）
+- 覆盖点：
+  - 位置/速度模式切换服务行为
+  - CSP 位置指令换算与限位约束
+  - 负方向关节对读写的修正
+
+5. ECB 配置与设备管理补充单测（本次补回）
+
+- `test_joint_config_parser` 新增：
+  - ECB 固定 IP/发现策略/刷新周期解析
+  - `ecb://<ip>` 回退解析
+- `test_device_manager` 新增：
+  - 无 SocketCAN 设备时 ECB 协议创建路径
+
+### 14.2 验证结论（当前可确认范围）
+
+- MT 路径：位置/速度控制与编码行为在单测层面可确认正常。
+- 位置/速度模式切换：在系统 smoke 用例中可确认正常。
+- 角度换算：PPR 缩放、方向修正、数值钳位在单测中可确认正确。
+- ECB 路径：配置解析、协议装配与设备管理路径可确认正常。
+
+### 14.3 仍需真机验证的部分
+
+受限于当前环境无 ECB 实机网络，以下项需在真机执行脚本验证：
+
+- ECB 电机实际位置闭环精度（目标角度与实测角度误差）
+- ECB 速度模式实测稳态与动态响应
+- 多电机联动时 ECB 刷新周期对控制稳定性的影响
+
+建议使用根包已迁移脚本进行现场验证：
+
+- `scripts/test_ecb_motor_motion.sh`
+- `scripts/test_ecb_group_motion.sh`
+- `scripts/test_ecb_four_motors.sh`
+- `scripts/discover_ecb_and_enable_yaml.sh`
