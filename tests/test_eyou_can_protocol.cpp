@@ -5,6 +5,7 @@
 #include "can_driver/SharedDriverState.h"
 
 #include <chrono>
+#include <condition_variable>
 #include <cstdint>
 #include <memory>
 #include <mutex>
@@ -17,7 +18,11 @@ class MockTransport : public CanTransport {
 public:
     SendResult send(const Frame &frame) override
     {
-        sentFrames.push_back(frame);
+        {
+            std::lock_guard<std::mutex> lock(sentFramesMutex);
+            sentFrames.push_back(frame);
+        }
+        sentFramesCv.notify_all();
         return SendResult::Ok;
     }
 
@@ -41,11 +46,21 @@ public:
 
     void clearSent()
     {
+        std::lock_guard<std::mutex> lock(sentFramesMutex);
         sentFrames.clear();
+    }
+
+    bool waitForSentFrameCount(std::size_t count, std::chrono::milliseconds timeout)
+    {
+        std::unique_lock<std::mutex> lock(sentFramesMutex);
+        return sentFramesCv.wait_for(
+            lock, timeout, [this, count]() { return sentFrames.size() >= count; });
     }
 
     std::vector<Frame> sentFrames;
     ReceiveHandler receiveHandler;
+    std::mutex sentFramesMutex;
+    std::condition_variable sentFramesCv;
 };
 
 class MockTxDispatcher : public CanTxDispatcher {
@@ -737,8 +752,14 @@ TEST_F(EyouCanTest, ReadSerialNumberRequestsSubCommand02AndCachesResponse)
 
 TEST_F(EyouCanTest, PersistParametersUsesSerialNumberLow24BitsWithSaveFlag)
 {
-    std::thread responder([this]() {
-        std::this_thread::sleep_for(std::chrono::milliseconds(10));
+    bool sawReadRequest = false;
+    bool sawPersistWrite = false;
+    std::thread responder([this, &sawReadRequest, &sawPersistWrite]() {
+        sawReadRequest =
+            transport->waitForSentFrameCount(1u, std::chrono::milliseconds(200));
+        if (!sawReadRequest) {
+            return;
+        }
         CanTransport::Frame frame {};
         frame.id = 0x0005;
         frame.isExtended = false;
@@ -752,7 +773,11 @@ TEST_F(EyouCanTest, PersistParametersUsesSerialNumberLow24BitsWithSaveFlag)
         frame.data[5] = 0x78;
         transport->simulateReceive(frame);
 
-        std::this_thread::sleep_for(std::chrono::milliseconds(10));
+        sawPersistWrite =
+            transport->waitForSentFrameCount(2u, std::chrono::milliseconds(300));
+        if (!sawPersistWrite) {
+            return;
+        }
         CanTransport::Frame ack {};
         ack.id = 0x0005;
         ack.isExtended = false;
@@ -764,7 +789,12 @@ TEST_F(EyouCanTest, PersistParametersUsesSerialNumberLow24BitsWithSaveFlag)
         transport->simulateReceive(ack);
     });
 
-    ASSERT_TRUE(eyou.persistParameters(static_cast<MotorID>(0x05)));
+    const bool persisted = eyou.persistParameters(static_cast<MotorID>(0x05));
+    responder.join();
+
+    ASSERT_TRUE(sawReadRequest);
+    ASSERT_TRUE(sawPersistWrite);
+    ASSERT_TRUE(persisted);
     ASSERT_GE(transport->sentFrames.size(), 2u);
 
     const auto &readFrame = transport->sentFrames[0];
@@ -778,14 +808,18 @@ TEST_F(EyouCanTest, PersistParametersUsesSerialNumberLow24BitsWithSaveFlag)
     EXPECT_EQ(writeFrame.data[3], 0x56);
     EXPECT_EQ(writeFrame.data[4], 0x78);
     EXPECT_EQ(writeFrame.data[5], 0x01);
-
-    responder.join();
 }
 
 TEST_F(EyouCanTest, PersistParametersFailsWhenWriteAckReportsFailure)
 {
-    std::thread responder([this]() {
-        std::this_thread::sleep_for(std::chrono::milliseconds(10));
+    bool sawReadRequest = false;
+    bool sawPersistWrite[3] = {false, false, false};
+    std::thread responder([this, &sawReadRequest, &sawPersistWrite]() {
+        sawReadRequest =
+            transport->waitForSentFrameCount(1u, std::chrono::milliseconds(200));
+        if (!sawReadRequest) {
+            return;
+        }
         CanTransport::Frame frame {};
         frame.id = 0x0005;
         frame.isExtended = false;
@@ -800,7 +834,11 @@ TEST_F(EyouCanTest, PersistParametersFailsWhenWriteAckReportsFailure)
         transport->simulateReceive(frame);
 
         for (int i = 0; i < 3; ++i) {
-            std::this_thread::sleep_for(std::chrono::milliseconds(10 + 50 * i));
+            sawPersistWrite[i] = transport->waitForSentFrameCount(
+                static_cast<std::size_t>(2 + i), std::chrono::milliseconds(400));
+            if (!sawPersistWrite[i]) {
+                return;
+            }
             CanTransport::Frame ack {};
             ack.id = 0x0005;
             ack.isExtended = false;
@@ -813,15 +851,28 @@ TEST_F(EyouCanTest, PersistParametersFailsWhenWriteAckReportsFailure)
         }
     });
 
-    EXPECT_FALSE(eyou.persistParameters(static_cast<MotorID>(0x05)));
-
+    const bool persisted = eyou.persistParameters(static_cast<MotorID>(0x05));
     responder.join();
+
+    ASSERT_TRUE(sawReadRequest);
+    ASSERT_TRUE(sawPersistWrite[0]);
+    ASSERT_TRUE(sawPersistWrite[1]);
+    ASSERT_TRUE(sawPersistWrite[2]);
+    EXPECT_FALSE(persisted);
 }
 
 TEST_F(EyouCanTest, PersistParametersRetriesAfterRejectedAck)
 {
-    std::thread responder([this]() {
-        std::this_thread::sleep_for(std::chrono::milliseconds(10));
+    bool sawReadRequest = false;
+    bool sawFirstPersistWrite = false;
+    bool sawRetryPersistWrite = false;
+    std::thread responder(
+        [this, &sawReadRequest, &sawFirstPersistWrite, &sawRetryPersistWrite]() {
+        sawReadRequest =
+            transport->waitForSentFrameCount(1u, std::chrono::milliseconds(200));
+        if (!sawReadRequest) {
+            return;
+        }
         CanTransport::Frame frame {};
         frame.id = 0x0005;
         frame.isExtended = false;
@@ -835,7 +886,11 @@ TEST_F(EyouCanTest, PersistParametersRetriesAfterRejectedAck)
         frame.data[5] = 0x78;
         transport->simulateReceive(frame);
 
-        std::this_thread::sleep_for(std::chrono::milliseconds(10));
+        sawFirstPersistWrite =
+            transport->waitForSentFrameCount(2u, std::chrono::milliseconds(300));
+        if (!sawFirstPersistWrite) {
+            return;
+        }
         CanTransport::Frame ack0 {};
         ack0.id = 0x0005;
         ack0.isExtended = false;
@@ -846,7 +901,11 @@ TEST_F(EyouCanTest, PersistParametersRetriesAfterRejectedAck)
         ack0.data[2] = 0x00;
         transport->simulateReceive(ack0);
 
-        std::this_thread::sleep_for(std::chrono::milliseconds(60));
+        sawRetryPersistWrite =
+            transport->waitForSentFrameCount(3u, std::chrono::milliseconds(400));
+        if (!sawRetryPersistWrite) {
+            return;
+        }
         CanTransport::Frame ack1 {};
         ack1.id = 0x0005;
         ack1.isExtended = false;
@@ -858,9 +917,13 @@ TEST_F(EyouCanTest, PersistParametersRetriesAfterRejectedAck)
         transport->simulateReceive(ack1);
     });
 
-    EXPECT_TRUE(eyou.persistParameters(static_cast<MotorID>(0x05)));
-
+    const bool persisted = eyou.persistParameters(static_cast<MotorID>(0x05));
     responder.join();
+
+    ASSERT_TRUE(sawReadRequest);
+    ASSERT_TRUE(sawFirstPersistWrite);
+    ASSERT_TRUE(sawRetryPersistWrite);
+    EXPECT_TRUE(persisted);
 }
 
 TEST_F(EyouCanTest, DISABLED_TODO_HandleWriteAckModeAndEnable)
