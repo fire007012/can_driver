@@ -11,11 +11,11 @@ set -euo pipefail
 SELECT_INDEX="1"
 SETUP_LOGTOOL="0"
 YAML_PATHS=("config/can_driver.yaml" "config/can_driver_ecb.yaml")
-SDK_EXAMPLE_DIR="1MINTASCA/innfos-cpp-sdk/example"
+SDK_EXAMPLE_DIR="lib/innfos-cpp-sdk/example"
 SDK_BUILD_DIR="${SDK_EXAMPLE_DIR}/build"
-SDK_LIB_DIR="1MINTASCA/innfos-cpp-sdk/sdk/lib/linux_x86_64"
+SDK_LIB_DIR="lib/innfos-cpp-sdk/sdk/lib/linux_x86_64"
 LOOKUP_BIN="${SDK_BUILD_DIR}/bin/01_lookupActuators"
-LOGTOOL_DIR="1MINTASCA/innfos-cpp-sdk/tools/logtool/linux_x86_64"
+LOGTOOL_DIR="lib/innfos-cpp-sdk/tools/logtool/linux_x86_64"
 LOGTOOL_SET_PATH="${LOGTOOL_DIR}/setpath.sh"
 LOGTOOL_BIN="${LOGTOOL_DIR}/ActuatorLogTool"
 

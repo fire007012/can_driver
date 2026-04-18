@@ -2,6 +2,8 @@
 
 本文档用于 1MINTASCA/Innfos ECB 网络电机在 can_driver 中的配置、验证与排障。
 
+仓库内随包提供的 SDK 路径为 `lib/innfos-cpp-sdk`。
+
 ## 1. 兼容结论
 
 当前 can_driver 已支持 ECB 协议，接入路径是“协议层接入”，不是 UDP-CAN 透传。

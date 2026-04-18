@@ -2,12 +2,19 @@ cmake_minimum_required(VERSION 3.0.2)
 project(can_driver)
 
 set(INNFOS_SDK_DIR "")
-if(EXISTS "${CMAKE_CURRENT_SOURCE_DIR}/1MINTASCA/innfos-cpp-sdk")
-  set(INNFOS_SDK_DIR "${CMAKE_CURRENT_SOURCE_DIR}/1MINTASCA/innfos-cpp-sdk")
-endif()
+set(INNFOS_SDK_CANDIDATES
+  "${CMAKE_CURRENT_SOURCE_DIR}/lib/innfos-cpp-sdk"
+  "${CMAKE_CURRENT_SOURCE_DIR}/1MINTASCA/innfos-cpp-sdk"
+)
+foreach(candidate ${INNFOS_SDK_CANDIDATES})
+  if(EXISTS "${candidate}")
+    set(INNFOS_SDK_DIR "${candidate}")
+    break()
+  endif()
+endforeach()
 
 if(INNFOS_SDK_DIR STREQUAL "")
-  message(FATAL_ERROR "Failed to locate innfos-cpp-sdk under 1MINTASCA/.")
+  message(FATAL_ERROR "Failed to locate innfos-cpp-sdk under lib/ or 1MINTASCA/.")
 endif()
 
 set(INNFOS_SDK_INCLUDE_DIR "${INNFOS_SDK_DIR}/sdk/include")
