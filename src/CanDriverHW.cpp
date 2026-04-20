@@ -217,6 +217,16 @@ bool CanDriverHW::loadRuntimeParams(const ros::NodeHandle &pnh)
                  startupProbeQueryHz_);
         startupProbeQueryHz_ = 5.0;
     }
+    if (!pnh.getParam("safety_feedback_freshness_timeout_sec",
+                      safetyFeedbackFreshnessTimeoutSec_)) {
+        safetyFeedbackFreshnessTimeoutSec_ = 0.5;
+    }
+    if (!std::isfinite(safetyFeedbackFreshnessTimeoutSec_) ||
+        safetyFeedbackFreshnessTimeoutSec_ <= 0.0) {
+        ROS_WARN("[CanDriverHW] Invalid safety_feedback_freshness_timeout_sec=%.9g, fallback to 0.5s.",
+                 safetyFeedbackFreshnessTimeoutSec_);
+        safetyFeedbackFreshnessTimeoutSec_ = 0.5;
+    }
     if (!pnh.getParam("pp_fast_write_enabled", ppFastWriteEnabled_)) {
         ppFastWriteEnabled_ = false;
     }
@@ -243,6 +253,10 @@ bool CanDriverHW::loadRuntimeParams(const ros::NodeHandle &pnh)
     }
     if (!pnh.getParam("safety_require_enabled_for_motion", safetyRequireEnabledForMotion_)) {
         safetyRequireEnabledForMotion_ = true;
+    }
+    if (!pnh.getParam("lifecycle_require_enabled_for_running",
+                      lifecycleRequireEnabledForRunning_)) {
+        lifecycleRequireEnabledForRunning_ = true;
     }
     if (!pnh.getParam("max_position_step_rad", maxPositionStepRad_)) {
         maxPositionStepRad_ = 0.0;
@@ -277,6 +291,8 @@ bool CanDriverHW::loadRuntimeParams(const ros::NodeHandle &pnh)
 
     deviceManager_->setPpFastWriteEnabled(ppFastWriteEnabled_);
     deviceManager_->setRefreshRateHz(motorQueryHz_);
+    lifecycleDriverOps_.setFeedbackFreshnessTimeoutNs(
+        static_cast<std::int64_t>(safetyFeedbackFreshnessTimeoutSec_ * 1e9));
 
     if (motorQueryHz_ > 0.0) {
         ROS_INFO("[CanDriverHW] motor_query_hz=%.3f Hz.", motorQueryHz_);
@@ -291,9 +307,13 @@ bool CanDriverHW::loadRuntimeParams(const ros::NodeHandle &pnh)
              startupPositionSyncTimeoutSec_);
     ROS_INFO("[CanDriverHW] startup_probe_query_hz=%.3f Hz.",
              startupProbeQueryHz_);
-    ROS_INFO("[CanDriverHW] safety_stop_on_fault=%s, safety_require_enabled_for_motion=%s, max_position_step_rad=%.6f.",
+    ROS_INFO("[CanDriverHW] safety_feedback_freshness_timeout_sec=%.3f s.",
+             safetyFeedbackFreshnessTimeoutSec_);
+    ROS_INFO("[CanDriverHW] safety_stop_on_fault=%s, safety_require_enabled_for_motion=%s, "
+             "lifecycle_require_enabled_for_running=%s, max_position_step_rad=%.6f.",
              safetyStopOnFault_ ? "true" : "false",
              safetyRequireEnabledForMotion_ ? "true" : "false",
+             lifecycleRequireEnabledForRunning_ ? "true" : "false",
              maxPositionStepRad_);
     ROS_INFO("[CanDriverHW] safety_hold_after_device_recover=%s.",
              safetyHoldAfterDeviceRecover_ ? "true" : "false");
@@ -458,6 +478,14 @@ bool CanDriverHW::syncStartupPositionAndCommands(const std::string &deviceFilter
                 }
 
                 for (const auto &device : devicesToReport) {
+                    if (device.rfind("ecb://", 0) == 0) {
+                        ROS_ERROR("[CanDriverHW] Startup sync ECB detail: device '%s' uses the Innfos SDK path "
+                                  "and has no SocketCAN/Udp transport instance; check SDK discovery, motor_id, "
+                                  "ECB IP, network interface, and logtool permissions.",
+                                  device.c_str());
+                        continue;
+                    }
+
                     const auto transport = concreteDeviceManager->getTransport(device);
                     if (!transport) {
                         ROS_ERROR("[CanDriverHW] Startup sync transport detail: device '%s' has no transport instance.",
@@ -629,6 +657,11 @@ bool CanDriverHW::parseAndSetupJoints(const ros::NodeHandle &pnh)
         jc.ecbIp = p.ecbIp;
         jc.ecbAutoDiscovery = p.ecbAutoDiscovery;
         jc.ecbRefreshMs = p.ecbRefreshMs;
+        jc.ecbProfilePositionMaxRpm = p.ecbProfilePositionMaxRpm;
+        jc.ecbProfilePositionAccelerationRpmS = p.ecbProfilePositionAccelerationRpmS;
+        jc.ecbProfilePositionDecelerationRpmS = p.ecbProfilePositionDecelerationRpmS;
+        jc.ecbProfileVelocityAccelerationRpmS = p.ecbProfileVelocityAccelerationRpmS;
+        jc.ecbProfileVelocityDecelerationRpmS = p.ecbProfileVelocityDecelerationRpmS;
 
         joints_.push_back(jc);
         jointIndexByName_[jc.name] = joints_.size() - 1;
@@ -1379,6 +1412,12 @@ bool CanDriverHW::initDevice(const std::string &device, bool loopback)
             return false;
         }
         ecbProto->configureMotorRouting(jc.motorId, jc.ecbIp, jc.ecbAutoDiscovery);
+        ecbProto->configureMotionProfile(jc.motorId,
+                                          jc.ecbProfilePositionMaxRpm,
+                                          jc.ecbProfilePositionAccelerationRpmS,
+                                          jc.ecbProfilePositionDecelerationRpmS,
+                                          jc.ecbProfileVelocityAccelerationRpmS,
+                                          jc.ecbProfileVelocityDecelerationRpmS);
         if (jc.ecbRefreshMs > 0) {
             ecbProto->setRefreshRateHz(1000.0 / static_cast<double>(jc.ecbRefreshMs));
         }
@@ -1454,6 +1493,9 @@ bool CanDriverHW::lifecycleHealthHealthy(std::string *detail) const
         return lifecycleDriverOps_.enableHealthy(detail);
     }
     if (mode == can_driver::SystemOpMode::Running) {
+        if (!lifecycleRequireEnabledForRunning_) {
+            return lifecycleDriverOps_.enableHealthy(detail);
+        }
         return lifecycleDriverOps_.motionHealthy(detail);
     }
     return true;

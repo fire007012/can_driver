@@ -26,6 +26,7 @@ public:
     void configure(std::shared_ptr<IDeviceManager> deviceManager,
                    const MotorActionExecutor *motorActionExecutor);
     void setTargets(std::vector<MotorActionExecutor::Target> targets);
+    void setFeedbackFreshnessTimeoutNs(std::int64_t timeoutNs);
 
     Result prepareDevice(const std::string &device, bool loopback) const;
     Result enableDevice(const std::string &device) const;

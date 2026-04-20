@@ -23,6 +23,11 @@ DRIVER_NS="${6:-/can_driver_node}"
 # 统一服务和状态话题命名，避免脚本里多处硬编码。
 MOTOR_SRV="${DRIVER_NS}/motor_command"
 MOTOR_STATE_TOPIC="${DRIVER_NS}/motor_states"
+LIFECYCLE_STATE_TOPIC="${DRIVER_NS}/lifecycle_state"
+HALT_SRV="${DRIVER_NS}/halt"
+RESUME_SRV="${DRIVER_NS}/resume"
+ENABLE_SRV="${DRIVER_NS}/enable"
+RECOVER_SRV="${DRIVER_NS}/recover"
 
 log() {
   echo "[ECB-TEST] $*"
@@ -117,7 +122,8 @@ for j in joints:
     except Exception:
         continue
     pos_scale = float(j.get("position_scale", 1.0))
-    ecb.append((mid, str(j.get("name", "")), str(j.get("can_device", "")), pos_scale))
+    vel_scale = float(j.get("velocity_scale", 1.0))
+    ecb.append((mid, str(j.get("name", "")), str(j.get("can_device", "")), pos_scale, vel_scale))
 
 if not ecb:
   proto_text = ", ".join(f"{k}:{v}" for k, v in sorted(protocol_counter.items())) if protocol_counter else "<none>"
@@ -132,9 +138,9 @@ if req_motor.lower() != "auto":
     except Exception:
         print(f"ERR: invalid motor id: {req_motor}")
         sys.exit(1)
-    for mid, name, dev, pos_scale in ecb:
+    for mid, name, dev, pos_scale, vel_scale in ecb:
         if mid == req_mid:
-            print(f"{mid} {name} {dev} {pos_scale}")
+            print(f"{mid} {name} {dev} {pos_scale} {vel_scale}")
             sys.exit(0)
     print(f"ERR: motor_id {req_motor} not found in ECB joints")
     sys.exit(1)
@@ -142,8 +148,8 @@ if req_motor.lower() != "auto":
 # auto: 优先固定IP设备（ecb://<ip>），其次其它 ECB。
 # 经验：固定 IP 通常比自动扫描更稳定，适合作为优先测试目标。
 ecb_sorted = sorted(ecb, key=lambda x: (x[2].endswith('auto'), x[0]))
-mid, name, dev, pos_scale = ecb_sorted[0]
-print(f"{mid} {name} {dev} {pos_scale}")
+mid, name, dev, pos_scale, vel_scale = ecb_sorted[0]
+print(f"{mid} {name} {dev} {pos_scale} {vel_scale}")
 PY
 }
 
@@ -153,7 +159,151 @@ call_motor_cmd() {
   local motor_id="$1"
   local command="$2"
   local value="$3"
-  rosservice call "${MOTOR_SRV}" "{motor_id: ${motor_id}, command: ${command}, value: ${value}}" >/dev/null
+  local output
+  if ! output="$(rosservice call "${MOTOR_SRV}" "{motor_id: ${motor_id}, command: ${command}, value: ${value}}")"; then
+    echo "[ECB-TEST][ERR] motor_command failed: motor_id=${motor_id}, command=${command}, value=${value}" >&2
+    echo "${output}" >&2
+    exit 4
+  fi
+  if printf '%s\n' "${output}" | grep -q "success: False"; then
+    echo "[ECB-TEST][ERR] motor_command rejected: motor_id=${motor_id}, command=${command}, value=${value}" >&2
+    echo "${output}" >&2
+    exit 4
+  fi
+}
+
+call_trigger_srv() {
+  local service_name="$1"
+  local output
+  if ! output="$(rosservice call "${service_name}")"; then
+    echo "[ECB-TEST][ERR] lifecycle service failed: ${service_name}" >&2
+    echo "${output}" >&2
+    exit 4
+  fi
+  if printf '%s\n' "${output}" | grep -q "success: False"; then
+    echo "[ECB-TEST][ERR] lifecycle service rejected: ${service_name}" >&2
+    echo "${output}" >&2
+    exit 4
+  fi
+}
+
+call_recover_srv() {
+  local output
+  if ! output="$(rosservice call "${RECOVER_SRV}" "{motor_id: 65535}")"; then
+    echo "[ECB-TEST][ERR] lifecycle recover failed: ${RECOVER_SRV}" >&2
+    echo "${output}" >&2
+    exit 4
+  fi
+  if printf '%s\n' "${output}" | grep -q "success: False"; then
+    echo "[ECB-TEST][ERR] lifecycle recover rejected: ${RECOVER_SRV}" >&2
+    echo "${output}" >&2
+    exit 4
+  fi
+}
+
+get_lifecycle_state() {
+  timeout 3s rostopic echo "${LIFECYCLE_STATE_TOPIC}" 2>/dev/null | awk '
+    $1=="data:" {
+      gsub(/"/, "", $2)
+      print $2
+      exit
+    }
+  '
+}
+
+wait_lifecycle_state() {
+  local expected="$1"
+  local timeout_sec="${2:-3.0}"
+  python3 - "$expected" "$timeout_sec" "$LIFECYCLE_STATE_TOPIC" <<'PY'
+import subprocess
+import sys
+import time
+
+expected = sys.argv[1]
+timeout_sec = float(sys.argv[2])
+topic = sys.argv[3]
+deadline = time.time() + timeout_sec
+
+while time.time() < deadline:
+    proc = subprocess.run(
+        ["timeout", "2s", "rostopic", "echo", topic],
+        check=False,
+        stdout=subprocess.PIPE,
+        stderr=subprocess.DEVNULL,
+        text=True,
+    )
+    for line in proc.stdout.splitlines():
+        parts = line.split(":", 1)
+        if len(parts) == 2 and parts[0].strip() == "data":
+            value = parts[1].strip().strip('"')
+            if value == expected:
+                sys.exit(0)
+    time.sleep(0.1)
+
+sys.exit(1)
+PY
+}
+
+prepare_mode_switch() {
+  local label="$1"
+  recover_if_faulted "${label} mode switch"
+  local state
+  state="$(get_lifecycle_state || true)"
+  if [[ "${state}" == "Armed" ]]; then
+    log "lifecycle already Armed before ${label} mode switch"
+    return
+  fi
+
+  log "Pause lifecycle before ${label} mode switch"
+  call_trigger_srv "${HALT_SRV}"
+  if wait_lifecycle_state "Armed" 3.0; then
+    log "lifecycle Armed"
+  else
+    log "lifecycle not confirmed Armed within timeout; continue but watch roslaunch logs"
+  fi
+}
+
+resume_after_mode_switch() {
+  local label="$1"
+  local state
+  state="$(get_lifecycle_state || true)"
+  if [[ "${state}" == "Running" ]]; then
+    log "lifecycle already Running after ${label} mode switch"
+    return
+  fi
+
+  log "Resume lifecycle after ${label} mode switch"
+  call_trigger_srv "${RESUME_SRV}"
+  if wait_lifecycle_state "Running" 3.0; then
+    log "lifecycle Running"
+  else
+    log "lifecycle not confirmed Running within timeout; continue but watch roslaunch logs"
+  fi
+}
+
+recover_if_faulted() {
+  local label="$1"
+  local state
+  state="$(get_lifecycle_state || true)"
+  if [[ "${state}" != "Faulted" ]]; then
+    return
+  fi
+
+  log "Lifecycle is Faulted before ${label}; use safety recover path"
+  call_recover_srv
+  if wait_lifecycle_state "Standby" 5.0; then
+    log "lifecycle Standby after recover"
+  else
+    log "lifecycle not confirmed Standby within timeout; continue but watch roslaunch logs"
+  fi
+
+  log "Enable lifecycle after recover"
+  call_trigger_srv "${ENABLE_SRV}"
+  if wait_lifecycle_state "Armed" 5.0; then
+    log "lifecycle Armed after recover"
+  else
+    log "lifecycle not confirmed Armed after recover; continue but watch roslaunch logs"
+  fi
 }
 
 publish_once() {
@@ -327,8 +477,9 @@ MOTOR_ID="$(echo "${RESOLVE_OUT}" | awk '{print $1}')"
 JOINT_NAME="$(echo "${RESOLVE_OUT}" | awk '{print $2}')"
 CAN_DEVICE="$(echo "${RESOLVE_OUT}" | awk '{print $3}')"
 POSITION_SCALE="$(echo "${RESOLVE_OUT}" | awk '{print $4}')"
+VELOCITY_SCALE="$(echo "${RESOLVE_OUT}" | awk '{print $5}')"
 
-if [[ -z "${MOTOR_ID}" || -z "${JOINT_NAME}" || -z "${POSITION_SCALE}" ]]; then
+if [[ -z "${MOTOR_ID}" || -z "${JOINT_NAME}" || -z "${POSITION_SCALE}" || -z "${VELOCITY_SCALE}" ]]; then
   echo "[ECB-TEST][ERR] resolve failed: ${RESOLVE_OUT}" >&2
   exit 3
 fi
@@ -338,17 +489,32 @@ POS_TOPIC="${DRIVER_NS}/motor/${JOINT_NAME}/cmd_position"
 
 log "target: motor_id=${MOTOR_ID}, joint=${JOINT_NAME}, device=${CAN_DEVICE}"
 log "注意：本脚本默认命令单位为 SI（rad / rad/s），是否正确取决于 can_driver.yaml 中该 joint 的 scale 配置。"
+python3 - "${VEL_CMD}" "${POS_CMD}" "${VELOCITY_SCALE}" "${POSITION_SCALE}" <<'PY'
+import sys
+vel = abs(float(sys.argv[1]))
+pos = abs(float(sys.argv[2]))
+vel_scale = float(sys.argv[3])
+pos_scale = float(sys.argv[4])
+vel_raw = vel / vel_scale if vel_scale else 0.0
+pos_raw = pos / pos_scale if pos_scale else 0.0
+print(
+    "[ECB-TEST] command conversion: "
+    f"{vel:g} rad/s -> raw={vel_raw:.1f} -> {vel_raw / 10.0:.2f} RPM; "
+    f"{pos:g} rad -> raw={pos_raw:.1f} -> {pos_raw / 10000.0:.4f} rev"
+)
+PY
 
-log "[1/10] Enable"
-call_motor_cmd "${MOTOR_ID}" 0 0.0
-if wait_motor_state_equals "enabled" "True" 3.0; then
-  log "enable confirmed by motor_states"
-else
-  log "enable not confirmed within timeout; continue but watch roslaunch logs"
-fi
+recover_if_faulted "test"
 
-log "[2/10] Set velocity mode"
-# 先显式切速度模式，再发速度命令，避免模式残留导致行为不一致。
+log "[1/14] Prepare lifecycle for velocity mode switch"
+prepare_mode_switch "velocity"
+
+log "[2/14] Disable before velocity mode switch"
+call_motor_cmd "${MOTOR_ID}" 1 0.0
+sleep 0.3
+
+log "[3/14] Set velocity mode"
+# 模式切换必须在失能状态执行；切换后先发一帧对齐命令，再发真实目标。
 call_motor_cmd "${MOTOR_ID}" 3 1.0
 if wait_motor_state_equals "mode" "2" 3.0; then
   log "velocity mode confirmed by motor_states"
@@ -356,10 +522,36 @@ else
   log "velocity mode not confirmed within timeout; continue but watch roslaunch logs"
 fi
 
-log "[3/10] Velocity +${VEL_CMD} rad/s"
+log "[4/14] Enable velocity mode"
+call_motor_cmd "${MOTOR_ID}" 0 0.0
+if wait_motor_state_equals "enabled" "True" 3.0; then
+  log "enable confirmed by motor_states"
+else
+  log "enable not confirmed within timeout; continue but watch roslaunch logs"
+fi
+
+log "[5/14] Resume velocity mode"
+resume_after_mode_switch "velocity"
+
+log "[6/14] Align velocity command to current feedback"
+CURRENT_VEL_RAW="$(get_motor_state_field "velocity" || true)"
+if [[ -n "${CURRENT_VEL_RAW}" ]]; then
+  CURRENT_VEL="$(python3 - "${CURRENT_VEL_RAW}" "${VELOCITY_SCALE}" <<'PY'
+import sys
+raw = float(sys.argv[1])
+scale = float(sys.argv[2])
+print(raw * scale)
+PY
+)"
+else
+  CURRENT_VEL="0.0"
+fi
+hold_publish "${VEL_TOPIC}" "${CURRENT_VEL}" 0.5
+
+log "[7/14] Velocity +${VEL_CMD} rad/s"
 hold_publish "${VEL_TOPIC}" "${VEL_CMD}" "${VEL_HOLD_SEC}"
 
-log "[4/10] Velocity -${VEL_CMD} rad/s"
+log "[8/14] Velocity -${VEL_CMD} rad/s"
 NEG_VEL="-$(python3 - <<PY
 v=float('${VEL_CMD}')
 print(abs(v))
@@ -367,22 +559,34 @@ PY
 )"
 hold_publish "${VEL_TOPIC}" "${NEG_VEL}" "${VEL_HOLD_SEC}"
 
-log "[5/10] Velocity zero"
+log "[9/14] Velocity zero"
 publish_once "${VEL_TOPIC}" 0.0
 sleep 0.5
 
-log "[6/10] Stop"
-# 在位置模式前做一次 STOP，降低速度残留影响位置跟踪的概率。
+log "[10/14] Stop and prepare lifecycle for position mode switch"
 call_motor_cmd "${MOTOR_ID}" 2 0.0
+prepare_mode_switch "position"
+call_motor_cmd "${MOTOR_ID}" 1 0.0
 sleep 0.5
 
-log "[7/10] Set position mode"
+log "[11/14] Set position mode"
 call_motor_cmd "${MOTOR_ID}" 3 0.0
 if wait_motor_state_equals "mode" "1" 3.0; then
   log "position mode confirmed by motor_states"
 else
   log "position mode not confirmed within timeout; continue but watch roslaunch logs"
 fi
+
+log "[12/14] Enable position mode"
+call_motor_cmd "${MOTOR_ID}" 0 0.0
+if wait_motor_state_equals "enabled" "True" 3.0; then
+  log "enable confirmed by motor_states"
+else
+  log "enable not confirmed within timeout; continue but watch roslaunch logs"
+fi
+
+log "[13/14] Resume position mode"
+resume_after_mode_switch "position"
 
 CURRENT_POS_RAW="$(get_motor_position_raw || true)"
 if [[ -n "${CURRENT_POS_RAW}" ]]; then
@@ -395,19 +599,23 @@ PY
   POS_TARGET_POS="$(add_rad "${CURRENT_POS_RAD}" "${POS_OFFSET}")"
   POS_TARGET_NEG="$(add_rad "${CURRENT_POS_RAD}" "-${POS_OFFSET}")"
 
-  log "[8/10] Position +${POS_OFFSET} rad relative (target=${POS_TARGET_POS} rad)"
+  log "[14/14] Align position command to current feedback (target=${CURRENT_POS_RAD} rad)"
+  hold_publish "${POS_TOPIC}" "${CURRENT_POS_RAD}" 0.5
+
+  log "Position +${POS_OFFSET} rad relative (target=${POS_TARGET_POS} rad)"
   hold_publish "${POS_TOPIC}" "${POS_TARGET_POS}" "${POS_HOLD_SEC}"
 
-  log "[9/10] Position -${POS_OFFSET} rad relative (target=${POS_TARGET_NEG} rad)"
+  log "Position -${POS_OFFSET} rad relative (target=${POS_TARGET_NEG} rad)"
   hold_publish "${POS_TOPIC}" "${POS_TARGET_NEG}" "${POS_HOLD_SEC}"
 
-  log "[10/10] Position back to start (target=${CURRENT_POS_RAD} rad)"
+  log "Position back to start (target=${CURRENT_POS_RAD} rad)"
   hold_publish "${POS_TOPIC}" "${CURRENT_POS_RAD}" "${POS_HOLD_SEC}"
 else
-  log "[8/10] Position +${POS_CMD} rad absolute (fallback: no current state)"
+  log "[14/14] Position alignment skipped: no current state"
+  log "Position +${POS_CMD} rad absolute (fallback: no current state)"
   hold_publish "${POS_TOPIC}" "${POS_CMD}" "${POS_HOLD_SEC}"
 
-  log "[9/10] Position -${POS_CMD} rad absolute (fallback)"
+  log "Position -${POS_CMD} rad absolute (fallback)"
   NEG_POS="-$(python3 - <<PY
 p=float('${POS_CMD}')
 print(abs(p))
@@ -415,7 +623,7 @@ PY
 )"
   hold_publish "${POS_TOPIC}" "${NEG_POS}" "${POS_HOLD_SEC}"
 
-  log "[10/10] Position back to zero (fallback)"
+  log "Position back to zero (fallback)"
   hold_publish "${POS_TOPIC}" 0.0 "${POS_HOLD_SEC}"
 fi
 

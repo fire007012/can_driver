@@ -69,6 +69,35 @@ bool parseNonNegativeOptionalDouble(const XmlRpc::XmlRpcValue &jointValue,
     return true;
 }
 
+bool parseFiniteOptionalDouble(const XmlRpc::XmlRpcValue &jointValue,
+                               const char *fieldName,
+                               const std::string &jointName,
+                               double *out,
+                               std::string &errorMsg)
+{
+    if (!jointValue.hasMember(fieldName)) {
+        return true;
+    }
+
+    const auto &value = jointValue[fieldName];
+    if (value.getType() != XmlRpc::XmlRpcValue::TypeInt &&
+        value.getType() != XmlRpc::XmlRpcValue::TypeDouble) {
+        errorMsg = "Joint '" + jointName + "': invalid " + fieldName + ".";
+        return false;
+    }
+
+    const double parsed = (value.getType() == XmlRpc::XmlRpcValue::TypeInt)
+                              ? static_cast<double>(static_cast<int>(value))
+                              : static_cast<double>(value);
+    if (!std::isfinite(parsed)) {
+        errorMsg = "Joint '" + jointName + "': invalid " + fieldName + ".";
+        return false;
+    }
+
+    *out = parsed;
+    return true;
+}
+
 bool parseDirectionSign(const XmlRpc::XmlRpcValue &jointValue,
                         const std::string &jointName,
                         double *out,
@@ -283,6 +312,26 @@ bool parse(const XmlRpc::XmlRpcValue &jointList,
                 errorMsg = "Joint '" + jc.name + "': ecb_refresh_ms must be > 0.";
                 return false;
             }
+        }
+        if (!parsePositiveOptionalDouble(jv, "ecb_profile_position_max_rpm", jc.name,
+                                         &jc.ecbProfilePositionMaxRpm, errorMsg)) {
+            return false;
+        }
+        if (!parsePositiveOptionalDouble(jv, "ecb_profile_position_acceleration_rpm_s", jc.name,
+                                         &jc.ecbProfilePositionAccelerationRpmS, errorMsg)) {
+            return false;
+        }
+        if (!parseFiniteOptionalDouble(jv, "ecb_profile_position_deceleration_rpm_s", jc.name,
+                                       &jc.ecbProfilePositionDecelerationRpmS, errorMsg)) {
+            return false;
+        }
+        if (!parsePositiveOptionalDouble(jv, "ecb_profile_velocity_acceleration_rpm_s", jc.name,
+                                         &jc.ecbProfileVelocityAccelerationRpmS, errorMsg)) {
+            return false;
+        }
+        if (!parseFiniteOptionalDouble(jv, "ecb_profile_velocity_deceleration_rpm_s", jc.name,
+                                       &jc.ecbProfileVelocityDecelerationRpmS, errorMsg)) {
+            return false;
         }
 
         if (jc.protocol == CanType::ECB && !jc.ecbAutoDiscovery && jc.ecbIp.empty()) {

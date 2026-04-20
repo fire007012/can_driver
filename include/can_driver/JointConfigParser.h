@@ -30,6 +30,11 @@ struct ParsedJointConfig {
     std::string ecbIp;                   ///< ECB 固定 IP（可选）
     bool ecbAutoDiscovery{false};        ///< ECB 是否自动发现
     int ecbRefreshMs{20};                ///< ECB 刷新周期（ms）
+    double ecbProfilePositionMaxRpm{500.0};
+    double ecbProfilePositionAccelerationRpmS{300.0};
+    double ecbProfilePositionDecelerationRpmS{-300.0};
+    double ecbProfileVelocityAccelerationRpmS{300.0};
+    double ecbProfileVelocityDecelerationRpmS{-300.0};
 };
 
 /**

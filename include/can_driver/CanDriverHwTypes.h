@@ -44,6 +44,11 @@ struct CanDriverJointConfig {
     std::string ecbIp;
     bool ecbAutoDiscovery{false};
     int ecbRefreshMs{20};
+    double ecbProfilePositionMaxRpm{500.0};
+    double ecbProfilePositionAccelerationRpmS{300.0};
+    double ecbProfilePositionDecelerationRpmS{-300.0};
+    double ecbProfileVelocityAccelerationRpmS{300.0};
+    double ecbProfileVelocityDecelerationRpmS{-300.0};
 
     double pos{0.0};
     double vel{0.0};

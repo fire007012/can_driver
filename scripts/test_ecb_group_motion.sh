@@ -7,7 +7,8 @@ set -euo pipefail
 #   group A: 2,3
 #   group B: 4,5
 # 每组内部电机会同时执行：
-#   Enable -> 速度模式 -> 同步正反速度 -> Stop -> 位置模式 -> 同步相对位置往返 -> Final stop
+#   Disable -> 速度模式 -> Enable -> 对齐速度命令 -> 同步正反速度
+#   -> Stop/Disable -> 位置模式 -> Enable -> 对齐当前位置 -> 同步相对位置往返 -> Final stop
 #
 # 用法：
 #   bash scripts/test_ecb_group_motion.sh [vel_rad_s] [vel_hold_s] [pos_rad] [pos_hold_s] [driver_ns]
@@ -103,7 +104,17 @@ call_motor_cmd() {
   local motor_id="$1"
   local command="$2"
   local value="$3"
-  rosservice call "${MOTOR_SRV}" "{motor_id: ${motor_id}, command: ${command}, value: ${value}}" >/dev/null
+  local output
+  if ! output="$(rosservice call "${MOTOR_SRV}" "{motor_id: ${motor_id}, command: ${command}, value: ${value}}")"; then
+    err "motor_command failed: motor_id=${motor_id}, command=${command}, value=${value}"
+    printf '%s\n' "${output}" >&2
+    exit 4
+  fi
+  if printf '%s\n' "${output}" | grep -q "success: False"; then
+    err "motor_command rejected: motor_id=${motor_id}, command=${command}, value=${value}"
+    printf '%s\n' "${output}" >&2
+    exit 4
+  fi
 }
 
 wait_motor_state_equals() {
@@ -249,6 +260,14 @@ run_group_test() {
   printf '%s\n' "${group_info}" | sed 's/^/[ECB-GROUP-TEST] member /'
 
   while read -r motor_id _joint_name _pos_scale; do
+    call_motor_cmd "${motor_id}" 1 0.0
+    sleep 0.1
+    call_motor_cmd "${motor_id}" 3 1.0
+    if wait_motor_state_equals "${motor_id}" "mode" "2" 3.0; then
+      log "motor_id=${motor_id} velocity mode confirmed"
+    else
+      log "motor_id=${motor_id} velocity mode not confirmed within timeout"
+    fi
     call_motor_cmd "${motor_id}" 0 0.0
     if wait_motor_state_equals "${motor_id}" "enabled" "True" 3.0; then
       log "motor_id=${motor_id} enable confirmed"
@@ -257,14 +276,12 @@ run_group_test() {
     fi
   done <<< "${group_info}"
 
-  while read -r motor_id _joint_name _pos_scale; do
-    call_motor_cmd "${motor_id}" 3 1.0
-    if wait_motor_state_equals "${motor_id}" "mode" "2" 3.0; then
-      log "motor_id=${motor_id} velocity mode confirmed"
-    else
-      log "motor_id=${motor_id} velocity mode not confirmed within timeout"
-    fi
+  local align_velocity_payload=""
+  while read -r motor_id joint_name _pos_scale; do
+    align_velocity_payload+="${motor_id} ${joint_name} 0.0"$'\n'
   done <<< "${group_info}"
+  log "group=${group_spec} align velocity command to current feedback"
+  publish_group_targets "velocity" "0.5" "${align_velocity_payload}"
 
   local velocity_payload=""
   while read -r motor_id joint_name _pos_scale; do
@@ -289,6 +306,7 @@ run_group_test() {
 
   while read -r motor_id _joint_name _pos_scale; do
     call_motor_cmd "${motor_id}" 2 0.0
+    call_motor_cmd "${motor_id}" 1 0.0
   done <<< "${group_info}"
   sleep 0.5
 
@@ -298,6 +316,12 @@ run_group_test() {
       log "motor_id=${motor_id} position mode confirmed"
     else
       log "motor_id=${motor_id} position mode not confirmed within timeout"
+    fi
+    call_motor_cmd "${motor_id}" 0 0.0
+    if wait_motor_state_equals "${motor_id}" "enabled" "True" 3.0; then
+      log "motor_id=${motor_id} enable confirmed"
+    else
+      log "motor_id=${motor_id} enable not confirmed within timeout"
     fi
   done <<< "${group_info}"
 
@@ -328,6 +352,9 @@ PY
     pos_minus_payload+="${motor_id} ${joint_name} ${target_minus}"$'\n'
     pos_home_payload+="${motor_id} ${joint_name} ${current_rad}"$'\n'
   done <<< "${group_positions}"
+
+  log "group=${group_spec} align position command to current feedback"
+  publish_group_targets "position" "0.5" "${pos_home_payload}"
 
   log "group=${group_spec} position +${POS_CMD} rad relative"
   publish_group_targets "position" "${POS_HOLD_SEC}" "${pos_plus_payload}"

@@ -46,6 +46,16 @@ public:
     {
     }
 
+    void setConfig(Config config)
+    {
+        config_ = config;
+    }
+
+    const Config &config() const
+    {
+        return config_;
+    }
+
     AxisReadiness Evaluate(const SharedDriverState::AxisFeedbackState &feedback,
                            const SharedDriverState::AxisCommandState *command,
                            AxisIntent intent,

@@ -74,6 +74,15 @@ void LifecycleDriverOps::setTargets(std::vector<MotorActionExecutor::Target> tar
     axisRecoverTrackers_.clear();
 }
 
+void LifecycleDriverOps::setFeedbackFreshnessTimeoutNs(std::int64_t timeoutNs)
+{
+    std::lock_guard<std::mutex> readinessLock(axisReadinessMutex_);
+    auto config = axisReadinessEvaluator_.config();
+    config.feedbackFreshnessTimeoutNs = timeoutNs;
+    axisReadinessEvaluator_.setConfig(config);
+    axisRecoverTrackers_.clear();
+}
+
 std::vector<MotorActionExecutor::Target> LifecycleDriverOps::targetsSnapshot() const
 {
     std::lock_guard<std::mutex> lock(targetsMutex_);

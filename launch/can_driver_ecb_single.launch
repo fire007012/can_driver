@@ -1,0 +1,84 @@
+<launch>
+  <!-- ECB 单电机联调启动文件：
+       仅加载 1 个 ECB joint，避免四电机健康检查把单电机测试拖入 Faulted。 -->
+  <arg name="joint_name" default="ecb_joint_03"/>
+  <arg name="motor_id" default="0x03"/>
+  <arg name="can_device" default="ecb://192.168.1.30"/>
+  <arg name="ecb_ip" default="192.168.1.30"/>
+  <arg name="ecb_discovery" default="fixed"/>
+  <arg name="control_mode" default="position"/>
+  <arg name="position_scale" default="6.283185307179586e-4"/>
+  <arg name="velocity_scale" default="1.0471975511965978e-2"/>
+  <arg name="ecb_refresh_ms" default="20"/>
+  <arg name="ecb_profile_position_max_rpm" default="500.0"/>
+  <arg name="ecb_profile_position_acceleration_rpm_s" default="300.0"/>
+  <arg name="ecb_profile_position_deceleration_rpm_s" default="-300.0"/>
+  <arg name="ecb_profile_velocity_acceleration_rpm_s" default="300.0"/>
+  <arg name="ecb_profile_velocity_deceleration_rpm_s" default="-300.0"/>
+
+  <arg name="startup_position_sync_timeout_sec" default="3.0"/>
+  <arg name="safety_feedback_freshness_timeout_sec" default="5.0"/>
+  <arg name="motor_query_hz" default="100.0"/>
+  <arg name="legacy_compat_init_device" default="$(arg can_device)"/>
+  <arg name="legacy_compat_autostart" default="true"/>
+  <arg name="legacy_compat_init_loopback" default="false"/>
+  <arg name="legacy_compat_auto_recover" default="false"/>
+  <arg name="legacy_compat_startup_delay" default="1.0"/>
+  <arg name="legacy_compat_retry_period" default="1.0"/>
+  <arg name="legacy_compat_service_timeout" default="10.0"/>
+  <arg name="legacy_compat_max_attempts" default="3"/>
+
+  <env name="ACTUATOR_TOOL_PATH" value="$(find can_driver)/lib/innfos-cpp-sdk/tools/logtool/linux_x86_64"/>
+
+  <rosparam subst_value="true">
+    can_driver_node:
+      control_frequency: 100.0
+      debug_bypass_ros_control: true
+      motor_query_hz: $(arg motor_query_hz)
+      pp_fast_write_enabled: true
+      startup_position_sync_timeout_sec: $(arg startup_position_sync_timeout_sec)
+      safety_feedback_freshness_timeout_sec: $(arg safety_feedback_freshness_timeout_sec)
+      safety_stop_on_fault: true
+      safety_require_enabled_for_motion: true
+      lifecycle_require_enabled_for_running: true
+      max_position_step_rad: 0.0
+      safety_hold_after_device_recover: true
+      joints:
+        - name: $(arg joint_name)
+          motor_id: $(arg motor_id)
+          protocol: ECB
+          can_device: $(arg can_device)
+          ecb_ip: $(arg ecb_ip)
+          ecb_discovery: $(arg ecb_discovery)
+          ecb_refresh_ms: $(arg ecb_refresh_ms)
+          control_mode: $(arg control_mode)
+          position_scale: $(arg position_scale)
+          velocity_scale: $(arg velocity_scale)
+          ecb_profile_position_max_rpm: $(arg ecb_profile_position_max_rpm)
+          ecb_profile_position_acceleration_rpm_s: $(arg ecb_profile_position_acceleration_rpm_s)
+          ecb_profile_position_deceleration_rpm_s: $(arg ecb_profile_position_deceleration_rpm_s)
+          ecb_profile_velocity_acceleration_rpm_s: $(arg ecb_profile_velocity_acceleration_rpm_s)
+          ecb_profile_velocity_deceleration_rpm_s: $(arg ecb_profile_velocity_deceleration_rpm_s)
+  </rosparam>
+
+  <rosparam file="$(find can_driver)/config/ros_controllers.yaml" command="load"/>
+
+  <node pkg="can_driver" type="can_driver_node" name="can_driver_node" output="screen"/>
+
+  <node pkg="can_driver" type="lifecycle_compat_autostart.py" name="lifecycle_compat_autostart"
+        output="screen" if="$(arg legacy_compat_autostart)">
+    <param name="driver_ns" value="/can_driver_node"/>
+    <param name="init_device" value="$(arg legacy_compat_init_device)"/>
+    <param name="init_loopback" value="$(arg legacy_compat_init_loopback)"/>
+    <param name="auto_enable" value="true"/>
+    <param name="auto_resume" value="true"/>
+    <param name="auto_recover" value="$(arg legacy_compat_auto_recover)"/>
+    <param name="startup_delay" value="$(arg legacy_compat_startup_delay)"/>
+    <param name="retry_period" value="$(arg legacy_compat_retry_period)"/>
+    <param name="service_timeout" value="$(arg legacy_compat_service_timeout)"/>
+    <param name="max_attempts" value="$(arg legacy_compat_max_attempts)"/>
+  </node>
+
+  <node pkg="controller_manager" type="spawner" name="controller_spawner"
+        args="joint_state_controller"/>
+</launch>

@@ -582,7 +582,8 @@ bool DeviceManager::ensureProtocol(const std::string &device, CanType type)
     std::unique_lock<std::shared_mutex> lock(mutex_);
     if (type == CanType::ECB) {
         if (ecbProtocols_.find(device) == ecbProtocols_.end()) {
-            ecbProtocols_[device] = std::make_shared<InnfosEcbProtocol>(device);
+            ecbProtocols_[device] =
+                std::make_shared<InnfosEcbProtocol>(device, sharedState_, device);
             ecbProtocols_[device]->setRefreshRateHz(effectiveRefreshRateHzLocked(device));
         }
         ecbDevices_.insert(device);
@@ -647,7 +648,8 @@ bool DeviceManager::initDevice(const std::string &device,
     }
     if (!ecbIds.empty() && isEcbDevice(device)) {
         if (ecbProtocols_.find(device) == ecbProtocols_.end()) {
-            ecbProtocols_[device] = std::make_shared<InnfosEcbProtocol>(device);
+            ecbProtocols_[device] =
+                std::make_shared<InnfosEcbProtocol>(device, sharedState_, device);
         }
         ecbProtocols_[device]->setRefreshRateHz(effectiveRefreshRateHzLocked(device));
         ecbProtocols_[device]->initializeMotorRefresh(ecbIds);

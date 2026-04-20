@@ -185,8 +185,10 @@ private:
     double ppCspDefaultVelocityRadS_{0.0};
     double startupPositionSyncTimeoutSec_{1.0};
     double startupProbeQueryHz_{5.0};
+    double safetyFeedbackFreshnessTimeoutSec_{0.5};
     bool safetyStopOnFault_{true};
     bool safetyRequireEnabledForMotion_{true};
+    bool lifecycleRequireEnabledForRunning_{true};
     double maxPositionStepRad_{0.0};
     bool safetyHoldAfterDeviceRecover_{true};
 

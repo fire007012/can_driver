@@ -167,6 +167,50 @@ can_driver_node:
     # 是否启用 ECB 由 joint 自身的 protocol: ECB 决定，不再单独维护专用配置文件。
     # 若当前机器只接 ECB，请在本标准 joints 列表中保留 ECB 条目，并移除/注释未接入的 SocketCAN 关节。
     # ECB_AUTO_PROBE_BEGIN
+    - name: ecb_joint_02
+      # 由 scripts/discover_ecb_and_enable_yaml.sh 自动回填（固定 IP）
+      motor_id: 0x02
+      protocol: ECB
+      can_device: ecb://192.168.1.30
+      ecb_ip: 192.168.1.30
+      ecb_discovery: fixed
+      ecb_refresh_ms: 20
+      control_mode: position
+      position_scale: 6.283185307179586e-4
+      velocity_scale: 1.0471975511965978e-2
+    - name: ecb_joint_03
+      # 由 scripts/discover_ecb_and_enable_yaml.sh 自动回填（固定 IP）
+      motor_id: 0x03
+      protocol: ECB
+      can_device: ecb://192.168.1.30
+      ecb_ip: 192.168.1.30
+      ecb_discovery: fixed
+      ecb_refresh_ms: 20
+      control_mode: position
+      position_scale: 6.283185307179586e-4
+      velocity_scale: 1.0471975511965978e-2
+    - name: ecb_joint_04
+      # 由 scripts/discover_ecb_and_enable_yaml.sh 自动回填（固定 IP）
+      motor_id: 0x04
+      protocol: ECB
+      can_device: ecb://192.168.1.30
+      ecb_ip: 192.168.1.30
+      ecb_discovery: fixed
+      ecb_refresh_ms: 20
+      control_mode: position
+      position_scale: 6.283185307179586e-4
+      velocity_scale: 1.0471975511965978e-2
+    - name: ecb_joint_05
+      # 由 scripts/discover_ecb_and_enable_yaml.sh 自动回填（固定 IP）
+      motor_id: 0x05
+      protocol: ECB
+      can_device: ecb://192.168.1.30
+      ecb_ip: 192.168.1.30
+      ecb_discovery: fixed
+      ecb_refresh_ms: 20
+      control_mode: position
+      position_scale: 6.283185307179586e-4
+      velocity_scale: 1.0471975511965978e-2
     # ECB_AUTO_PROBE_END
 
     # --------------------------------------------------------------------------
