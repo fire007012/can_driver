@@ -318,6 +318,10 @@ bool parse(const XmlRpc::XmlRpcValue &jointList,
                                             &jc.ipGoalTolerance, errorMsg)) {
             return false;
         }
+        if (!parseNonNegativeOptionalDouble(jv, "command_alignment_tolerance", jc.name,
+                                            &jc.commandAlignmentTolerance, errorMsg)) {
+            return false;
+        }
 
         if (jv.hasMember("ecb_ip")) {
             if (jv["ecb_ip"].getType() != XmlRpc::XmlRpcValue::TypeString) {

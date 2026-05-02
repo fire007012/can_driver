@@ -172,7 +172,9 @@ inline double controlModeScale(const CanDriverJointConfig &joint, AxisControlMod
 inline double controlModeAlignmentTolerance(const CanDriverJointConfig &joint,
                                             AxisControlMode mode)
 {
-    return std::max(std::fabs(controlModeScale(joint, mode)), 1e-9);
+    return std::max({std::fabs(controlModeScale(joint, mode)),
+                     joint.commandAlignmentTolerance,
+                     1e-9});
 }
 
 inline bool controlModeTargetNearActual(const CanDriverJointConfig &joint, AxisControlMode mode)

@@ -34,6 +34,7 @@ struct ParsedJointConfig {
     double ipMaxAcceleration{2.0};       ///< IP executor 最大加速度（rad/s^2）
     double ipMaxJerk{10.0};              ///< IP executor 最大 jerk（rad/s^3）
     double ipGoalTolerance{1e-3};        ///< IP executor 终点容差（rad）
+    double commandAlignmentTolerance{0.0}; ///< 模式切换后首帧对齐容差（关节单位）
     std::string ecbIp;                   ///< ECB 固定 IP（可选）
     bool ecbAutoDiscovery{false};        ///< ECB 是否自动发现
     int ecbRefreshMs{20};                ///< ECB 刷新周期（ms）

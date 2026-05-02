@@ -48,6 +48,7 @@ struct CanDriverJointConfig {
     double ipMaxAcceleration{2.0};
     double ipMaxJerk{10.0};
     double ipGoalTolerance{1e-3};
+    double commandAlignmentTolerance{0.0};
     std::string ecbIp;
     bool ecbAutoDiscovery{false};
     int ecbRefreshMs{20};

@@ -664,6 +664,7 @@ bool CanDriverHW::parseAndSetupJoints(const ros::NodeHandle &pnh)
         jc.ipMaxAcceleration = p.ipMaxAcceleration;
         jc.ipMaxJerk = p.ipMaxJerk;
         jc.ipGoalTolerance = p.ipGoalTolerance;
+        jc.commandAlignmentTolerance = p.commandAlignmentTolerance;
         jc.ecbIp = p.ecbIp;
         jc.ecbAutoDiscovery = p.ecbAutoDiscovery;
         jc.ecbRefreshMs = p.ecbRefreshMs;
@@ -762,9 +763,20 @@ void CanDriverHW::loadJointLimits(const ros::NodeHandle &pnh)
             jc.limits = limits;
             jc.hasLimits = true;
             if (can_driver::controlModeUsesVelocitySemantics(jc.controlMode)) {
-                joint_limits_interface::VelocityJointSaturationHandle handle(
-                    velIface_.getHandle(jc.name), limits);
-                velLimitsIface_.registerHandle(handle);
+                // VelocityJointSaturationHandle requires an explicit velocity limit.
+                // For emergency direct-drive joints like the gripper, rosparam may
+                // intentionally disable all limits; in that case keep the raw
+                // command path unclamped instead of aborting during init.
+                if (limits.has_velocity_limits) {
+                    joint_limits_interface::VelocityJointSaturationHandle handle(
+                        velIface_.getHandle(jc.name), limits);
+                    velLimitsIface_.registerHandle(handle);
+                } else {
+                    jc.hasLimits = false;
+                    ROS_WARN("[CanDriverHW] Joint '%s': velocity semantics but no velocity "
+                             "limit is specified; skipping ros_control saturation.",
+                             jc.name.c_str());
+                }
             } else {
                 joint_limits_interface::PositionJointSaturationHandle handle(
                     posIface_.getHandle(jc.name), limits);

@@ -3502,6 +3502,43 @@ TEST_F(CanDriverHWSmokeTest, ResumeAllowsAlignedCspTargetWithoutCommandChange)
     EXPECT_EQ(fakeDm->protocol()->lastQuickPosition(), 1024);
 }
 
+TEST_F(CanDriverHWSmokeTest, ResumeAllowsNearAlignedCspTargetWithinConfiguredTolerance)
+{
+    auto fakeDm = std::make_shared<FakeDeviceManager>();
+    fakeDm->protocol()->setFeedbackPosition(1024);
+
+    CanDriverHW hw(fakeDm);
+
+    ros::NodeHandle nh;
+    ros::NodeHandle pnh(uniqueNs("can_driver_hw_smoke_resume_near_aligned_csp"));
+
+    auto joints = makeSingleCspJoint();
+    joints[0]["command_alignment_tolerance"] = 0.01;
+    pnh.setParam("joints", joints);
+    pnh.setParam("motor_state_period_sec", 0.05);
+
+    ASSERT_TRUE(hw.init(nh, pnh));
+
+    const auto initResult = hw.operationalCoordinator().RequestInit("fake0", false);
+    ASSERT_TRUE(initResult.ok) << initResult.message;
+
+    auto *posIface = hw.get<hardware_interface::PositionJointInterface>();
+    ASSERT_NE(posIface, nullptr);
+
+    auto handle = posIface->getHandle("test_arm");
+    const double nearAlignedTarget =
+        1024.0 * (2.0 * M_PI / 65536.0) - 0.0075;
+    handle.setCommand(nearAlignedTarget);
+
+    const auto releaseResult = hw.operationalCoordinator().RequestRelease();
+    ASSERT_TRUE(releaseResult.ok) << releaseResult.message;
+
+    hw.write(ros::Time::now(), ros::Duration(0.01));
+
+    EXPECT_EQ(fakeDm->protocol()->quickPositionCalls(), 2);
+    EXPECT_EQ(fakeDm->protocol()->lastQuickPositionMotor(), 0x05u);
+}
+
 TEST_F(CanDriverHWSmokeTest, CspReleaseRequiresSharedStateModeMatchBeforeRunning)
 {
     auto fakeDm = std::make_shared<FakeDeviceManager>(true);

@@ -435,6 +435,7 @@ TEST(JointConfigParser, ParseReadsIpExecutorLimits)
     joint["ip_max_acceleration"] = 3.5;
     joint["ip_max_jerk"] = 12.5;
     joint["ip_goal_tolerance"] = 0.0025;
+    joint["command_alignment_tolerance"] = 0.01;
     auto list = makeJointList(joint);
 
     std::vector<joint_config_parser::ParsedJointConfig> out;
@@ -445,6 +446,7 @@ TEST(JointConfigParser, ParseReadsIpExecutorLimits)
     EXPECT_DOUBLE_EQ(out[0].ipMaxAcceleration, 3.5);
     EXPECT_DOUBLE_EQ(out[0].ipMaxJerk, 12.5);
     EXPECT_DOUBLE_EQ(out[0].ipGoalTolerance, 0.0025);
+    EXPECT_DOUBLE_EQ(out[0].commandAlignmentTolerance, 0.01);
 }
 
 TEST(JointConfigParser, ParseRejectsInvalidIpMaxVelocity)
