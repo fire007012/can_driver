@@ -77,6 +77,14 @@ can_driver_node:
   pp_zero_offset_persist_on_apply_to_motor: false
   # pp_local_zero_offset_file: /home/dianhua/.ros/can_driver_pp_zero_offsets.txt
 
+  # 关节限位 rosparam 覆盖。
+  # 这里显式关闭夹爪速度/位置限位，保留原始电机轴 rad / rad/s 语义直通。
+  joint_limits:
+    left_gripper_finger_joint:
+      has_velocity_limits: false
+      has_acceleration_limits: false
+      has_position_limits: false
+
   # --------------------------------------------------------------------------
   # joints：关节列表
   # --------------------------------------------------------------------------
@@ -115,6 +123,7 @@ can_driver_node:
       ip_max_acceleration: 0.8
       ip_max_jerk: 4.0
       ip_goal_tolerance: 0.001
+      command_alignment_tolerance: 0.01
 
 
     - name: wrist_pitch_joint    # 腕部俯仰（第 4 轴）
@@ -129,6 +138,7 @@ can_driver_node:
       ip_max_acceleration: 2.0
       ip_max_jerk: 10.0
       ip_goal_tolerance: 0.001
+      command_alignment_tolerance: 0.01
 
     - name: wrist_roll_joint     # 腕部滚转（第 5 轴）
       safety_group: arm
@@ -138,6 +148,7 @@ can_driver_node:
       control_mode: csp
       position_scale: 65536  # 16-bit 编码器，PPR → 驱动自动换算为 2π/65536 rad/count
       velocity_scale: 65536
+      command_alignment_tolerance: 0.01
 
     - name: wrist_yaw_joint      # 腕部偏航（第 6 轴）
       safety_group: arm
@@ -148,22 +159,22 @@ can_driver_node:
       position_scale: 65536  # 16-bit 编码器，PPR → 驱动自动换算为 2π/65536 rad/count
       velocity_scale: 65536
       direction_sign: -1.0
+      command_alignment_tolerance: 0.01
 
     - name: left_gripper_finger_joint  # 左夹爪（第 7 轴）
       safety_group: arm
       motor_id: 0x17
       protocol: PP
       can_device: canable1
-      control_mode: csp
-      # 夹爪在 URDF/MoveIt 中是 prismatic，命令单位是 m。
-      # 这里不能填 65536；应填写 raw * scale = m。
-      # 当前按实测 141.9 deg 电机转角 = 46 mm 夹爪行程配置：
-      # 0.046 / (65536 * 141.9 / 360) = 1.7807297172304439e-6 m/count。
-      # 若实机传动比不同，只校准这两个 scale。
-      position_scale: 0.0000017807297172304439
-      velocity_scale: 0.0000017807297172304439
-      pp_position_default_velocity: 0.05
-      pp_csp_default_velocity: 0.05
+      control_mode: velocity
+      # 紧急直控模式：夹爪直接暴露原始电机轴语义。
+      # 这里填写 65536，解析后为 2π/65536 rad/count，
+      # 因此上层 velocity / position 命令都按 rad / rad/s 处理，不再做米制行程抽象。
+      position_scale: 65536
+      velocity_scale: 65536
+      pp_position_default_velocity: 1
+      pp_csp_default_velocity: 1
+      command_alignment_tolerance: 0.01
 
     # --- 底盘履带关节（DM 协议，速度模式）---
     # 达妙履带只作为 velocity 语义关节接入，由协议后端自行决定具体报文格式。
