@@ -23,6 +23,11 @@ bool snapshotTargetAlreadyAligned(const CommandGate::Snapshot &snapshot)
     return snapshot.targetNearActual;
 }
 
+bool snapshotIsPositionCommand(const CommandGate::Snapshot &snapshot)
+{
+    return snapshot.controlMode != can_driver::AxisControlMode::Velocity;
+}
+
 } // namespace
 
 void CommandGate::configure(std::function<std::vector<Snapshot>()> snapshotProvider,
@@ -96,13 +101,17 @@ bool CommandGate::consumeFreshCommandLatchIfSatisfied()
         return true;
     }
 
-    bool satisfied = false;
+    bool satisfied = true;
     for (std::size_t i = 0; i < snapshots.size(); ++i) {
         const auto &current = snapshots[i];
         const auto &baseline = baselines_[i];
-        if (snapshotCommandChanged(current, baseline) ||
-            snapshotTargetAlreadyAligned(current)) {
-            satisfied = true;
+        const bool commandChanged = snapshotCommandChanged(current, baseline);
+        // A stale trajectory command can change from the held value to zero
+        // while resuming. Position commands are only fresh when aligned with
+        // live feedback; velocity commands can qualify by freshness alone.
+        if (!snapshotTargetAlreadyAligned(current) &&
+            !(commandChanged && !snapshotIsPositionCommand(current))) {
+            satisfied = false;
             break;
         }
     }
