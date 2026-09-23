@@ -2246,6 +2246,23 @@ TEST_F(CanDriverHWSmokeTest, DispatchPreparedCommandsKeepsPrepareTimeRoutingSnap
     EXPECT_EQ(fakeDm->protocol()->lastQuickPosition(), rawFromPprRadians(1.0));
 }
 
+TEST(CommandGate, RequiresEveryPositionAxisToBeSafeBeforeRelease)
+{
+    std::vector<CommandGate::Snapshot> snapshots(2);
+    snapshots[0].controlMode = can_driver::AxisControlMode::Csp;
+    snapshots[1].controlMode = can_driver::AxisControlMode::Csp;
+    snapshots[0].targetNearActual = true;
+    snapshots[1].targetNearActual = false;
+
+    CommandGate gate;
+    gate.configure([&snapshots]() { return snapshots; }, []() {});
+    gate.armFreshCommandLatch();
+
+    EXPECT_FALSE(gate.consumeFreshCommandLatchIfSatisfied());
+    snapshots[1].targetNearActual = true;
+    EXPECT_TRUE(gate.consumeFreshCommandLatchIfSatisfied());
+}
+
 TEST_F(CanDriverHWSmokeTest, SyncJointFeedbackAppliesNegativeDirectionSign)
 {
     auto fakeDm = std::make_shared<FakeDeviceManager>();
@@ -3401,6 +3418,41 @@ TEST_F(CanDriverHWSmokeTest, ResumeAllowsAlignedCspTargetWithoutCommandChange)
 
     EXPECT_EQ(fakeDm->protocol()->quickPositionCalls(), 2);
     EXPECT_EQ(fakeDm->protocol()->lastQuickPositionMotor(), 0x05u);
+    EXPECT_EQ(fakeDm->protocol()->lastQuickPosition(), 1024);
+}
+
+
+TEST_F(CanDriverHWSmokeTest, ResumeBlocksChangedUnalignedCspTarget)
+{
+    auto fakeDm = std::make_shared<FakeDeviceManager>();
+    fakeDm->protocol()->setFeedbackPosition(1024);
+
+    CanDriverHW hw(fakeDm);
+    ros::NodeHandle nh;
+    ros::NodeHandle pnh(uniqueNs("can_driver_hw_smoke_resume_blocks_unaligned_csp"));
+    pnh.setParam("joints", makeSingleCspJoint());
+    pnh.setParam("motor_state_period_sec", 0.05);
+
+    ASSERT_TRUE(hw.init(nh, pnh));
+    const auto initResult = hw.operationalCoordinator().RequestInit("fake0", false);
+    ASSERT_TRUE(initResult.ok) << initResult.message;
+    auto *posIface = hw.get<hardware_interface::PositionJointInterface>();
+    ASSERT_NE(posIface, nullptr);
+    auto handle = posIface->getHandle("test_arm");
+
+    // A trajectory controller may restore a stale zero target during resume.
+    // It must not be treated as a fresh, safe position command.
+    handle.setCommand(0.0);
+    const auto releaseResult = hw.operationalCoordinator().RequestRelease();
+    ASSERT_TRUE(releaseResult.ok) << releaseResult.message;
+    hw.write(ros::Time::now(), ros::Duration(0.01));
+    EXPECT_EQ(fakeDm->protocol()->quickPositionCalls(), 1);
+    EXPECT_EQ(fakeDm->protocol()->lastQuickPosition(), 1024);
+
+    const double alignedTarget = 1024.0 * (2.0 * M_PI / 65536.0);
+    handle.setCommand(alignedTarget);
+    hw.write(ros::Time::now(), ros::Duration(0.01));
+    EXPECT_EQ(fakeDm->protocol()->quickPositionCalls(), 2);
     EXPECT_EQ(fakeDm->protocol()->lastQuickPosition(), 1024);
 }
 
