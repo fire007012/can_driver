@@ -6,7 +6,7 @@
 #include <chrono>
 #include <cmath>
 
-#include <ros/ros.h>
+#include "can_driver/ros2_compat.hpp"
 
 namespace {
 

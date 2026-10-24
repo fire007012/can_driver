@@ -1,6 +1,6 @@
 #include "can_driver/SocketCanController.h"
 #include <fcntl.h>
-#include <ros/console.h>
+#include "can_driver/ros2_compat.hpp"
 #include <errno.h>
 #include <linux/can/raw.h>
 #include <net/if.h>

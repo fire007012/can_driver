@@ -11,8 +11,8 @@ can_driver 多电机实时调试 UI（适配新版生命周期架构）
   - 全局一键操作 + 单电机独立操作
 
 用法：
-  rosrun can_driver realtime_motor_ui.py
-  rosrun can_driver realtime_motor_ui.py _init_loopback:=false _stream_hz:=100
+  ros2 run can_driver realtime_motor_ui.py
+  ros2 run can_driver realtime_motor_ui.py --ros-args -p init_loopback:=false -p stream_hz:=100
 """
 
 import threading
@@ -21,8 +21,8 @@ from tkinter import ttk
 import math
 from pathlib import Path
 
-import rospy
-import rospkg
+import rclpy
+from ament_index_python.packages import get_package_share_directory
 import yaml
 from std_msgs.msg import Float64, String
 from std_srvs.srv import Trigger
@@ -42,6 +42,36 @@ MODE_NAMES = {0: "未知", 1: "位置", 2: "速度", 3: "CSP", 5: "CSP"}
 
 NS = "/can_driver_node"
 DM_DEFAULT_SI_SCALE = 1e-4
+
+
+class Ros2ServiceProxy:
+    """Synchronous keyword-call wrapper for a ROS2 service client.
+
+    The UI invokes services from worker threads, while the node spins in its
+    own executor thread. Waiting on an event avoids nested spin calls.
+    """
+
+    def __init__(self, node, service_type, name, timeout=5.0):
+        self.node = node
+        self.service_type = service_type
+        self.name = name
+        self.timeout = timeout
+        self.client = node.create_client(service_type, name)
+        if not self.client.wait_for_service(timeout_sec=timeout):
+            node.get_logger().warning(f"服务 {name} 等待超时，继续启动")
+
+    def __call__(self, **kwargs):
+        request = self.service_type.Request()
+        for key, value in kwargs.items():
+            setattr(request, key, value)
+        future = self.client.call_async(request)
+        completed = threading.Event()
+        future.add_done_callback(lambda _future: completed.set())
+        if not completed.wait(timeout=self.timeout):
+            raise RuntimeError(f"服务调用超时: {self.name}")
+        if future.exception() is not None:
+            raise RuntimeError(str(future.exception()))
+        return future.result()
 
 
 def normalize_scale(value, default=1.0):
@@ -181,7 +211,14 @@ class MotorPanel:
 
 class RealtimeMotorUI:
     def __init__(self) -> None:
-        rospy.init_node("realtime_motor_ui", anonymous=True)
+        self.node = rclpy.create_node("realtime_motor_ui")
+        self.node.declare_parameter("config_file", "")
+        self.node.declare_parameter("init_loopback", False)
+        self.node.declare_parameter("stream_hz", 20.0)
+        self._spin_thread = threading.Thread(
+            target=rclpy.spin, args=(self.node,), daemon=True
+        )
+        self._spin_thread.start()
 
         self.node_cfg = self._load_node_cfg()
         self.joints = self._load_joints(self.node_cfg)
@@ -190,14 +227,14 @@ class RealtimeMotorUI:
                 f"未读取到 {NS}/joints 配置，且默认 can_driver.yaml 中也没有可用 joints"
             )
         self.can_device = self.joints[0]["can_device"]
-        self.init_loopback = bool(rospy.get_param("~init_loopback", False))
+        self.init_loopback = bool(self.node.get_parameter("init_loopback").value)
         default_stream_hz = float(
             self.node_cfg.get(
                 "control_frequency",
-                rospy.get_param(f"{NS}/control_frequency", 20.0),
+                self.node.get_parameter("stream_hz").value,
             )
         )
-        self.stream_hz = max(1.0, float(rospy.get_param("~stream_hz", default_stream_hz)))
+        self.stream_hz = max(1.0, default_stream_hz)
         self.stream_period_ms = max(4, int(round(1000.0 / self.stream_hz)))
 
         # --- 发布器 ---
@@ -205,11 +242,11 @@ class RealtimeMotorUI:
         self.pub_vel = {}
         for j in self.joints:
             name = j["name"]
-            self.pub_pos[name] = rospy.Publisher(
-                f"{NS}/motor/{name}/cmd_position", Float64, queue_size=1
+            self.pub_pos[name] = self.node.create_publisher(
+                Float64, f"{NS}/motor/{name}/cmd_position", 1
             )
-            self.pub_vel[name] = rospy.Publisher(
-                f"{NS}/motor/{name}/cmd_velocity", Float64, queue_size=1
+            self.pub_vel[name] = self.node.create_publisher(
+                Float64, f"{NS}/motor/{name}/cmd_velocity", 1
             )
 
         # --- 服务代理 ---
@@ -227,8 +264,12 @@ class RealtimeMotorUI:
 
         # --- 订阅状态 ---
         self.motor_panels: dict[str, MotorPanel] = {}
-        rospy.Subscriber(f"{NS}/motor_states", MotorState, self._on_motor_state)
-        rospy.Subscriber(f"{NS}/lifecycle_state", String, self._on_lifecycle_state)
+        self.node.create_subscription(
+            MotorState, f"{NS}/motor_states", self._on_motor_state, 10
+        )
+        self.node.create_subscription(
+            String, f"{NS}/lifecycle_state", self._on_lifecycle_state, 10
+        )
 
         # --- UI ---
         self.root = tk.Tk()
@@ -294,38 +335,19 @@ class RealtimeMotorUI:
 
     # ------------------------------------------------------------------ load
     def _default_config_file(self):
-        config_file = rospy.get_param("~config_file", "")
+        config_file = self.node.get_parameter("config_file").value
         if config_file:
             return config_file
         try:
-            pkg_dir = rospkg.RosPack().get_path("can_driver")
+            pkg_dir = get_package_share_directory("can_driver")
             return str(Path(pkg_dir) / "config" / "can_driver.yaml")
-        except rospkg.ResourceNotFound:
+        except Exception:
             return ""
 
     def _load_node_cfg(self):
-        param_cfg = rospy.get_param(NS, None)
-        if isinstance(param_cfg, dict) and param_cfg.get("joints"):
-            cfg = dict(param_cfg)
-            cfg["_source"] = "param"
-            return cfg
-
         file_cfg, config_file = self._load_node_cfg_from_file()
         if file_cfg:
-            if isinstance(param_cfg, dict):
-                rospy.logwarn(
-                    f"[UI] 参数服务器中的 {NS} 缺少可用 joints，已回退到配置文件: {config_file}"
-                )
-            else:
-                rospy.logwarn(
-                    f"[UI] 参数服务器中不存在 {NS}，已回退到配置文件: {config_file}"
-                )
             return file_cfg
-
-        if isinstance(param_cfg, dict):
-            cfg = dict(param_cfg)
-            cfg["_source"] = "param"
-            return cfg
         return {"_source": "missing"}
 
     def _load_node_cfg_from_file(self):
@@ -337,7 +359,7 @@ class RealtimeMotorUI:
             with open(config_file, "r", encoding="utf-8") as f:
                 data = yaml.safe_load(f) or {}
         except Exception as exc:
-            rospy.logwarn(f"[UI] 读取配置文件失败: {config_file} ({exc})")
+            self.node.get_logger().warning(f"[UI] 读取配置文件失败: {config_file} ({exc})")
             return None, config_file
 
         node_cfg = data.get("can_driver_node", {})
@@ -354,10 +376,12 @@ class RealtimeMotorUI:
         for j in joints:
             protocol = str(j.get("protocol", ""))
             default_scale = default_scale_for_protocol(protocol)
+            raw_motor_id = j.get("motor_id", 0)
+            motor_id = int(raw_motor_id, 0) if isinstance(raw_motor_id, str) else int(raw_motor_id)
             out.append(
                 {
                     "name": str(j.get("name", "")),
-                    "motor_id": int(j.get("motor_id", 0)),
+                    "motor_id": motor_id,
                     "protocol": protocol,
                     "can_device": str(j.get("can_device", "canable0")),
                     "control_mode": str(j.get("control_mode", "position")),
@@ -374,11 +398,7 @@ class RealtimeMotorUI:
 
     def _wait_service(self, name, srv_type, timeout=5.0):
         full = f"{NS}/{name}"
-        try:
-            rospy.wait_for_service(full, timeout=timeout)
-        except rospy.ROSException:
-            rospy.logwarn(f"[UI] 服务 {full} 等待超时，继续启动")
-        return rospy.ServiceProxy(full, srv_type)
+        return Ros2ServiceProxy(self.node, srv_type, full, timeout)
 
     # --------------------------------------------------------------- build UI
     def _build_ui(self) -> None:
@@ -1249,6 +1269,8 @@ class RealtimeMotorUI:
         except Exception:
             pass
         self.root.destroy()
+        self.node.destroy_node()
+        rclpy.shutdown()
 
     def _refresh_single_axis_status(self) -> None:
         cfg = self._get_joint_cfg(self.selected_joint.get())
@@ -1272,8 +1294,9 @@ class RealtimeMotorUI:
 
 if __name__ == "__main__":
     try:
+        rclpy.init(args=None)
         ui = RealtimeMotorUI()
         ui.run()
     except Exception as e:
-        rospy.logerr("[realtime_motor_ui] 启动失败: %s", e)
+        print(f"[realtime_motor_ui] 启动失败: {e}")
         raise

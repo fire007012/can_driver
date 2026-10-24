@@ -5,6 +5,11 @@
 
 set -u
 
+SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
+# shellcheck disable=SC1091
+source "${SCRIPT_DIR}/ros2_cli_helpers.sh"
+export CAN_DRIVER_CONFIG="${CAN_DRIVER_CONFIG:-${SCRIPT_DIR}/../config/can_driver.yaml}"
+
 NS="${NS:-/can_driver_node}"
 MOTOR_ID="${MOTOR_ID:-22}"
 CAN_DEV="${CAN_DEV:-canable0}"
@@ -33,7 +38,7 @@ need_cmd() {
 
 svc_call_set_zero_limit() {
   local req="$1"
-  rosservice call "${NS}/set_zero_limit" "$req"
+  ros2_service_call "${NS}/set_zero_limit" "$req"
 }
 
 extract_success() {
@@ -73,10 +78,10 @@ probe_tx_visibility() {
   sleep 0.35
 
   # 触发主站发命令：切模式 + 位置命令
-  rosservice call "${NS}/motor_command" "motor_id: ${MOTOR_ID}
+  ros2_service_call "${NS}/motor_command" "motor_id: ${MOTOR_ID}
 command: 3
 value: 0.0" >/dev/null 2>&1 || true
-  rostopic pub -1 "${NS}/motor/${JOINT_NAME}/cmd_position" std_msgs/Float64 "data: 0.0" >/dev/null 2>&1 || true
+  ros2_topic_pub_once "${NS}/motor/${JOINT_NAME}/cmd_position" std_msgs/Float64 "{data: 0.0}" >/dev/null 2>&1 || true
 
   sleep 1.0
   kill "$cap_pid" >/dev/null 2>&1 || true
@@ -91,10 +96,12 @@ value: 0.0" >/dev/null 2>&1 || true
 
 find_velocity_motor_id() {
   python3 - <<'PY'
-import rospy
+import os
 import sys
-rospy.init_node('find_vel_joint_tmp', anonymous=True, disable_signals=True)
-joints = rospy.get_param('/can_driver_node/joints', [])
+import yaml
+with open(os.environ['CAN_DRIVER_CONFIG'], encoding='utf-8') as stream:
+    root = yaml.safe_load(stream) or {}
+joints = (root.get('can_driver_node', root) or {}).get('joints', [])
 for j in joints:
     if str(j.get('control_mode','')) == 'velocity':
         print(int(j.get('motor_id', 0)))
@@ -104,20 +111,18 @@ PY
 }
 
 main() {
-  need_cmd rosservice
-  need_cmd rosparam
-  need_cmd rostopic
+  need_cmd ros2
   need_cmd candump
   need_cmd python3
 
-  if ! rosservice list >/dev/null 2>&1; then
-    echo "无法连接 ROS Master，请先启动系统。"
+  if ! ros2 service list >/dev/null 2>&1; then
+    echo "无法连接 ROS2 graph，请先启动系统。"
     exit 2
   fi
 
   # T1: 接口可用性
-  if rosservice list | grep -q "${NS}/set_zero_limit"; then
-    if rossrv show can_driver/SetZeroLimit >/dev/null 2>&1; then
+  if ros2 service list | grep -q "${NS}/set_zero_limit"; then
+    if ros2 interface show can_driver/srv/SetZeroLimit >/dev/null 2>&1; then
       pass "T1 服务存在且类型可解析"
     else
       fail "T1 服务类型 can_driver/SetZeroLimit 不可解析"
@@ -146,7 +151,7 @@ use_urdf_limits: false
 apply_to_motor: true"
   CAN_T2="${TMP_DIR}/t2_can.log"
   capture_can_around_call "$REQ_T2" "$CAN_T2"
-  if grep -q "success: True" "${CAN_T2}.svc"; then
+  if grep -qi "^success:[[:space:]]*true" "${CAN_T2}.svc"; then
     if has_limit_frames_for_motor "$CAN_T2"; then
       pass "T2 成功并检测到物理限位相关寄存器写帧"
     else
@@ -181,7 +186,7 @@ use_urdf_limits: false
 apply_to_motor: false"
   CAN_T3="${TMP_DIR}/t3_can.log"
   capture_can_around_call "$REQ_T3" "$CAN_T3"
-  if grep -q "success: True" "${CAN_T3}.svc"; then
+    if grep -qi "^success:[[:space:]]*true" "${CAN_T3}.svc"; then
     if has_limit_frames_for_motor "$CAN_T3"; then
       fail "T3 apply_to_motor=false 但仍抓到物理限位寄存器写帧"
     elif [[ "$TX_VISIBLE" -eq 0 ]]; then
@@ -194,7 +199,7 @@ apply_to_motor: false"
   fi
 
   # T4: URDF限位读取（若无robot_description则跳过）
-  if rosparam get /robot_description >/dev/null 2>&1; then
+  if ros2 param get /robot_state_publisher robot_description >/dev/null 2>&1; then
     REQ_T4="motor_id: ${MOTOR_ID}
 zero_offset_rad: 0.2
 use_current_position_as_zero: false
@@ -204,7 +209,7 @@ use_urdf_limits: true
 apply_to_motor: false"
     OUT_T4="${TMP_DIR}/t4.out"
     svc_call_set_zero_limit "$REQ_T4" >"$OUT_T4" 2>&1 || true
-    if grep -q "success: True" "$OUT_T4"; then
+    if grep -qi "^success:[[:space:]]*true" "$OUT_T4"; then
       pass "T4 URDF限位读取成功"
     else
       fail "T4 URDF限位读取失败：$(tr '\n' ' ' < "$OUT_T4")"
@@ -224,7 +229,7 @@ max_position_rad: 1000.0
 use_urdf_limits: false
 apply_to_motor: false"
   svc_call_set_zero_limit "$REQ_BASE" >"$OUT_BASE" 2>&1 || true
-  if grep -q "success: True" "$OUT_BASE"; then
+  if grep -qi "^success:[[:space:]]*true" "$OUT_BASE"; then
     CUR_POS="$(extract_value current_position_rad < "$OUT_BASE")"
     if [[ -n "$CUR_POS" ]]; then
       LOW="$(python3 - <<PY
@@ -246,7 +251,7 @@ max_position_rad: ${HIGH}
 use_urdf_limits: false
 apply_to_motor: true"
       svc_call_set_zero_limit "$REQ_T5" >"$OUT_T5" 2>&1 || true
-      if grep -q "success: False" "$OUT_T5" && grep -qi "outside" "$OUT_T5"; then
+      if grep -qi "^success:[[:space:]]*false" "$OUT_T5" && grep -qi "outside" "$OUT_T5"; then
         pass "T5 当前位置不在限位内时已正确拒绝"
       else
         fail "T5 未触发当前位置匹配拦截：$(tr '\n' ' ' < "$OUT_T5")"
@@ -270,7 +275,7 @@ max_position_rad: 1.0
 use_urdf_limits: false
 apply_to_motor: false"
     svc_call_set_zero_limit "$REQ_T7" >"$OUT_T7" 2>&1 || true
-    if grep -q "success: False" "$OUT_T7" && grep -qi "position-control" "$OUT_T7"; then
+    if grep -qi "^success:[[:space:]]*false" "$OUT_T7" && grep -qi "position-control" "$OUT_T7"; then
       pass "T7 velocity关节被正确拒绝"
     else
       fail "T7 velocity关节拒绝逻辑异常：$(tr '\n' ' ' < "$OUT_T7")"

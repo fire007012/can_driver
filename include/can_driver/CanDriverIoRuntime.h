@@ -9,8 +9,6 @@
 #include "can_driver/SharedDriverState.h"
 #include "can_driver/command_gate.hpp"
 
-#include <can_driver/MotorState.h>
-
 #include <algorithm>
 #include <cmath>
 #include <cstdint>
@@ -21,7 +19,7 @@
 #include <utility>
 #include <vector>
 
-#include <ros/ros.h>
+#include "can_driver/ros2_compat.hpp"
 
 namespace can_driver {
 
@@ -102,7 +100,7 @@ public:
         }
 
         std::lock_guard<std::mutex> lock(*jointStateMutex);
-        const ros::Time now = ros::Time::now();
+        const auto now = can_driver::steadyNow();
         for (std::size_t index = 0; index < joints->size(); ++index) {
             auto &joint = (*joints)[index];
             const auto mode = can_driver::axisControlModeFromString(joint.controlMode);
@@ -121,8 +119,8 @@ public:
                     useDirect = true;
                     cmdValue = can_driver::controlModeDirectCommandValue(joint, mode);
                 } else {
-                    const double age =
-                        (now - can_driver::controlModeLastDirectCommandTime(joint, mode)).toSec();
+                    const double age = std::chrono::duration<double>(
+                        now - can_driver::controlModeLastDirectCommandTime(joint, mode)).count();
                     if (age <= config.directCmdTimeoutSec) {
                         useDirect = true;
                         cmdValue = can_driver::controlModeDirectCommandValue(joint, mode);

@@ -23,31 +23,30 @@
    - `/can_driver_node/motor_command`
    - `/can_driver_node/motor/<joint>/cmd_position`
    - `/can_driver_node/motor/<joint>/cmd_velocity`
-3. 如果参数服务器上还没有 `/can_driver_node/joints`，UI 会自动回退读取
-   `can_driver/config/can_driver.yaml` 中的关节配置；但真正发命令仍然需要上面的服务和话题可用
+3. UI 从 `config_file` 指定的 YAML 读取关节配置；真正发命令仍然需要上面的服务和话题可用。
 
 ## 启动命令
 
 ```bash
-source /home/dianhua/Robot24_catkin_ws/devel/setup.bash
-rosrun can_driver realtime_motor_ui.py
+source /opt/ros/humble/setup.bash
+source /home/fire/ros2_ws_car/install/setup.bash
+ros2 run can_driver realtime_motor_ui.py
 ```
 
 真机联调推荐显式指定：
 
 ```bash
-source /home/dianhua/Robot24_catkin_ws/devel/setup.bash
-rosrun can_driver realtime_motor_ui.py _init_loopback:=false _stream_hz:=100
+ros2 run can_driver realtime_motor_ui.py --ros-args -p init_loopback:=false -p stream_hz:=100
 ```
 
 参数说明：
 
-- `_init_loopback`
+- `init_loopback`
   - `false`：真机推荐
   - `true`：仅 `vcan` / 本机回环测试建议使用
-- `_stream_hz`
+- `stream_hz`
   - 控制“连续发送”勾选后的发布频率
-  - 默认跟随 `/can_driver_node/control_frequency`
+- 默认跟随配置文件中的 `control_frequency`
 
 ## 使用建议
 
@@ -63,7 +62,7 @@ rosrun can_driver realtime_motor_ui.py _init_loopback:=false _stream_hz:=100
 ## 安全注意
 
 - UI 是直接命令控制，不做轨迹规划
-- 请确保限位已配置（URDF 或 rosparam joint_limits）
+- 请确保限位已配置（URDF 或 YAML 配置）
 - 快写模式（PP `CMD=0x05`）下建议保持较小步进与范围
 - 快写模式下位置命令只写 `0x0A`，不会自动改写速度；需要时请先发送速度命令再进行位置拖动
 - `motor_states` 中的 `position / velocity` 原本是协议原始单位，UI 现在会按 joint 的

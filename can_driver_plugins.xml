@@ -1,0 +1,7 @@
+<library path="can_driver_system">
+  <class name="can_driver/CanDriverSystem"
+         type="can_driver::CanDriverSystem"
+         base_class_type="hardware_interface::SystemInterface">
+    <description>SocketCAN/UDP motor hardware interface for ros2_control.</description>
+  </class>
+</library>

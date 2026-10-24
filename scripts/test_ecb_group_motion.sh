@@ -1,6 +1,11 @@
 #!/usr/bin/env bash
 set -euo pipefail
 
+SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
+# shellcheck disable=SC1091
+source "${SCRIPT_DIR}/ros2_cli_helpers.sh"
+export CAN_DRIVER_CONFIG="${CAN_DRIVER_CONFIG:-${SCRIPT_DIR}/../config/can_driver.yaml}"
+
 # ECB 分组同时联调脚本
 #
 # 默认按两组电机顺序测试：
@@ -47,29 +52,28 @@ require_cmd() {
   fi
 }
 
-require_cmd rosservice
-require_cmd rosparam
+require_cmd ros2
 require_cmd python3
 
-if ! rosservice list >/dev/null 2>&1; then
-  err "ROS master unavailable. Please run roscore/bringup first."
+if ! ros2 service list >/dev/null 2>&1; then
+  err "ROS2 graph unavailable. Please start the bringup first."
   exit 2
 fi
 
 resolve_group_joints() {
   local group_spec="$1"
   python3 - "$group_spec" "$DRIVER_NS" <<'PY'
-import subprocess
 import sys
 import yaml
+import os
 
 group_spec = sys.argv[1]
-ns = sys.argv[2].rstrip('/')
-param_name = f"{ns}/joints" if ns else "/joints"
 ids = [int(x, 0) for x in group_spec.split(',') if x.strip()]
 
-raw = subprocess.check_output(["rosparam", "get", param_name], text=True)
-joints = yaml.safe_load(raw)
+config_file = os.environ["CAN_DRIVER_CONFIG"]
+with open(config_file, encoding="utf-8") as stream:
+    root = yaml.safe_load(stream) or {}
+joints = (root.get("can_driver_node", root) or {}).get("joints", [])
 if not isinstance(joints, list):
     raise SystemExit("invalid joints parameter")
 
@@ -103,7 +107,7 @@ call_motor_cmd() {
   local motor_id="$1"
   local command="$2"
   local value="$3"
-  rosservice call "${MOTOR_SRV}" "{motor_id: ${motor_id}, command: ${command}, value: ${value}}" >/dev/null
+  ros2_service_call "${MOTOR_SRV}" "{motor_id: ${motor_id}, command: ${command}, value: ${value}}" >/dev/null
 }
 
 wait_motor_state_equals() {
@@ -125,7 +129,7 @@ deadline = time.time() + timeout_sec
 
 while time.time() < deadline:
     proc = subprocess.run(
-        ["timeout", "2s", "rostopic", "echo", topic],
+        ["timeout", "2s", "ros2", "topic", "echo", topic],
         check=False,
         stdout=subprocess.PIPE,
         stderr=subprocess.DEVNULL,
@@ -164,7 +168,7 @@ for line in group_info:
 deadline = time.time() + 5.0
 while time.time() < deadline:
     proc = subprocess.run(
-        ["timeout", "2s", "rostopic", "echo", topic],
+        ["timeout", "2s", "ros2", "topic", "echo", topic],
         check=False,
         stdout=subprocess.PIPE,
         stderr=subprocess.DEVNULL,
@@ -198,7 +202,7 @@ publish_group_targets() {
 import sys
 import time
 
-import rospy
+import rclpy
 from std_msgs.msg import Float64
 
 mode = sys.argv[1]
@@ -207,9 +211,8 @@ payload_lines = [line.strip() for line in sys.argv[3].splitlines() if line.strip
 driver_ns = sys.argv[4].rstrip('/')
 hz = max(1.0, float(sys.argv[5]))
 
-anonymous = True
-if not rospy.core.is_initialized():
-    rospy.init_node("ecb_group_test_pub", anonymous=anonymous, disable_signals=True)
+rclpy.init(args=None)
+node = rclpy.create_node("ecb_group_test_pub")
 
 publishers = []
 messages = []
@@ -217,27 +220,30 @@ for line in payload_lines:
     _, joint_name, value = line.split()
     suffix = "cmd_velocity" if mode == "velocity" else "cmd_position"
     topic = f"{driver_ns}/motor/{joint_name}/{suffix}" if driver_ns else f"/motor/{joint_name}/{suffix}"
-    pub = rospy.Publisher(topic, Float64, queue_size=1)
+    pub = node.create_publisher(Float64, topic, 1)
     publishers.append(pub)
     msg = Float64()
     msg.data = float(value)
     messages.append(msg)
 
 start_wait = time.time()
-while time.time() - start_wait < 1.0 and not rospy.is_shutdown():
-    if all(pub.get_num_connections() > 0 for pub in publishers):
+while time.time() - start_wait < 1.0 and rclpy.ok():
+    if all(pub.get_subscription_count() > 0 for pub in publishers):
         break
-    rospy.sleep(0.05)
+    time.sleep(0.05)
 
-rate = rospy.Rate(max(1.0, hz))
+period = 1.0 / max(1.0, hz)
 deadline = time.time() + hold_sec
-while time.time() < deadline and not rospy.is_shutdown():
+while time.time() < deadline and rclpy.ok():
     for pub, msg in zip(publishers, messages):
         pub.publish(msg)
-    rate.sleep()
+    rclpy.spin_once(node, timeout_sec=0.0)
+    time.sleep(period)
 
 for pub, msg in zip(publishers, messages):
     pub.publish(msg)
+node.destroy_node()
+rclpy.shutdown()
 PY
 }
 
@@ -344,7 +350,7 @@ PY
 
   while read -r motor_id _joint_name _pos_scale; do
     log "group=${group_spec} final state motor_id=${motor_id}"
-    timeout 3s rostopic echo "${MOTOR_STATE_TOPIC}" 2>/dev/null | awk -v id="${motor_id}" '
+    timeout 3s ros2 topic echo "${MOTOR_STATE_TOPIC}" 2>/dev/null | awk -v id="${motor_id}" '
       /^motor_id:/ { current_id=$2; block=$0 ORS; next }
       current_id != "" {
         block=block $0 ORS

@@ -1,6 +1,11 @@
 #!/usr/bin/env bash
 set -euo pipefail
 
+SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
+# shellcheck disable=SC1091
+source "${SCRIPT_DIR}/ros2_cli_helpers.sh"
+export CAN_DRIVER_CONFIG="${CAN_DRIVER_CONFIG:-${SCRIPT_DIR}/../config/can_driver.yaml}"
+
 # ECB 网络电机测试脚本（位置+速度）
 #
 # 设计目标：
@@ -36,65 +41,49 @@ require_cmd() {
   fi
 }
 
-require_cmd rosservice
-require_cmd rostopic
-require_cmd rosparam
+require_cmd ros2
 require_cmd python3
 
 ensure_ros_online() {
-  # 这里用 rosservice list 作为 master 存活探针，失败就直接退出，
+  # 这里用 ros2 service list 作为 graph 存活探针，失败就直接退出，
   # 防止后续命令逐个超时导致排障体验很差。
-  if ! rosservice list >/dev/null 2>&1; then
-    echo "[ECB-TEST][ERR] ROS master unavailable. Please run roscore/bringup first." >&2
+  if ! ros2 service list >/dev/null 2>&1; then
+    echo "[ECB-TEST][ERR] ROS2 graph unavailable. Please start the bringup first." >&2
     exit 2
   fi
 }
 
 resolve_ecb_joint_and_motor() {
   local req_motor_id="$1"
-  # 用内嵌 Python 解析 rosparam 中的 joints，原因：
+  # 用内嵌 Python 解析 ROS2 YAML 配置中的 joints，原因：
   # - shell 对 YAML 的结构化解析能力弱；
   # - 这里还需要做 protocol 过滤、motor_id 进制兼容和 auto 选择策略。
   python3 - "$req_motor_id" "$DRIVER_NS" <<'PY'
 import collections
-import subprocess
 import sys
 import yaml
+import os
 
 req_motor = sys.argv[1]
-ns = sys.argv[2].rstrip('/')
-primary_param = f"{ns}/joints" if ns else "/joints"
-
-candidates = []
-for p in [primary_param, "/can_driver_node/joints", "/joints"]:
-  if p and p not in candidates:
-    candidates.append(p)
-
+config_file = os.environ.get("CAN_DRIVER_CONFIG")
 loaded = None
-loaded_param = ""
+loaded_param = config_file
 protocol_counter = collections.Counter()
 
-for param_name in candidates:
-  try:
-    output = subprocess.check_output(["rosparam", "get", param_name], text=True)
-  except subprocess.CalledProcessError:
-    continue
-
-  try:
-    joints = yaml.safe_load(output)
-  except Exception:
-    continue
-
-  if isinstance(joints, list):
-    loaded = joints
-    loaded_param = param_name
-    for j in joints:
-      if isinstance(j, dict):
-        protocol_counter[str(j.get("protocol", "")).upper()] += 1
-    break
+try:
+  with open(config_file, encoding="utf-8") as stream:
+    root = yaml.safe_load(stream) or {}
+  joints = (root.get("can_driver_node", root) or {}).get("joints", [])
+except Exception:
+  joints = None
+if isinstance(joints, list):
+  loaded = joints
+  for j in joints:
+    if isinstance(j, dict):
+      protocol_counter[str(j.get("protocol", "")).upper()] += 1
 
 if loaded is None:
-  print("ERR: joints parameter not found or invalid yaml. tried: " + ", ".join(candidates))
+  print("ERR: joints config not found or invalid YAML: " + config_file)
   sys.exit(1)
 
 joints = loaded
@@ -153,14 +142,14 @@ call_motor_cmd() {
   local motor_id="$1"
   local command="$2"
   local value="$3"
-  rosservice call "${MOTOR_SRV}" "{motor_id: ${motor_id}, command: ${command}, value: ${value}}" >/dev/null
+  ros2_service_call "${MOTOR_SRV}" "{motor_id: ${motor_id}, command: ${command}, value: ${value}}" >/dev/null
 }
 
 publish_once() {
   # -1 表示只发一帧，适合 stop 或归零边界点。
   local topic="$1"
   local value="$2"
-  rostopic pub -1 "${topic}" std_msgs/Float64 "data: ${value}" >/dev/null
+  ros2_topic_pub_once "${topic}" std_msgs/Float64 "{data: ${value}}" >/dev/null
 }
 
 hold_publish() {
@@ -185,12 +174,13 @@ period = 1.0 / hz
 end = time.time() + hold
 
 cmd = [
-    "rostopic",
+    "ros2",
+    "topic",
     "pub",
-    "-1",
+    "--once",
     topic,
-    "std_msgs/Float64",
-    f"data: {value}",
+    "std_msgs/msg/Float64",
+    f"{{data: {value}}}",
 ]
 while time.time() < end:
     subprocess.run(cmd, check=True, stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
@@ -201,7 +191,7 @@ PY
 
 show_last_state() {
   log "采样目标电机的 motor_states 最近一条（用于快速排错）"
-  timeout 3s rostopic echo "${MOTOR_STATE_TOPIC}" 2>/dev/null | awk -v id="${MOTOR_ID}" '
+  timeout 3s ros2 topic echo "${MOTOR_STATE_TOPIC}" 2>/dev/null | awk -v id="${MOTOR_ID}" '
     /^motor_id:/ {
       current_id=$2
       block=$0 ORS
@@ -222,7 +212,7 @@ show_last_state() {
 }
 
 get_motor_position_raw() {
-  timeout 5s rostopic echo "${MOTOR_STATE_TOPIC}" 2>/dev/null | awk -v id="${MOTOR_ID}" '
+  timeout 5s ros2 topic echo "${MOTOR_STATE_TOPIC}" 2>/dev/null | awk -v id="${MOTOR_ID}" '
     $1=="motor_id:" { current_id=$2; next }
     $1=="position:" && current_id==id {
       print $2
@@ -233,7 +223,7 @@ get_motor_position_raw() {
 
 get_motor_state_field() {
   local field_name="$1"
-  timeout 5s rostopic echo "${MOTOR_STATE_TOPIC}" 2>/dev/null | awk -v id="${MOTOR_ID}" -v field="${field_name}" '
+  timeout 5s ros2 topic echo "${MOTOR_STATE_TOPIC}" 2>/dev/null | awk -v id="${MOTOR_ID}" -v field="${field_name}" '
     $1=="motor_id:" { current_id=$2; next }
     current_id==id && $1==(field ":") {
       print $2
@@ -266,7 +256,7 @@ awk_script = (
 while time.time() < deadline:
     try:
         proc = subprocess.run(
-            ["timeout", "2s", "rostopic", "echo", topic],
+            ["timeout", "2s", "ros2", "topic", "echo", topic],
             check=False,
             stdout=subprocess.PIPE,
             stderr=subprocess.DEVNULL,
@@ -344,7 +334,7 @@ call_motor_cmd "${MOTOR_ID}" 0 0.0
 if wait_motor_state_equals "enabled" "True" 3.0; then
   log "enable confirmed by motor_states"
 else
-  log "enable not confirmed within timeout; continue but watch roslaunch logs"
+  log "enable not confirmed within timeout; continue but watch ros2 launch logs"
 fi
 
 log "[2/10] Set velocity mode"
@@ -353,7 +343,7 @@ call_motor_cmd "${MOTOR_ID}" 3 1.0
 if wait_motor_state_equals "mode" "2" 3.0; then
   log "velocity mode confirmed by motor_states"
 else
-  log "velocity mode not confirmed within timeout; continue but watch roslaunch logs"
+  log "velocity mode not confirmed within timeout; continue but watch ros2 launch logs"
 fi
 
 log "[3/10] Velocity +${VEL_CMD} rad/s"
@@ -381,7 +371,7 @@ call_motor_cmd "${MOTOR_ID}" 3 0.0
 if wait_motor_state_equals "mode" "1" 3.0; then
   log "position mode confirmed by motor_states"
 else
-  log "position mode not confirmed within timeout; continue but watch roslaunch logs"
+  log "position mode not confirmed within timeout; continue but watch ros2 launch logs"
 fi
 
 CURRENT_POS_RAW="$(get_motor_position_raw || true)"

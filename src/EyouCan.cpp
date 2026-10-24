@@ -10,7 +10,7 @@
 #include <iostream>
 #include <limits>
 
-#include <ros/ros.h>
+#include "can_driver/ros2_compat.hpp"
 
 // EyouCan.cpp
 
@@ -777,17 +777,8 @@ void EyouCan::sendWriteCommand(uint8_t motorId,
 
 void EyouCan::publishWriteCountersParam() const
 {
-    if (!ros::isInitialized()) {
-        return;
-    }
-    if (!ros::master::check()) {
-        ROS_WARN_STREAM_THROTTLE(5.0, "[EyouCan] ROS master unavailable, skip publishing PP write counters.");
-        return;
-    }
-    static ros::NodeHandle pnh("~");
-    pnh.setParam("pp_fast_write_enabled_runtime", fastWriteEnabled_.load(std::memory_order_relaxed));
-    pnh.setParam("pp_fast_write_sent_count", static_cast<double>(fastWriteSentCount_.load(std::memory_order_relaxed)));
-    pnh.setParam("pp_normal_write_sent_count", static_cast<double>(normalWriteSentCount_.load(std::memory_order_relaxed)));
+    // Runtime counters are exposed by the ROS2 node as diagnostics/parameters.
+    // The protocol layer must not reach into a global ROS parameter server.
 }
 
 void EyouCan::sendReadCommand(uint8_t motorId, uint8_t subCommand)

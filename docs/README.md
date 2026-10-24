@@ -5,9 +5,14 @@
 ## 配置教程
 
 - [`配置文件字段详解与从零配置指南.md`](配置文件字段详解与从零配置指南.md)
-  - `can_driver.yaml` / `ros_controllers.yaml` 字段说明
+  - `can_driver.yaml` / `ros2_controllers.yaml` 字段说明
 - [`电机配置变更指南.md`](电机配置变更指南.md)
   - 新增、修改、停用、删除电机时必须同步的文件和校验规则
+
+## ROS2 迁移
+
+- [`ROS1到ROS2迁移计划.md`](ROS1到ROS2迁移计划.md)
+  - 当前 ROS1 基线、ROS2 目标架构、已完成项、剩余验收和回滚条件
 
 ## API 参考
 

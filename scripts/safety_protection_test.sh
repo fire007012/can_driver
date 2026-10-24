@@ -2,6 +2,11 @@
 
 set -euo pipefail
 
+SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
+# shellcheck disable=SC1091
+source "${SCRIPT_DIR}/ros2_cli_helpers.sh"
+export CAN_DRIVER_CONFIG="${CAN_DRIVER_CONFIG:-${SCRIPT_DIR}/../config/can_driver.yaml}"
+
 # 安全保护功能测试脚本
 # 覆盖：
 # 1) 未使能阻断(safety_require_enabled_for_motion)
@@ -38,15 +43,14 @@ fail() { echo "[FAIL] $*"; FAIL_COUNT=$((FAIL_COUNT + 1)); }
 skip() { echo "[SKIP] $*"; SKIP_COUNT=$((SKIP_COUNT + 1)); }
 
 bootstrap_ros_env() {
-    # sudo 场景下常见问题：PATH 丢失导致 rosservice/rostopic 不可用。
-    if command -v rosservice >/dev/null 2>&1 && command -v rostopic >/dev/null 2>&1; then
+    # sudo 场景下常见问题：PATH 丢失导致 ROS2 CLI 不可用。
+    if command -v ros2 >/dev/null 2>&1; then
         return 0
     fi
 
     local setup_files=(
-        "/opt/ros/noetic/setup.bash"
-        "/opt/ros/melodic/setup.bash"
-        "${WS_ROOT}/devel/setup.bash"
+        "/opt/ros/humble/setup.bash"
+        "${WS_ROOT}/install/setup.bash"
     )
     local f
     for f in "${setup_files[@]}"; do
@@ -56,9 +60,9 @@ bootstrap_ros_env() {
         fi
     done
 
-    if ! command -v rosservice >/dev/null 2>&1 || ! command -v rostopic >/dev/null 2>&1; then
-        echo "[ERROR] 未找到 rosservice/rostopic。请先 source ROS 环境后再运行脚本。"
-        echo "[ERROR] 例如：source /opt/ros/noetic/setup.bash && source ${WS_ROOT}/devel/setup.bash"
+    if ! command -v ros2 >/dev/null 2>&1; then
+        echo "[ERROR] 未找到 ros2。请先 source ROS2 环境后再运行脚本。"
+        echo "[ERROR] 例如：source /opt/ros/humble/setup.bash && source ${WS_ROOT}/install/setup.bash"
         return 1
     fi
     return 0
@@ -74,7 +78,7 @@ abs_int() {
 }
 
 have_service() {
-    rosservice list 2>/dev/null | grep -q "^$1$"
+    ros2 service list 2>/dev/null | grep -q "^$1$"
 }
 
 wait_service() {
@@ -83,7 +87,7 @@ wait_service() {
     local max_try=$(( timeout_sec * 10 ))
     local i
     for ((i = 0; i < max_try; ++i)); do
-        if rosservice list 2>/dev/null | grep -Fxq "${srv}"; then
+        if ros2 service list 2>/dev/null | grep -Fxq "${srv}"; then
             return 0
         fi
         sleep 0.1
@@ -95,7 +99,7 @@ call_motor_cmd() {
     local cmd="$1"
     local value="${2:-0.0}"
     local out
-    out="$(rosservice call "${NS}/motor_command" "{motor_id: ${MOTOR_ID}, command: ${cmd}, value: ${value}}" 2>&1 || true)"
+    out="$(ros2_service_call "${NS}/motor_command" "{motor_id: ${MOTOR_ID}, command: ${cmd}, value: ${value}}" 2>&1 || true)"
     if echo "${out}" | grep -Eiq 'success:[[:space:]]*(True|true)'; then
         return 0
     fi
@@ -112,16 +116,16 @@ stop_motor() { call_motor_cmd "${CMD_STOP}" 0.0 || true; }
 
 pub_vel_once() {
     local v="$1"
-    rostopic pub -1 "${NS}/motor/${JOINT_NAME}/cmd_velocity" std_msgs/Float64 "data: ${v}" >/dev/null
+    ros2_topic_pub_once "${NS}/motor/${JOINT_NAME}/cmd_velocity" std_msgs/Float64 "{data: ${v}}" >/dev/null
 }
 
 pub_pos_once() {
     local p="$1"
-    rostopic pub -1 "${NS}/motor/${JOINT_NAME}/cmd_position" std_msgs/Float64 "data: ${p}" >/dev/null
+    ros2_topic_pub_once "${NS}/motor/${JOINT_NAME}/cmd_position" std_msgs/Float64 "{data: ${p}}" >/dev/null
 }
 
 get_joint_mode_from_param() {
-    rosparam get "${NS}/joints" 2>/dev/null | awk -v target="${JOINT_NAME}" '
+    ros2_param_get "${NS}/joints" 2>/dev/null | awk -v target="${JOINT_NAME}" '
         $1=="-" {in_item=1; is_target=0; next}
         in_item && $1=="name:" {
             name=$2; gsub(/"/, "", name);
@@ -154,7 +158,7 @@ stimulate_motion() {
 }
 
 get_motor_position_raw() {
-    timeout 4 rostopic echo "${NS}/motor_states" 2>/dev/null | awk -v n="${JOINT_NAME}" '
+    timeout 4 ros2 topic echo "${NS}/motor_states" 2>/dev/null | awk -v n="${JOINT_NAME}" '
         $1=="name:" { name=$2; gsub(/"/, "", name); }
         $1=="position:" && name==n { print $2; exit }
     '
@@ -170,7 +174,7 @@ position_delta_abs() {
 require_param_true() {
     local key="$1"
     local val
-    val="$(rosparam get "${NS}/${key}" 2>/dev/null || echo "")"
+    val="$(ros2_param_get "${NS}/${key}" 2>/dev/null || echo "")"
     if [[ "${val}" == "true" ]]; then
         return 0
     fi
@@ -271,7 +275,7 @@ main() {
     # ------------------------------
     note "T2 位置步进限幅测试（max_position_step_rad）"
     local max_step
-    max_step="$(rosparam get "${NS}/max_position_step_rad" 2>/dev/null || echo 0)"
+    max_step="$(ros2_param_get "${NS}/max_position_step_rad" 2>/dev/null || echo 0)"
     if awk -v v="${max_step}" 'BEGIN{exit !((v+0)>0)}'; then
         set_mode_position
         enable_motor

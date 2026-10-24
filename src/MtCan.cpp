@@ -10,7 +10,7 @@
 #include <iomanip>
 #include <iostream>
 
-#include <ros/ros.h>
+#include "can_driver/ros2_compat.hpp"
 
 namespace {
 

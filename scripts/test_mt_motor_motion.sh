@@ -90,7 +90,7 @@ select_motor_id() {
 
 if ! MOTOR_ID="$(select_motor_id)"; then
   echo "[MT-TEST] 未找到可用 MT 电机ID（已优先探测 0x141，再探测 0x14B）" >&2
-  echo "[MT-TEST] 可先执行: rosrun can_driver mt_motor_interface.py --profile ${PROFILE} --action list" >&2
+  echo "[MT-TEST] 可先执行: ros2 run can_driver mt_motor_interface.py --profile ${PROFILE} --action list" >&2
   exit 3
 fi
 

@@ -3,16 +3,25 @@
 
 #include "can_driver/CanType.h"
 #include "can_driver/MotorID.h"
+#include "can_driver/ros2_compat.hpp"
 
-#include <joint_limits_interface/joint_limits.h>
-#include <ros/time.h>
-
+#include <chrono>
 #include <cstdint>
 #include <cstddef>
 #include <string>
 #include <vector>
 
 namespace can_driver {
+
+struct JointLimits {
+    bool has_position_limits{false};
+    double min_position{0.0};
+    double max_position{0.0};
+    bool has_velocity_limits{false};
+    double max_velocity{0.0};
+    bool has_effort_limits{false};
+    double max_effort{0.0};
+};
 
 enum class PreparedCommandRoute {
     Position,
@@ -62,10 +71,10 @@ struct CanDriverJointConfig {
     double directVelCmd{0.0};
     bool hasDirectPosCmd{false};
     bool hasDirectVelCmd{false};
-    ros::Time lastDirectPosTime;
-    ros::Time lastDirectVelTime;
+    SteadyTimePoint lastDirectPosTime{};
+    SteadyTimePoint lastDirectVelTime{};
 
-    joint_limits_interface::JointLimits limits;
+    JointLimits limits;
     bool hasLimits{false};
 
     bool stopIssuedOnFault{false};

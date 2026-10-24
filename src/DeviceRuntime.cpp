@@ -1,6 +1,6 @@
 #include "can_driver/DeviceRuntime.h"
 
-#include <ros/ros.h>
+#include "can_driver/ros2_compat.hpp"
 
 #include <utility>
 

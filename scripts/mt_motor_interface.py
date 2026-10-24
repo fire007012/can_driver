@@ -7,12 +7,12 @@ import sys
 import time
 from typing import Any, Dict, Optional
 
-import rospkg
-import rospy
+import rclpy
+from ament_index_python.packages import get_package_share_directory
 import yaml
 from std_msgs.msg import Float64
 
-from can_driver.srv import MotorCommand, MotorCommandRequest
+from can_driver.srv import MotorCommand
 
 
 def parse_motor_id(raw: str) -> int:
@@ -37,7 +37,7 @@ def normalize_protocol(value: Any) -> str:
 
 
 def default_profile_path() -> str:
-    pkg = rospkg.RosPack().get_path("can_driver")
+    pkg = get_package_share_directory("can_driver")
     return os.path.join(pkg, "config", "mt_control_profiles.yaml")
 
 
@@ -51,7 +51,8 @@ def load_profiles(path: str) -> Dict[str, Dict[str, Any]]:
 
 
 class MtMotorInterface:
-    def __init__(self, profile_name: str, profile: Dict[str, Any], driver_ns_override: str = ""):
+    def __init__(self, node, profile_name: str, profile: Dict[str, Any], driver_ns_override: str = ""):
+        self.node = node
         self.profile_name = profile_name
         self.profile = profile
         ns = driver_ns_override.strip() or str(profile.get("driver_ns", "/can_driver_node"))
@@ -61,11 +62,15 @@ class MtMotorInterface:
         self.joints_param = f"{self.driver_ns}/joints"
 
     def _load_joints(self):
-        if not rospy.has_param(self.joints_param):
-            raise RuntimeError(f"参数不存在: {self.joints_param}")
-        joints = rospy.get_param(self.joints_param)
+        config_file = self.node.get_parameter("config_file").value
+        if not config_file:
+            raise RuntimeError("未提供 config_file 参数；ROS2 节点不再使用 ROS1 参数服务器")
+        with open(str(config_file), "r", encoding="utf-8") as stream:
+            data = yaml.safe_load(stream) or {}
+        node_cfg = data.get("can_driver_node", {})
+        joints = node_cfg.get("joints", []) if isinstance(node_cfg, dict) else []
         if not isinstance(joints, list):
-            raise RuntimeError(f"参数格式错误(非列表): {self.joints_param}")
+            raise RuntimeError(f"配置文件 joints 格式错误: {config_file}")
         return joints
 
     def resolve_joint_name(self, motor_id: int, joint_name_override: str = "") -> str:
@@ -97,15 +102,18 @@ class MtMotorInterface:
         )
 
     def call_motor_command(self, motor_id: int, command: int, value: float = 0.0) -> None:
-        rospy.wait_for_service(self.motor_cmd_srv, timeout=3.0)
-        proxy = rospy.ServiceProxy(self.motor_cmd_srv, MotorCommand)
-
-        req = MotorCommandRequest()
+        client = self.node.create_client(MotorCommand, self.motor_cmd_srv)
+        if not client.wait_for_service(timeout_sec=3.0):
+            raise RuntimeError(f"服务不可用: {self.motor_cmd_srv}")
+        req = MotorCommand.Request()
         req.motor_id = motor_id
         req.command = command
         req.value = value
-
-        resp = proxy(req)
+        future = client.call_async(req)
+        rclpy.spin_until_future_complete(self.node, future)
+        if future.exception() is not None:
+            raise RuntimeError(str(future.exception()))
+        resp = future.result()
         if not resp.success:
             raise RuntimeError(f"service 失败: {resp.message}")
 
@@ -113,16 +121,16 @@ class MtMotorInterface:
         suffix = "cmd_velocity" if is_velocity else "cmd_position"
         topic = f"{self.driver_ns}/motor/{joint_name}/{suffix}"
 
-        pub = rospy.Publisher(topic, Float64, queue_size=1)
+        pub = self.node.create_publisher(Float64, topic, 1)
         start = time.time()
-        while pub.get_num_connections() == 0 and (time.time() - start) < 1.0 and not rospy.is_shutdown():
-            rospy.sleep(0.05)
+        while pub.get_subscription_count() == 0 and (time.time() - start) < 1.0 and rclpy.ok():
+            time.sleep(0.05)
 
         msg = Float64()
         msg.data = value
         for _ in range(3):
             pub.publish(msg)
-            rospy.sleep(0.03)
+            time.sleep(0.03)
 
     def check_motor_in_profile(self, motor_id: int) -> None:
         ids = self.profile.get("mt_motor_ids", [])
@@ -154,6 +162,7 @@ def build_parser() -> argparse.ArgumentParser:
     p.add_argument("--value", type=float, default=0.0, help="动作参数：mode用0/1，速度/位置用浮点")
     p.add_argument("--joint", default="", help="可选：直接指定 joint 名，跳过自动匹配")
     p.add_argument("--profiles-file", default=default_profile_path(), help="profile 配置文件路径")
+    p.add_argument("--config-file", default="", help="can_driver ROS2 YAML 配置文件路径")
     p.add_argument("--driver-ns", default="", help="可选：覆盖 profile 内 driver_ns")
     p.add_argument(
         "--no-auto-mode",
@@ -198,32 +207,38 @@ def main() -> int:
         print(f"[MT-IF] motor-id 无法解析: {args.motor_id}", file=sys.stderr)
         return 2
 
-    rospy.init_node("mt_motor_interface_cli", anonymous=True)
-
-    iface = MtMotorInterface(args.profile, profiles[args.profile], args.driver_ns)
+    rclpy.init(args=None)
+    node = rclpy.create_node("mt_motor_interface_cli")
+    node.declare_parameter("config_file", "")
+    if args.config_file:
+        node.set_parameters([rclpy.parameter.Parameter("config_file", value=args.config_file)])
+    else:
+        default_config = os.path.join(get_package_share_directory("can_driver"), "config", "can_driver.yaml")
+        node.set_parameters([rclpy.parameter.Parameter("config_file", value=default_config)])
+    iface = MtMotorInterface(node, args.profile, profiles[args.profile], args.driver_ns)
 
     try:
         iface.check_motor_in_profile(motor_id)
 
         if args.action == "enable":
-            iface.call_motor_command(motor_id, MotorCommandRequest.CMD_ENABLE, 0.0)
+            iface.call_motor_command(motor_id, MotorCommand.Request.CMD_ENABLE, 0.0)
             print("OK enable")
             return 0
 
         if args.action == "disable":
-            iface.call_motor_command(motor_id, MotorCommandRequest.CMD_DISABLE, 0.0)
+            iface.call_motor_command(motor_id, MotorCommand.Request.CMD_DISABLE, 0.0)
             print("OK disable")
             return 0
 
         if args.action == "stop":
-            iface.call_motor_command(motor_id, MotorCommandRequest.CMD_STOP, 0.0)
+            iface.call_motor_command(motor_id, MotorCommand.Request.CMD_STOP, 0.0)
             print("OK stop")
             return 0
 
         if args.action == "mode":
             if args.value not in (0.0, 1.0):
                 raise RuntimeError("mode 动作要求 --value 只能是 0(position/MIT) 或 1(velocity)")
-            iface.call_motor_command(motor_id, MotorCommandRequest.CMD_SET_MODE, args.value)
+            iface.call_motor_command(motor_id, MotorCommand.Request.CMD_SET_MODE, args.value)
             print("OK mode")
             return 0
 
@@ -232,7 +247,7 @@ def main() -> int:
             if not args.no_auto_mode:
                 # 明确设置模式：velocity=1，position(MIT)=0
                 mode_value = 1.0 if args.action == "velocity" else 0.0
-                iface.call_motor_command(motor_id, MotorCommandRequest.CMD_SET_MODE, mode_value)
+                iface.call_motor_command(motor_id, MotorCommand.Request.CMD_SET_MODE, mode_value)
             iface.publish_direct(joint, args.action == "velocity", args.value)
             print(f"OK {args.action} joint={joint} value={args.value}")
             return 0
@@ -241,6 +256,9 @@ def main() -> int:
     except Exception as e:
         print(f"[MT-IF] 执行失败: {e}", file=sys.stderr)
         return 1
+    finally:
+        node.destroy_node()
+        rclpy.shutdown()
 
 
 if __name__ == "__main__":

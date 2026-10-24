@@ -1,6 +1,6 @@
 #include "can_driver/UdpCanTransport.h"
 
-#include <ros/console.h>
+#include "can_driver/ros2_compat.hpp"
 
 #include <arpa/inet.h>
 #include <errno.h>

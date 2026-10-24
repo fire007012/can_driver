@@ -1,6 +1,10 @@
 #!/usr/bin/env bash
 set -euo pipefail
 
+SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
+# shellcheck disable=SC1091
+source "${SCRIPT_DIR}/ros2_cli_helpers.sh"
+
 # ECB 四电机顺序联调脚本
 #
 # 默认按 2,3,4,5 顺序调用 scripts/test_ecb_motor_motion.sh，
@@ -40,10 +44,10 @@ require_cmd() {
 }
 
 require_cmd bash
-require_cmd rosservice
+require_cmd ros2
 
-if ! rosservice list >/dev/null 2>&1; then
-  err "ROS master unavailable. Please run roscore/bringup first."
+if ! ros2 service list >/dev/null 2>&1; then
+  err "ROS2 graph unavailable. Please start the bringup first."
   exit 2
 fi
 

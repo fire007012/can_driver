@@ -1,0 +1,94 @@
+<?xml version="1.0"?>
+<robot name="can_driver">
+  <ros2_control name="CanDriverSystem" type="system">
+    <hardware>
+      <plugin>can_driver/CanDriverSystem</plugin>
+    </hardware>
+
+    <joint name="elbow_pitch_joint">
+      <command_interface name="position"/>
+      <state_interface name="position"/>
+      <state_interface name="velocity"/>
+      <state_interface name="effort"/>
+      <param name="motor_id">0x13</param>
+      <param name="protocol">PP</param>
+      <param name="can_device">canable1</param>
+      <param name="control_mode">csp</param>
+      <param name="position_scale">65536</param>
+      <param name="velocity_scale">65536</param>
+      <param name="direction_sign">-1.0</param>
+    </joint>
+    <joint name="wrist_pitch_joint">
+      <command_interface name="position"/>
+      <state_interface name="position"/>
+      <state_interface name="velocity"/>
+      <state_interface name="effort"/>
+      <param name="motor_id">0x14</param>
+      <param name="protocol">PP</param>
+      <param name="can_device">canable1</param>
+      <param name="control_mode">csp</param>
+      <param name="position_scale">65536</param>
+      <param name="velocity_scale">65536</param>
+    </joint>
+    <joint name="wrist_roll_joint">
+      <command_interface name="position"/>
+      <state_interface name="position"/>
+      <state_interface name="velocity"/>
+      <state_interface name="effort"/>
+      <param name="motor_id">0x16</param>
+      <param name="protocol">PP</param>
+      <param name="can_device">canable1</param>
+      <param name="control_mode">csp</param>
+      <param name="position_scale">65536</param>
+      <param name="velocity_scale">65536</param>
+    </joint>
+    <joint name="wrist_yaw_joint">
+      <command_interface name="position"/>
+      <state_interface name="position"/>
+      <state_interface name="velocity"/>
+      <state_interface name="effort"/>
+      <param name="motor_id">0x15</param>
+      <param name="protocol">PP</param>
+      <param name="can_device">canable1</param>
+      <param name="control_mode">csp</param>
+      <param name="position_scale">65536</param>
+      <param name="velocity_scale">65536</param>
+      <param name="direction_sign">-1.0</param>
+    </joint>
+    <joint name="left_gripper_finger_joint">
+      <command_interface name="position"/>
+      <state_interface name="position"/>
+      <state_interface name="velocity"/>
+      <state_interface name="effort"/>
+      <param name="motor_id">0x17</param>
+      <param name="protocol">PP</param>
+      <param name="can_device">canable1</param>
+      <param name="control_mode">csp</param>
+      <param name="position_scale">0.0000017807297172304439</param>
+      <param name="velocity_scale">0.0000017807297172304439</param>
+    </joint>
+    <joint name="left_front_wheel_joint">
+      <command_interface name="velocity"/>
+      <state_interface name="position"/>
+      <state_interface name="velocity"/>
+      <state_interface name="effort"/>
+      <param name="motor_id">0x07</param>
+      <param name="master_id">0x08</param>
+      <param name="protocol">DM</param>
+      <param name="can_device">canable1</param>
+      <param name="control_mode">velocity</param>
+    </joint>
+    <joint name="right_front_wheel_joint">
+      <command_interface name="velocity"/>
+      <state_interface name="position"/>
+      <state_interface name="velocity"/>
+      <state_interface name="effort"/>
+      <param name="motor_id">0x05</param>
+      <param name="master_id">0x06</param>
+      <param name="protocol">DM</param>
+      <param name="can_device">canable1</param>
+      <param name="control_mode">velocity</param>
+      <param name="direction_sign">-1.0</param>
+    </joint>
+  </ros2_control>
+</robot>

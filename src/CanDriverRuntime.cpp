@@ -2,7 +2,7 @@
 
 #include <utility>
 
-#include <ros/ros.h>
+#include "can_driver/ros2_compat.hpp"
 
 namespace can_driver {
 

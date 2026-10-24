@@ -381,6 +381,6 @@ for yaml_path in "${YAML_PATHS[@]}"; do
   log "yaml updated: ${yaml_path}"
 done
 log "next: keep only the required joints in config/can_driver.yaml for this machine"
-log "next: roslaunch can_driver can_driver.launch"
+log "next: ros2 launch can_driver can_driver.launch.py"
 log "then: scripts/test_ecb_motor_motion.sh 2 0.8 2.0 1.2 2.0 /can_driver_node"
 log "repeat for more motors: scripts/test_ecb_motor_motion.sh 3|4|5 0.8 2.0 1.2 2.0 /can_driver_node"

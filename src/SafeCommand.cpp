@@ -1,6 +1,6 @@
 #include "can_driver/SafeCommand.h"
 
-#include <ros/ros.h>
+#include "can_driver/ros2_compat.hpp"
 
 #include <algorithm>
 #include <cmath>

@@ -2,6 +2,10 @@
 
 set -euo pipefail
 
+SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
+# shellcheck disable=SC1091
+source "${SCRIPT_DIR}/ros2_cli_helpers.sh"
+
 # 电机明显移动演示脚本（PP 快写模式）
 # 假设can_driver节点已启动，电机ID 22 (0x16)
 
@@ -14,7 +18,7 @@ APPLY_LIMIT_PRESET="${APPLY_LIMIT_PRESET:-0}"
 HARD_RESET_PHYSICAL_LIMITS="${HARD_RESET_PHYSICAL_LIMITS:-1}"
 
 echo "检查 pp_fast_write_enabled ..."
-PP_FAST_WRITE="$(rosparam get /can_driver_node/pp_fast_write_enabled 2>/dev/null || echo false)"
+PP_FAST_WRITE="$(ros2_param_get /can_driver_node/pp_fast_write_enabled 2>/dev/null || echo false)"
 echo "pp_fast_write_enabled=${PP_FAST_WRITE}"
 if [[ "${PP_FAST_WRITE}" != "true" ]]; then
 	echo "[WARN] 当前未开启快写模式。请在 can_driver.yaml 设置 pp_fast_write_enabled: true 并重启节点。"
@@ -34,7 +38,7 @@ publish_position_and_check_fast_write() {
 	sleep 0.35
 	# 快写无应答，重复下发几次以提高总线繁忙时的成功率。
 	for _ in 1 2 3; do
-		rostopic pub -1 "${NS}/motor/${JOINT_NAME}/cmd_position" std_msgs/Float64 "data: ${target_pos}" >/dev/null
+		ros2_topic_pub_once "${NS}/motor/${JOINT_NAME}/cmd_position" std_msgs/Float64 "{data: ${target_pos}}" >/dev/null
 		sleep 0.08
 	done
 	sleep 1.2
@@ -70,7 +74,7 @@ publish_position_and_check_fast_write() {
 }
 
 get_motor_position_raw() {
-	timeout 5 rostopic echo "${NS}/motor_states" 2>/dev/null | awk -v n="${JOINT_NAME}" '
+	timeout 5 ros2 topic echo "${NS}/motor_states" 2>/dev/null | awk -v n="${JOINT_NAME}" '
 		$1=="name:" {
 			name=$2;
 			gsub(/"/, "", name);
@@ -97,9 +101,9 @@ show_position_delta() {
 
 get_pp_write_counters() {
 	local fast normal
-	fast="$(rosparam get "${NS}/pp_fast_write_sent_count" 2>/dev/null || echo 0)"
-	normal="$(rosparam get "${NS}/pp_normal_write_sent_count" 2>/dev/null || echo 0)"
-	# rosparam 可能返回浮点字符串（如 7778.0），先归一化为整数，避免 bash 算术报错。
+	fast="$(ros2_param_get "${NS}/pp_fast_write_sent_count" 2>/dev/null || echo 0)"
+	normal="$(ros2_param_get "${NS}/pp_normal_write_sent_count" 2>/dev/null || echo 0)"
+	# ROS2 参数或 YAML 可能返回浮点字符串（如 7778.0），先归一化为整数。
 	fast="$(awk -v v="${fast}" 'BEGIN{printf "%d", (v+0)}')"
 	normal="$(awk -v v="${normal}" 'BEGIN{printf "%d", (v+0)}')"
 	echo "${fast} ${normal}"
@@ -121,13 +125,13 @@ show_pp_write_counter_delta() {
 
 prepare_position_mode_motion() {
 	echo "[INFO] 预驱动：先切速度模式并给小速度，再回位置模式。"
-	rosservice call "${NS}/motor_command" "{motor_id: ${MOTOR_ID}, command: 3, value: 1.0}" >/dev/null || true
+	ros2_service_call "${NS}/motor_command" "{motor_id: ${MOTOR_ID}, command: 3, value: 1.0}" >/dev/null || true
 	for _ in 1 2 3; do
-		rostopic pub -1 "${NS}/motor/${JOINT_NAME}/cmd_velocity" std_msgs/Float64 "data: 1.0" >/dev/null || true
+		ros2_topic_pub_once "${NS}/motor/${JOINT_NAME}/cmd_velocity" std_msgs/Float64 "{data: 1.0}" >/dev/null || true
 		sleep 0.12
 	done
 	sleep 0.25
-	rosservice call "${NS}/motor_command" "{motor_id: ${MOTOR_ID}, command: 3, value: 0.0}" >/dev/null || true
+	ros2_service_call "${NS}/motor_command" "{motor_id: ${MOTOR_ID}, command: 3, value: 0.0}" >/dev/null || true
 }
 
 reset_physical_limits_raw_pp() {
@@ -157,9 +161,9 @@ widen_limits_if_available() {
 		echo "[INFO] 跳过限位预设（APPLY_LIMIT_PRESET=${APPLY_LIMIT_PRESET}）。"
 		return 0
 	fi
-	if rosservice list | grep -q "${NS}/set_zero_limit"; then
+	if ros2 service list | grep -q "${NS}/set_zero_limit"; then
 		echo "[INFO] 预设宽限位(-6.28~6.28 rad)，避免历史限位影响演示。"
-		rosservice call "${NS}/set_zero_limit" "motor_id: ${MOTOR_ID}
+		ros2_service_call "${NS}/set_zero_limit" "motor_id: ${MOTOR_ID}
 zero_offset_rad: 0.0
 use_current_position_as_zero: false
 min_position_rad: -6.28
@@ -173,15 +177,15 @@ apply_to_motor: true" >/dev/null || true
 
 echo "使能电机..."
 echo "先执行恢复（若无故障则无影响）..."
-rosservice call "${NS}/recover" "{motor_id: ${MOTOR_ID}}" >/dev/null 2>&1 || true
-rosservice call "${NS}/motor_command" "{motor_id: ${MOTOR_ID}, command: 0, value: 0.0}"
+	ros2_service_call "${NS}/recover" "{motor_id: ${MOTOR_ID}}" >/dev/null 2>&1 || true
+	ros2_service_call "${NS}/motor_command" "{motor_id: ${MOTOR_ID}, command: 0, value: 0.0}"
 
 reset_physical_limits_raw_pp
 widen_limits_if_available
 prepare_position_mode_motion
 
 echo "设置位置模式..."
-rosservice call "${NS}/motor_command" "{motor_id: ${MOTOR_ID}, command: 3, value: 0.0}"
+ros2_service_call "${NS}/motor_command" "{motor_id: ${MOTOR_ID}, command: 3, value: 0.0}"
 
 echo "读取初始位置..."
 POS0="$(get_motor_position_raw 2>/dev/null || true)"
@@ -203,7 +207,7 @@ sleep 5
 echo "检查当前位置..."
 POS1="$(get_motor_position_raw 2>/dev/null || true)"
 show_position_delta "第一段运动" "${POS0:-}" "${POS1:-}"
-timeout 3 rostopic echo "${NS}/motor_states" | grep -A5 "name: \"${JOINT_NAME}\"" || true
+timeout 3 ros2 topic echo "${NS}/motor_states" | grep -A5 "name: \"${JOINT_NAME}\"" || true
 
 echo "回到 0 弧度..."
 read -r FW2 NW2 < <(get_pp_write_counters)
@@ -217,9 +221,9 @@ sleep 5
 echo "最终位置检查..."
 POS2="$(get_motor_position_raw 2>/dev/null || true)"
 show_position_delta "回零段运动" "${POS1:-}" "${POS2:-}"
-timeout 3 rostopic echo "${NS}/motor_states" | grep -A5 "name: \"${JOINT_NAME}\"" || true
+timeout 3 ros2 topic echo "${NS}/motor_states" | grep -A5 "name: \"${JOINT_NAME}\"" || true
 
 echo "失能电机..."
-rosservice call "${NS}/motor_command" "{motor_id: ${MOTOR_ID}, command: 1, value: 0.0}"
+ros2_service_call "${NS}/motor_command" "{motor_id: ${MOTOR_ID}, command: 1, value: 0.0}"
 
 echo "演示完成。"

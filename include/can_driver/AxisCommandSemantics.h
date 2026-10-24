@@ -93,8 +93,8 @@ inline bool controlModeHasDirectCommand(const CanDriverJointConfig &joint, AxisC
     return controlModeUsesVelocitySemantics(mode) ? joint.hasDirectVelCmd : joint.hasDirectPosCmd;
 }
 
-inline ros::Time controlModeLastDirectCommandTime(const CanDriverJointConfig &joint,
-                                                  AxisControlMode mode)
+inline SteadyTimePoint controlModeLastDirectCommandTime(const CanDriverJointConfig &joint,
+                                                        AxisControlMode mode)
 {
     return controlModeUsesVelocitySemantics(mode) ? joint.lastDirectVelTime
                                                   : joint.lastDirectPosTime;

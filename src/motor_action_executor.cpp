@@ -2,7 +2,7 @@
 
 #include <exception>
 
-#include <ros/ros.h>
+#include "can_driver/ros2_compat.hpp"
 
 MotorActionExecutor::MotorActionExecutor(std::shared_ptr<IDeviceManager> deviceManager)
     : deviceManager_(std::move(deviceManager))
