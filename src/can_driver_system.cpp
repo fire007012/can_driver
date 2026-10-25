@@ -11,6 +11,8 @@
 #include <cctype>
 #include <cmath>
 #include <map>
+#include <thread>
+#include <chrono>
 #include <set>
 
 namespace can_driver {
@@ -77,6 +79,8 @@ hardware_interface::CallbackReturn CanDriverSystem::on_init(
         return hardware_interface::CallbackReturn::ERROR;
     }
 
+    if (info.hardware_parameters.count("safety_domain"))
+        safety_ = robot_safety::domain(info.hardware_parameters.at("safety_domain"));
     axes_.clear();
     stateInterfaceNames_.clear();
     commandInterfaceNames_.clear();
@@ -85,6 +89,13 @@ hardware_interface::CallbackReturn CanDriverSystem::on_init(
         const auto &joint = info.joints[index];
         Axis axis;
         axis.config.name = joint.name;
+        for (const auto &interface : joint.command_interfaces) {
+            if (interface.name == "position") {
+                if (!interface.min.empty()) axis.lower = std::stod(interface.min);
+                if (!interface.max.empty()) axis.upper = std::stod(interface.max);
+            }
+            if (interface.name == "velocity" && !interface.max.empty()) axis.velocityLimit = std::stod(interface.max);
+        }
         axis.config.canDevice = parameter(joint, "can_device", "vcan0");
         axis.config.controlMode = parameter(joint, "control_mode", "velocity");
         axis.config.protocol = parseProtocol(parameter(joint, "protocol", "MT"));
@@ -162,6 +173,8 @@ bool CanDriverSystem::initDevices()
 
 void CanDriverSystem::shutdownDevices()
 {
+    active_ = false;
+    if (safety_) safety_->report(info_.name, false);
     if (deviceManager_) {
         for (const auto &axis : axes_) {
             const auto protocol = deviceManager_->getProtocol(axis.config.canDevice,
@@ -194,20 +207,70 @@ hardware_interface::CallbackReturn CanDriverSystem::on_activate(
     const rclcpp_lifecycle::State &)
 {
     if (!devicesInitialized_) return hardware_interface::CallbackReturn::ERROR;
-    for (const auto &axis : axes_) {
+    for (auto &axis : axes_) {
+        axis.positionCommand = axis.velocityCommand = std::numeric_limits<double>::quiet_NaN();
+        axis.claimed = false; axis.commandReceived = false;
         const auto protocol = deviceManager_->getProtocol(axis.config.canDevice,
                                                            axis.config.protocol);
+        if (protocol && safety_) {
+            protocol->Stop(axis.config.motorId);
+            const auto deadline = std::chrono::steady_clock::now() + std::chrono::seconds(2);
+            SharedDriverState::AxisFeedbackState feedback;
+            const SharedDriverState::AxisKey key{axis.config.canDevice, axis.config.protocol,
+                                                  NormalizeProtocolMotorId(axis.config.motorId)};
+            bool fresh = false;
+            do {
+                fresh = deviceManager_->getSharedDriverState()->getAxisFeedback(key, &feedback) &&
+                    feedback.feedbackSeen && feedback.positionValid && feedback.velocityValid &&
+                    SharedDriverSteadyNowNs() - feedback.lastRxSteadyNs <= 500000000 &&
+                    !(feedback.faultValid && feedback.fault);
+                if (fresh) break;
+                std::this_thread::sleep_for(std::chrono::milliseconds(10));
+            } while (std::chrono::steady_clock::now() < deadline);
+            if (!fresh) { stopAll(); return hardware_interface::CallbackReturn::ERROR; }
+            // Prime a safe target before enabling; SI command buffers remain unclaimed/NaN.
+            bool seeded = false;
+            if (axisControlModeFromString(axis.config.controlMode) == AxisControlMode::Velocity)
+                seeded = protocol->setVelocity(axis.config.motorId, 0);
+            else if (feedback.position >= INT32_MIN && feedback.position <= INT32_MAX)
+                seeded = protocol->quickSetPosition(axis.config.motorId, static_cast<int32_t>(feedback.position));
+            if (!seeded) { stopAll(); return hardware_interface::CallbackReturn::ERROR; }
+        }
         if (!protocol || !protocol->Enable(axis.config.motorId)) {
             ROS_ERROR("[CanDriverSystem] Failed to enable joint '%s'.", axis.config.name.c_str());
+            stopAll();
             return hardware_interface::CallbackReturn::ERROR;
         }
+        if (safety_) {
+            const auto deadline = std::chrono::steady_clock::now() + std::chrono::seconds(2);
+            bool confirmed = false;
+            const auto expected = axisControlModeFromString(axis.config.controlMode) == AxisControlMode::Velocity ?
+                CanProtocol::MotorMode::Velocity : axisControlModeFromString(axis.config.controlMode) == AxisControlMode::Csp ?
+                CanProtocol::MotorMode::CSP : CanProtocol::MotorMode::Position;
+            do {
+                SharedDriverState::AxisFeedbackState feedback;
+                const SharedDriverState::AxisKey key{axis.config.canDevice, axis.config.protocol,
+                    NormalizeProtocolMotorId(axis.config.motorId)};
+                confirmed = deviceManager_->getSharedDriverState()->getAxisFeedback(key, &feedback) &&
+                    feedback.enabledValid && feedback.enabled && feedback.faultValid && !feedback.fault &&
+                    feedback.modeValid && feedback.mode == expected &&
+                    SharedDriverSteadyNowNs() - feedback.lastRxSteadyNs <= 500000000;
+                if (confirmed) break;
+                std::this_thread::sleep_for(std::chrono::milliseconds(10));
+            } while (std::chrono::steady_clock::now() < deadline);
+            if (!confirmed) { stopAll(); return hardware_interface::CallbackReturn::ERROR; }
+        }
     }
+    active_ = true;
     return hardware_interface::CallbackReturn::SUCCESS;
 }
 
 hardware_interface::CallbackReturn CanDriverSystem::on_deactivate(
     const rclcpp_lifecycle::State &)
 {
+    active_ = false;
+    if (safety_) safety_->report(info_.name, false);
+    for (auto &axis : axes_) { axis.claimed = false; axis.commandReceived = false; axis.positionCommand = axis.velocityCommand = std::numeric_limits<double>::quiet_NaN(); }
     if (deviceManager_) {
         for (const auto &axis : axes_) {
             const auto protocol = deviceManager_->getProtocol(axis.config.canDevice,
@@ -265,22 +328,58 @@ hardware_interface::return_type CanDriverSystem::read(const rclcpp::Time &, cons
         const auto protocol = deviceManager_->getProtocol(axis.config.canDevice,
                                                            axis.config.protocol);
         if (!protocol) return hardware_interface::return_type::ERROR;
+        if (safety_ && active_) {
+            SharedDriverState::AxisFeedbackState feedback;
+            const SharedDriverState::AxisKey key{axis.config.canDevice, axis.config.protocol,
+                                                  NormalizeProtocolMotorId(axis.config.motorId)};
+            const auto now = SharedDriverSteadyNowNs();
+            if (!deviceManager_->getSharedDriverState()->getAxisFeedback(key, &feedback) ||
+                !feedback.feedbackSeen || !feedback.positionValid || !feedback.velocityValid ||
+                !feedback.enabledValid || !feedback.enabled || !feedback.faultValid || feedback.fault ||
+                now - feedback.lastRxSteadyNs > 500000000) {
+                fail("private CAN feedback stale/fault: " + axis.config.name);
+                return hardware_interface::return_type::ERROR;
+            }
+        }
         axis.position = rawPositionToJointPosition(axis.config,
                                                     protocol->getPosition(axis.config.motorId));
         axis.velocity = static_cast<double>(protocol->getVelocity(axis.config.motorId)) *
                         effectiveVelocityScale(axis.config);
         axis.effort = static_cast<double>(protocol->getCurrent(axis.config.motorId));
     }
+    if (safety_) safety_->report(info_.name, active_);
     return hardware_interface::return_type::OK;
 }
 
 hardware_interface::return_type CanDriverSystem::write(const rclcpp::Time &, const rclcpp::Duration &)
 {
     if (!devicesInitialized_) return hardware_interface::return_type::ERROR;
+    if (!active_) return hardware_interface::return_type::OK;
+    if (safety_ && !safety_->permits(safetyEpoch_)) {
+        if (safety_->state() != robot_safety::Domain::State::Armed && !permissionLost_) {
+            stopAll(); permissionLost_ = true;
+        }
+        for (auto &axis : axes_) axis.positionCommand = axis.velocityCommand = std::numeric_limits<double>::quiet_NaN();
+        return hardware_interface::return_type::OK;
+    }
+    permissionLost_ = false;
     for (auto &axis : axes_) {
+        if (!axis.claimed) continue;
+        const bool velocity = axisControlModeFromString(axis.config.controlMode) == AxisControlMode::Velocity;
+        const double command = velocity ? axis.velocityCommand : axis.positionCommand;
+        if (!std::isfinite(command)) {
+            if (std::isnan(command) && !axis.commandReceived) continue;
+            fail("non-finite private CAN command"); return hardware_interface::return_type::ERROR;
+        }
+        axis.commandReceived = true;
+        if ((!velocity && (axis.positionCommand < axis.lower || axis.positionCommand > axis.upper)) ||
+            (velocity && std::abs(axis.velocityCommand) > axis.velocityLimit)) {
+            fail("private CAN command outside SI limits: " + axis.config.name);
+            return hardware_interface::return_type::ERROR;
+        }
         const auto protocol = deviceManager_->getProtocol(axis.config.canDevice,
                                                            axis.config.protocol);
-        if (!protocol) return hardware_interface::return_type::ERROR;
+        if (!protocol) { fail("private CAN protocol missing"); return hardware_interface::return_type::ERROR; }
         const auto mode = axisControlModeFromString(axis.config.controlMode);
         bool ok = false;
         if (mode == AxisControlMode::Velocity) {
@@ -293,14 +392,53 @@ hardware_interface::return_type CanDriverSystem::write(const rclcpp::Time &, con
             }
             ok = protocol->setVelocity(axis.config.motorId, raw);
         } else {
-            const auto raw = static_cast<std::int32_t>(std::llround(
-                jointPositionToRawCount(axis.config, axis.positionCommand)));
+            const double count = jointPositionToRawCount(axis.config, axis.positionCommand);
+            if (!std::isfinite(count) || count < INT32_MIN || count > INT32_MAX) {
+                fail("private CAN position overflow"); return hardware_interface::return_type::ERROR;
+            }
+            const auto raw = static_cast<std::int32_t>(std::llround(count));
             ok = mode == AxisControlMode::Csp
                      ? protocol->quickSetPosition(axis.config.motorId, raw)
                      : protocol->setPosition(axis.config.motorId, raw);
         }
-        if (!ok) return hardware_interface::return_type::ERROR;
+        if (!ok) { fail("private CAN write failed: " + axis.config.name); return hardware_interface::return_type::ERROR; }
     }
+    return hardware_interface::return_type::OK;
+}
+
+void CanDriverSystem::stopAll()
+{
+    if (!deviceManager_) return;
+    for (auto &axis : axes_) {
+        axis.claimed = false; axis.commandReceived = false;
+        axis.positionCommand = axis.velocityCommand = std::numeric_limits<double>::quiet_NaN();
+        auto protocol = deviceManager_->getProtocol(axis.config.canDevice, axis.config.protocol);
+        if (protocol) protocol->Stop(axis.config.motorId);
+    }
+}
+bool CanDriverSystem::fail(const std::string &reason)
+{
+    if (safety_) { safety_->report(info_.name, false); safety_->fault(reason); }
+    stopAll(); return false;
+}
+hardware_interface::return_type CanDriverSystem::perform_command_mode_switch(
+    const std::vector<std::string> &start, const std::vector<std::string> &stop)
+{
+    for (auto &axis : axes_) {
+        const auto interface = axis.config.name + "/" +
+          (axisControlModeFromString(axis.config.controlMode) == AxisControlMode::Velocity ? "velocity" : "position");
+        if (std::find(stop.begin(), stop.end(), interface) != stop.end()) {
+            axis.claimed = false; axis.commandReceived = false;
+            auto protocol = deviceManager_->getProtocol(axis.config.canDevice, axis.config.protocol);
+            if (protocol) protocol->Stop(axis.config.motorId);
+        }
+        if (std::find(start.begin(), start.end(), interface) != start.end()) { axis.claimed = true; axis.commandReceived = false; }
+        if (std::find(stop.begin(), stop.end(), interface) != stop.end() ||
+            std::find(start.begin(), start.end(), interface) != start.end())
+            axis.positionCommand = axis.velocityCommand = std::numeric_limits<double>::quiet_NaN();
+    }
+    if (safety_) safetyEpoch_ = safety_->epoch();
+    permissionLost_ = false;
     return hardware_interface::return_type::OK;
 }
 

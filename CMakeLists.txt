@@ -6,6 +6,7 @@ set(CMAKE_CXX_STANDARD_REQUIRED ON)
 set(CMAKE_CXX_EXTENSIONS OFF)
 
 find_package(ament_cmake REQUIRED)
+find_package(robot_safety REQUIRED)
 find_package(ament_index_cpp REQUIRED)
 find_package(rclcpp REQUIRED)
 find_package(rclcpp_action REQUIRED)
@@ -83,7 +84,7 @@ target_link_libraries(can_driver_core ${INNFOS_ACTUATOR_LIB} pthread)
 ament_target_dependencies(can_driver_core rclcpp)
 set_target_properties(can_driver_core PROPERTIES
   BUILD_RPATH "${INNFOS_SDK_LIB_DIR}"
-  INSTALL_RPATH "${INNFOS_SDK_LIB_DIR}"
+  INSTALL_RPATH "$ORIGIN"
 )
 
 add_library(can_driver_system SHARED src/can_driver_system.cpp)
@@ -92,7 +93,7 @@ target_include_directories(can_driver_system PUBLIC
   $<INSTALL_INTERFACE:include>
 )
 target_link_libraries(can_driver_system can_driver_core)
-ament_target_dependencies(can_driver_system hardware_interface pluginlib rclcpp rclcpp_lifecycle)
+ament_target_dependencies(can_driver_system robot_safety hardware_interface pluginlib rclcpp rclcpp_lifecycle)
 pluginlib_export_plugin_description_file(hardware_interface can_driver_plugins.xml)
 
 add_executable(can_driver_node src/can_driver_node.cpp)
@@ -103,6 +104,8 @@ ament_target_dependencies(can_driver_node
 add_dependencies(can_driver_node ${PROJECT_NAME}__rosidl_generator_cpp)
 rosidl_get_typesupport_target(cpp_typesupport_target ${PROJECT_NAME} "rosidl_typesupport_cpp")
 target_link_libraries(can_driver_node "${cpp_typesupport_target}")
+
+install(FILES ${INNFOS_ACTUATOR_LIB} DESTINATION lib)
 
 install(TARGETS can_driver_core can_driver_system can_driver_node
   EXPORT can_driver_targets
@@ -130,5 +133,5 @@ if(BUILD_TESTING)
 endif()
 
 ament_export_include_directories(include)
-ament_export_dependencies(rosidl_default_runtime hardware_interface pluginlib)
+ament_export_dependencies(rosidl_default_runtime hardware_interface pluginlib robot_safety)
 ament_package()

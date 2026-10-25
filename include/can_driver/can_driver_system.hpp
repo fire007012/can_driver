@@ -10,6 +10,8 @@
 #include <rclcpp/time.hpp>
 
 #include <memory>
+#include <limits>
+#include "robot_safety/domain.hpp"
 #include <functional>
 #include <string>
 #include <vector>
@@ -39,15 +41,29 @@ public:
     hardware_interface::return_type write(const rclcpp::Time &time,
                                            const rclcpp::Duration &period) override;
 
+    hardware_interface::return_type perform_command_mode_switch(
+        const std::vector<std::string> &start, const std::vector<std::string> &stop) override;
+    hardware_interface::CallbackReturn on_error(const rclcpp_lifecycle::State &) override
+    { shutdownDevices(); return hardware_interface::CallbackReturn::SUCCESS; }
 private:
+    void stopAll();
+    bool fail(const std::string &reason);
+    std::shared_ptr<robot_safety::Domain> safety_;
+    uint64_t safetyEpoch_ = 0;
+    bool active_ = false;
+    bool permissionLost_ = false;
     struct Axis {
         CanDriverJointConfig config;
         double position{0.0};
         double velocity{0.0};
         double effort{0.0};
-        double positionCommand{0.0};
-        double velocityCommand{0.0};
+        double positionCommand{std::numeric_limits<double>::quiet_NaN()};
+        double velocityCommand{std::numeric_limits<double>::quiet_NaN()};
         bool configured{false};
+        bool claimed{false};
+        bool commandReceived{false};
+        double lower = -std::numeric_limits<double>::infinity(), upper = std::numeric_limits<double>::infinity();
+        double velocityLimit = std::numeric_limits<double>::infinity();
     };
 
     static bool parseMotorId(const std::string &value, MotorID *out);
