@@ -827,6 +827,7 @@ void MtCan::syncSharedFeedback(uint8_t motorId, const MotorState &state) const
             feedback->enabledValid = state.enabledReceived;
             feedback->faultValid = state.faultReceived;
             feedback->feedbackSeen = true;
+            feedback->feedbackSteadyNs = state.feedbackSteadyNs;
             feedback->lastRxSteadyNs = nowNs;
             feedback->lastValidStateSteadyNs = nowNs;
             feedback->consecutiveTimeoutCount = 0;
@@ -1002,8 +1003,8 @@ void MtCan::handleResponse(const CanTransport::Frame &frame)
                 // 速度 int16_t, 单位 1 dps/LSB（保持协议原始单位）
                 state.velocity = readInt16LE(frame, 4);
                 state.encoderPosition = readUInt16LE(frame, 6);
-                state.currentReceived = true;
-                state.velocityReceived = true;
+                state.currentReceived = true; state.feedbackSteadyNs[5] = can_driver::SharedDriverSteadyNowNs();
+                state.velocityReceived = true; state.feedbackSteadyNs[1] = can_driver::SharedDriverSteadyNowNs();
             }
             break;
         }
@@ -1016,7 +1017,7 @@ void MtCan::handleResponse(const CanTransport::Frame &frame)
                 state.voltageRaw2 = readUInt16LE(frame, 4);
                 const uint16_t errorCode = readUInt16LE(frame, 6);
                 state.error = errorCode != 0;
-                state.faultReceived = true;
+                state.faultReceived = true; state.feedbackSteadyNs[4] = can_driver::SharedDriverSteadyNowNs();
                 if (state.error) {
                     std::cerr << "[MtCan] Motor " << static_cast<int>(nodeId)
                               << " error code 0x" << std::hex << errorCode
@@ -1031,7 +1032,7 @@ void MtCan::handleResponse(const CanTransport::Frame &frame)
             // DATA[1] = NULL, DATA[2~7] = int48_t LE, 单位 0.01°/LSB
             if (frame.dlc >= 8) {
                 state.multiTurnAngle = readInt48LE(frame, 2);
-                state.positionReceived = true;
+                state.positionReceived = true; state.feedbackSteadyNs[0] = can_driver::SharedDriverSteadyNowNs();
             }
             break;
         }
@@ -1053,8 +1054,8 @@ void MtCan::handleResponse(const CanTransport::Frame &frame)
                 state.current = static_cast<double>(rawCurrent) / 100.0;
                 state.velocity = readInt16LE(frame, 4);
                 state.encoderPosition = readUInt16LE(frame, 6);
-                state.currentReceived = true;
-                state.velocityReceived = true;
+                state.currentReceived = true; state.feedbackSteadyNs[5] = can_driver::SharedDriverSteadyNowNs();
+                state.velocityReceived = true; state.feedbackSteadyNs[1] = can_driver::SharedDriverSteadyNowNs();
             }
             break;
         }

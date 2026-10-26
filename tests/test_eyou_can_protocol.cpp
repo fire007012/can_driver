@@ -1,5 +1,4 @@
 #include <gtest/gtest.h>
-#include <ros/time.h>
 
 #include "can_driver/EyouCan.h"
 #include "can_driver/SharedDriverState.h"
@@ -91,7 +90,6 @@ class EyouCanTest : public ::testing::Test {
 protected:
     static void SetUpTestSuite()
     {
-        ros::Time::init();
     }
 
     EyouCanTest()

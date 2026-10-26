@@ -261,7 +261,8 @@ bool EyouCan::setMode(MotorID Id, MotorMode mode)
     {
         std::lock_guard<std::mutex> stateLock(stateMutex);
         auto &state = motorStates[motorId];
-        state.mode = mode;
+        // Keep observed mode separate from the requested mode; only 0x0F readback
+        // may change the feedback value and its freshness timestamp.
         // Mode switching can invalidate the device-side velocity preconfiguration
         // used by position/CSP motion. Force the next motion command path to
         // re-issue 0x09 before 0x0A.
@@ -1071,6 +1072,7 @@ void EyouCan::syncSharedFeedback(uint8_t motorId, const MotorState &state) const
             feedback->enabledValid = state.enabledReceived;
             feedback->faultValid = state.faultReceived;
             feedback->feedbackSeen = true;
+            feedback->feedbackSteadyNs = state.feedbackSteadyNs;
             feedback->lastRxSteadyNs = nowNs;
             feedback->lastValidStateSteadyNs = nowNs;
             feedback->consecutiveTimeoutCount = 0;
@@ -1249,17 +1251,17 @@ void EyouCan::handleResponse(const CanTransport::Frame &frame)
             case 0x05:
                 // [FIX #7] 当前电流值，32位有符号数，1=1mA
                 state.current = readInt32BE(frame, 2);
-                state.currentReceived = true;
+                state.currentReceived = true; state.feedbackSteadyNs[5] = can_driver::SharedDriverSteadyNowNs();
                 break;
             case 0x06:
                 // [FIX #8] 当前速度值，32位有符号数
                 state.actualVelocity = readInt32BE(frame, 2);
-                state.velocityReceived = true;
+                state.velocityReceived = true; state.feedbackSteadyNs[1] = can_driver::SharedDriverSteadyNowNs();
                 break;
             case 0x07:
                 // 当前位置值
                 state.position = readInt32BE(frame, 2);
-                state.positionReceived = true;  // [FIX #9]
+                state.positionReceived = true; state.feedbackSteadyNs[0] = can_driver::SharedDriverSteadyNowNs();  // [FIX #9]
                 break;
             case 0x3B:
                 // 位置偏置参数
@@ -1281,20 +1283,20 @@ void EyouCan::handleResponse(const CanTransport::Frame &frame)
                     state.mode = MotorMode::Position;
                     break;
                 }
-                state.modeReceived = true;
+                state.modeReceived = true; state.feedbackSteadyNs[2] = can_driver::SharedDriverSteadyNowNs();
                 break;
             case 0x10:
                 // 使能/失能状态
                 // 读返回: 32位数据，01=使能 00=失能
                 state.enabled = dataByteOrZero(frame, 5) != 0;
-                state.enabledReceived = true;
+                state.enabledReceived = true; state.feedbackSteadyNs[3] = can_driver::SharedDriverSteadyNowNs();
                 break;
             case 0x15:
                 // [FIX #4] 告警指示，数据从 data[2] 开始
                 {
                     uint32_t errorCode = readUInt32BE(frame, 2);
                     state.fault = (errorCode != 0);
-                    state.faultReceived = true;
+                    state.faultReceived = true; state.feedbackSteadyNs[4] = can_driver::SharedDriverSteadyNowNs();
                     if (errorCode != 0) {
                         std::cerr << "[EyouCan] Motor " << static_cast<int>(motorId)
                                   << " reported error code 0x" << std::hex

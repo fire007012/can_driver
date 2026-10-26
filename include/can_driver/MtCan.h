@@ -134,6 +134,7 @@ public:
 
 private:
     struct MotorState {
+        std::array<std::int64_t,6> feedbackSteadyNs{};
         int32_t position = 0;
         int64_t multiTurnAngle = 0;  ///< 0x92 多圈角度，单位 0.01°
         int16_t velocity = 0;        ///< 速度，单位 1 dps/LSB（协议原始单位）

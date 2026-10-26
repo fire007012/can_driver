@@ -1,5 +1,4 @@
 #include <gtest/gtest.h>
-#include <ros/time.h>
 
 #include "can_driver/DeviceRuntime.h"
 #include "can_driver/SharedDriverState.h"
@@ -97,7 +96,6 @@ class DeviceRuntimeTest : public ::testing::Test {
 protected:
     static void SetUpTestSuite()
     {
-        ros::Time::init();
     }
 };
 

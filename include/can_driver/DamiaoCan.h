@@ -57,6 +57,7 @@ public:
 
 private:
     struct MotorState {
+        std::array<std::int64_t,6> feedbackSteadyNs{};
         int64_t position{0};
         int32_t velocity{0};
         int16_t current{0};

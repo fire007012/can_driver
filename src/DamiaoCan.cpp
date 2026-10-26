@@ -426,13 +426,13 @@ void DamiaoCan::handleResponse(const CanTransport::Frame &frame)
         state.enabled = (feedbackState == kDamiaoEnabledStateCode);
         state.fault = (feedbackState != kDamiaoDisabledStateCode &&
                        feedbackState != kDamiaoEnabledStateCode);
-        state.positionReceived = true;
-        state.velocityReceived = true;
-        state.currentReceived = true;
+        state.positionReceived = true; state.feedbackSteadyNs[0] = can_driver::SharedDriverSteadyNowNs();
+        state.velocityReceived = true; state.feedbackSteadyNs[1] = can_driver::SharedDriverSteadyNowNs();
+        state.currentReceived = true; state.feedbackSteadyNs[5] = can_driver::SharedDriverSteadyNowNs();
         state.mode = MotorMode::Velocity;
-        state.modeReceived = true;
-        state.enabledReceived = true;
-        state.faultReceived = true;
+        state.modeReceived = true; state.feedbackSteadyNs[2] = can_driver::SharedDriverSteadyNowNs();
+        state.enabledReceived = true; state.feedbackSteadyNs[3] = can_driver::SharedDriverSteadyNowNs();
+        state.faultReceived = true; state.feedbackSteadyNs[4] = can_driver::SharedDriverSteadyNowNs();
         state.feedbackSeen = true;
         snapshot = state;
     }
@@ -693,6 +693,7 @@ void DamiaoCan::syncSharedFeedback(std::uint8_t motorId, const MotorState &state
             feedback->enabledValid = state.enabledReceived;
             feedback->faultValid = state.faultReceived;
             feedback->feedbackSeen = state.feedbackSeen;
+            feedback->feedbackSteadyNs = state.feedbackSteadyNs;
             feedback->lastRxSteadyNs = nowNs;
             feedback->lastValidStateSteadyNs = nowNs;
             feedback->consecutiveTimeoutCount = 0;

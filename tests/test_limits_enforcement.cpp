@@ -1,5 +1,4 @@
 #include <gtest/gtest.h>
-#include <ros/time.h>
 
 #include "can_driver/SafeCommand.h"
 
@@ -16,7 +15,6 @@ class RosTimeFixture : public ::testing::Test {
 protected:
     static void SetUpTestSuite()
     {
-        ros::Time::init();
     }
 };
 

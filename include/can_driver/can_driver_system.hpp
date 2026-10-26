@@ -12,6 +12,10 @@
 #include <memory>
 #include <limits>
 #include "robot_safety/domain.hpp"
+#include "robot_safety/runtime.hpp"
+#include "robot_safety/axis_session.hpp"
+#include "robot_safety/freshness.hpp"
+#include "robot_safety/parameters.hpp"
 #include <functional>
 #include <string>
 #include <vector>
@@ -20,6 +24,9 @@ namespace can_driver {
 
 class CanDriverSystem final : public hardware_interface::SystemInterface {
 public:
+    CanDriverSystem() = default;
+    explicit CanDriverSystem(std::shared_ptr<IDeviceManager> manager) : deviceManager_(std::move(manager)) {}
+    ~CanDriverSystem() override { backendServices_.reset(); shutdownDevices(); }
     hardware_interface::CallbackReturn on_init(
         const hardware_interface::HardwareInfo &info) override;
     hardware_interface::CallbackReturn on_configure(
@@ -47,13 +54,23 @@ public:
     { shutdownDevices(); return hardware_interface::CallbackReturn::SUCCESS; }
 private:
     void stopAll();
+    void stopGroup(const std::string & group);
+    bool prepareAxis(std::size_t index);
+    void prepareGroup(const std::string & group);
+    bool grouped_ = false;
+    std::shared_ptr<robot_safety::Runtime> guard_, backendServices_;
     bool fail(const std::string &reason);
     std::shared_ptr<robot_safety::Domain> safety_;
     uint64_t safetyEpoch_ = 0;
-    bool active_ = false;
+    std::atomic<bool> active_{false};
     bool permissionLost_ = false;
     struct Axis {
         CanDriverJointConfig config;
+        robot_safety::AxisSession session;
+        robot_safety::Freshness::Thresholds feedbackLimits{250000000,500000000,100000000};
+        std::array<robot_safety::Freshness::Thresholds,5> fieldLimits{};
+        std::map<std::size_t,robot_safety::Freshness> fieldHealth;
+        uint64_t observedPreparation = UINT64_MAX;
         double position{0.0};
         double velocity{0.0};
         double effort{0.0};
@@ -74,11 +91,12 @@ private:
     bool initDevices();
     void shutdownDevices();
 
-    std::shared_ptr<DeviceManager> deviceManager_;
+    std::shared_ptr<IDeviceManager> deviceManager_;
     std::vector<Axis> axes_;
     std::vector<std::string> stateInterfaceNames_;
     std::vector<std::string> commandInterfaceNames_;
     bool devicesInitialized_{false};
+    std::map<std::string,uint64_t> transportErrors_;
 };
 
 } // namespace can_driver

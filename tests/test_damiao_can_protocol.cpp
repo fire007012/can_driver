@@ -1,5 +1,4 @@
 #include <gtest/gtest.h>
-#include <ros/time.h>
 
 #include "can_driver/DamiaoCan.h"
 #include "can_driver/SharedDriverState.h"
@@ -199,7 +198,6 @@ class DamiaoCanTest : public ::testing::Test {
 protected:
     static void SetUpTestSuite()
     {
-        ros::Time::init();
     }
 
     DamiaoCanTest()

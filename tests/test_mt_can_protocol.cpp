@@ -1,5 +1,4 @@
 #include <gtest/gtest.h>
-#include <ros/time.h>
 
 #include "can_driver/MtCan.h"
 #include "can_driver/SharedDriverState.h"
@@ -77,7 +76,6 @@ class MtCanTest : public ::testing::Test {
 protected:
     static void SetUpTestSuite()
     {
-        ros::Time::init();
     }
 
     MtCanTest()

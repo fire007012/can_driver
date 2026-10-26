@@ -135,6 +135,7 @@ private:
      * @brief 内部状态缓存，记录最新目标/实际数据
      */
     struct MotorState {
+        std::array<std::int64_t,6> feedbackSteadyNs{};
         int32_t position = 0;
         int32_t commandedPosition = 0;
         int32_t commandedVelocity = 0;

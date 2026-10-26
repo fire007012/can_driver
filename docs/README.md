@@ -12,7 +12,7 @@
 ## ROS2 迁移
 
 - [`ROS1到ROS2迁移计划.md`](ROS1到ROS2迁移计划.md)
-  - 当前 ROS1 基线、ROS2 目标架构、已完成项、剩余验收和回滚条件
+  - ROS2 现状、历史代码位置及实机验收边界
 
 ## API 参考
 
@@ -39,32 +39,13 @@
 - [`ECB四电机联调指南.md`](ECB四电机联调指南.md)
 - [`MT_MIT模式接入说明.md`](MT_MIT模式接入说明.md)
 
-## 归档
+## 历史参考与验证
 
-历史 bug 报告、实施计划、重构复盘、测试方案和架构总览已统一移入 [`归档/`](%E5%BD%92%E6%A1%A3/)。
-
-新增归档示例：
-
-- [`归档/架构设计.md`](归档/架构设计.md)
-- [`归档/CAN帧测试方案.md`](归档/CAN帧测试方案.md)
-- [`归档/无硬件集成测试方案.md`](归档/无硬件集成测试方案.md)
-- [`归档/测试计划.md`](归档/测试计划.md)
-- [`归档/零点限位功能测试方案.md`](归档/零点限位功能测试方案.md)
-
-重点归档示例：
-
-- `2026-04-01_结构审查_五个深层问题.md`
-- `2026-04-02_五个问题调查与解决方案.md`
-- `can_driver重构后项目形态总览_2026-04-01.md`
-- `can_driver对齐Eyou_Canopen_Master重构报告.md`
-- `意优私有协议单一生命周期设计_2026-03-31.md`
-- `达妙履带电机接入实施计划_按Commit.md`
-
-这些文档保留历史价值，但不再作为当前执行基线。
+父工作区 `reference/ros1/can_driver/` 保存旧 ROS1 接口、rostest、Noetic CI 和原归档说明；本包只维护 ROS2，不再安排 ROS1 回退。整车构建与回归使用父工作区 `tools/validate_ros2.sh`，根 `.github/workflows/ci.yml` 提供 Humble 集成检查。
 
 ## 相关包
 
-- [`../../Eyou_ROS1_Master/README.md`](../../Eyou_ROS1_Master/README.md)
+- [`../../robot_hardware/README.md`](../../robot_hardware/README.md)
   - 统一外观层 / 混合后端正式入口
 - [`../../mobility_control/README.md`](../../mobility_control/README.md)
   - 底盘北向控制入口

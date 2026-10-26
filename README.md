@@ -18,7 +18,7 @@ can_driver/
 |   `-- ros2_controllers_tracks_only.yaml
 |-- docs/
 |   |-- README.md
-|   `-- 归档/
+|   `-- （历史归档见父工作区 reference/ros1/can_driver/docs/）
 |-- launch/
 |   |-- can_driver.launch.py
 |   `-- tracks_only.launch.py
@@ -30,11 +30,11 @@ can_driver/
 |   `-- test_*.sh
 |-- src/
 |   |-- can_driver_node.cpp
-|   |-- CanDriverHW.cpp
+|   |-- can_driver_system.cpp
 |   |-- CanDriverRuntime.cpp
-|   |-- driver_ros_endpoints.cpp
-|   |-- lifecycle_service_gateway.cpp
-|   `-- *_protocol.cpp
+|   |-- command_gate.cpp
+|   |-- lifecycle_driver_ops.cpp
+|   `-- *Can.cpp / *Transport.cpp
 |-- srv/
 |   |-- Init.srv
 |   |-- Recover.srv
@@ -175,7 +175,7 @@ ros2 service call /can_driver_node/set_zero_limit can_driver/srv/SetZeroLimit "{
 - 默认 launch 以 standalone 模式启动，不自动进入 ros2_control 控制链。
 - `direct motor` 话题适合单电机排障，不应替代正式 ros2_control 控制链。
 - `MoveMotor.action` / `HomeMotor.action` 目前只保留为消息合同，不是默认 launch 的主要操作入口。
-- ROS1 旧 launch 和 `CanDriverHW` 源码只作为迁移对照，当前入口以 ROS2 launch 和 `CanDriverSystem` 为准。
+- ROS1 旧 launch、`CanDriverHW`、XmlRpc 配置解析器及旧 rostest 已移到父工作区 `reference/ros1/can_driver/`；当前入口以 ROS2 launch 和 `CanDriverSystem` 为准。
 
 ## 文档入口
 

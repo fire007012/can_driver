@@ -5,6 +5,7 @@
 #include "can_driver/CanType.h"
 
 #include <algorithm>
+#include <array>
 #include <chrono>
 #include <cstdint>
 #include <map>
@@ -62,6 +63,8 @@ public:
         bool faultValid{false};
         bool feedbackSeen{false};
         bool degraded{false};
+        // Position, velocity, mode, enabled, fault, current: updated only by the corresponding received field.
+        std::array<std::int64_t,6> feedbackSteadyNs{};
         std::int64_t lastRxSteadyNs{0};
         std::int64_t lastValidStateSteadyNs{0};
         std::uint32_t consecutiveTimeoutCount{0};
