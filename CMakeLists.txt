@@ -125,7 +125,7 @@ install(PROGRAMS scripts/realtime_motor_ui.py scripts/mt_motor_interface.py
 
 if(BUILD_TESTING)
   find_package(ament_cmake_gtest REQUIRED)
-  foreach(protocol_test test_eyou_can_protocol test_eyou_can_csp test_damiao_can_protocol test_mt_can_protocol test_refresh_scheduler test_device_runtime test_limits_enforcement test_operational_coordinator)
+  foreach(protocol_test test_device_manager test_udp_can_transport test_eyou_can_protocol test_eyou_can_csp test_damiao_can_protocol test_mt_can_protocol test_refresh_scheduler test_device_runtime test_limits_enforcement test_operational_coordinator)
     ament_add_gtest(${protocol_test} tests/${protocol_test}.cpp)
     target_link_libraries(${protocol_test} can_driver_core)
     target_include_directories(${protocol_test} PRIVATE include)

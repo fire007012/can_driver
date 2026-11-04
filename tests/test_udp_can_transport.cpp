@@ -1,5 +1,4 @@
 #include <gtest/gtest.h>
-#include <ros/time.h>
 
 #include "can_driver/UdpCanTransport.h"
 
@@ -18,13 +17,6 @@
 
 namespace {
 
-class RosTimeFixture : public ::testing::Test {
-protected:
-    static void SetUpTestSuite()
-    {
-        ros::Time::init();
-    }
-};
 
 int bindLoopbackUdpSocket(std::uint16_t port)
 {
@@ -110,7 +102,7 @@ void sendPacketToLoopback(int fd,
               static_cast<ssize_t>(packet.size()));
 }
 
-TEST_F(RosTimeFixture, SendPreservesFrameDlcInUdpWrapper)
+TEST(UdpCanTransportTest, SendPreservesFrameDlcInUdpWrapper)
 {
     const int receiverFd = bindLoopbackUdpSocket(0);
     ASSERT_GE(receiverFd, 0);
@@ -146,7 +138,7 @@ TEST_F(RosTimeFixture, SendPreservesFrameDlcInUdpWrapper)
     ::close(receiverFd);
 }
 
-TEST_F(RosTimeFixture, ReceiveUsesPacketDlcAndIgnoresUnexpectedSender)
+TEST(UdpCanTransportTest, ReceiveUsesPacketDlcAndIgnoresUnexpectedSender)
 {
     const int expectedSenderFd = bindLoopbackUdpSocket(0);
     ASSERT_GE(expectedSenderFd, 0);

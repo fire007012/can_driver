@@ -1,5 +1,4 @@
 #include <gtest/gtest.h>
-#include <ros/time.h>
 
 #include "can_driver/DamiaoCan.h"
 #include "can_driver/DeviceRefreshWorker.h"
@@ -58,13 +57,6 @@ public:
 
 namespace {
 
-class RosTimeFixture : public ::testing::Test {
-protected:
-    static void SetUpTestSuite()
-    {
-        ros::Time::init();
-    }
-};
 
 bool hasVcan0()
 {
@@ -74,7 +66,7 @@ bool hasVcan0()
 
 } // namespace
 
-TEST_F(RosTimeFixture, EnsureTransportCreatesDevice)
+TEST(DeviceManagerTest, EnsureTransportCreatesDevice)
 {
     if (!hasVcan0()) {
         GTEST_SKIP() << "vcan0 not available; skipping transport initialization path.";
@@ -87,7 +79,7 @@ TEST_F(RosTimeFixture, EnsureTransportCreatesDevice)
     EXPECT_EQ(dm.deviceCount(), 1u);
 }
 
-TEST_F(RosTimeFixture, EnsureTransportIdempotent)
+TEST(DeviceManagerTest, EnsureTransportIdempotent)
 {
     if (!hasVcan0()) {
         GTEST_SKIP() << "vcan0 not available; skipping transport idempotency path.";
@@ -101,19 +93,19 @@ TEST_F(RosTimeFixture, EnsureTransportIdempotent)
     EXPECT_EQ(dm.deviceCount(), 1u);
 }
 
-TEST_F(RosTimeFixture, GetTransportReturnsNullForNonexistent)
+TEST(DeviceManagerTest, GetTransportReturnsNullForNonexistent)
 {
     DeviceManager dm;
     EXPECT_EQ(dm.getTransport("nonexistent"), nullptr);
 }
 
-TEST_F(RosTimeFixture, GetProtocolReturnsNullBeforeEnsure)
+TEST(DeviceManagerTest, GetProtocolReturnsNullBeforeEnsure)
 {
     DeviceManager dm;
     EXPECT_EQ(dm.getProtocol("vcan0", CanType::MT), nullptr);
 }
 
-TEST_F(RosTimeFixture, SharedDriverStateIsStableAndAvailable)
+TEST(DeviceManagerTest, SharedDriverStateIsStableAndAvailable)
 {
     DeviceManager dm;
 
@@ -124,7 +116,7 @@ TEST_F(RosTimeFixture, SharedDriverStateIsStableAndAvailable)
     EXPECT_EQ(first, second);
 }
 
-TEST_F(RosTimeFixture, DeviceRefreshWorkerRunsTickLoopUntilStopped)
+TEST(DeviceManagerTest, DeviceRefreshWorkerRunsTickLoopUntilStopped)
 {
     std::atomic<int> tickCount{0};
     can_driver::DeviceRefreshWorker worker(
@@ -143,7 +135,7 @@ TEST_F(RosTimeFixture, DeviceRefreshWorkerRunsTickLoopUntilStopped)
     EXPECT_FALSE(worker.running());
 }
 
-TEST_F(RosTimeFixture, EnsureProtocolCreatesProtocol)
+TEST(DeviceManagerTest, EnsureProtocolCreatesProtocol)
 {
     if (!hasVcan0()) {
         GTEST_SKIP() << "vcan0 not available; skipping protocol creation path.";
@@ -156,14 +148,14 @@ TEST_F(RosTimeFixture, EnsureProtocolCreatesProtocol)
     EXPECT_NE(dm.getProtocol("vcan0", CanType::MT), nullptr);
 }
 
-TEST_F(RosTimeFixture, EnsureProtocolFailsWithoutTransport)
+TEST(DeviceManagerTest, EnsureProtocolFailsWithoutTransport)
 {
     DeviceManager dm;
     const bool ok = dm.ensureProtocol("nonexistent", CanType::MT);
     EXPECT_FALSE(ok);
 }
 
-TEST_F(RosTimeFixture, EnsureDamiaoProtocolCreatesAfterInjectedTransport)
+TEST(DeviceManagerTest, EnsureDamiaoProtocolCreatesAfterInjectedTransport)
 {
     DeviceManager dm;
     auto fakeTransport = std::make_shared<SocketCanController>();
@@ -175,7 +167,7 @@ TEST_F(RosTimeFixture, EnsureDamiaoProtocolCreatesAfterInjectedTransport)
     EXPECT_NE(std::dynamic_pointer_cast<DamiaoCan>(protocol), nullptr);
 }
 
-TEST_F(RosTimeFixture, EnsureEcbProtocolCreatesWithoutSocketTransport)
+TEST(DeviceManagerTest, EnsureEcbProtocolCreatesWithoutSocketTransport)
 {
     DeviceManager dm;
     ASSERT_TRUE(dm.ensureTransport("ecb://auto", true));
@@ -186,13 +178,13 @@ TEST_F(RosTimeFixture, EnsureEcbProtocolCreatesWithoutSocketTransport)
     EXPECT_TRUE(dm.isDeviceReady("ecb://auto"));
 }
 
-TEST_F(RosTimeFixture, GetDeviceMutexReturnsNullForNonexistent)
+TEST(DeviceManagerTest, GetDeviceMutexReturnsNullForNonexistent)
 {
     DeviceManager dm;
     EXPECT_EQ(dm.getDeviceMutex("nonexistent"), nullptr);
 }
 
-TEST_F(RosTimeFixture, GetDeviceMutexReturnsValidAfterEnsure)
+TEST(DeviceManagerTest, GetDeviceMutexReturnsValidAfterEnsure)
 {
     if (!hasVcan0()) {
         GTEST_SKIP() << "vcan0 not available; skipping mutex creation path.";
@@ -204,7 +196,7 @@ TEST_F(RosTimeFixture, GetDeviceMutexReturnsValidAfterEnsure)
     EXPECT_NE(mutex, nullptr);
 }
 
-TEST_F(RosTimeFixture, ShutdownAllClearsDevices)
+TEST(DeviceManagerTest, ShutdownAllClearsDevices)
 {
     if (!hasVcan0()) {
         GTEST_SKIP() << "vcan0 not available; skipping shutdown-on-initialized-device path.";
@@ -217,7 +209,7 @@ TEST_F(RosTimeFixture, ShutdownAllClearsDevices)
     EXPECT_EQ(dm.getTransport("vcan0"), nullptr);
 }
 
-TEST_F(RosTimeFixture, ShutdownDeviceOnlyClearsRequestedDevice)
+TEST(DeviceManagerTest, ShutdownDeviceOnlyClearsRequestedDevice)
 {
     DeviceManager dm;
     auto fake0 = std::make_shared<SocketCanController>();
@@ -254,7 +246,7 @@ TEST_F(RosTimeFixture, ShutdownDeviceOnlyClearsRequestedDevice)
     EXPECT_TRUE(fake1Health.transportReady);
 }
 
-TEST_F(RosTimeFixture, InitDeviceRecreatesProtocolsAfterTransportReinit)
+TEST(DeviceManagerTest, InitDeviceRecreatesProtocolsAfterTransportReinit)
 {
     if (!hasVcan0()) {
         GTEST_SKIP() << "vcan0 not available; skipping transport re-init regression path.";
@@ -287,7 +279,7 @@ TEST_F(RosTimeFixture, InitDeviceRecreatesProtocolsAfterTransportReinit)
     EXPECT_EQ(DeviceManagerTestAccessor::refreshWorkerCount(dm), 1u);
 }
 
-TEST_F(RosTimeFixture, IsDeviceReadyDropsImmediatelyAfterRecentLinkDown)
+TEST(DeviceManagerTest, IsDeviceReadyDropsImmediatelyAfterRecentLinkDown)
 {
     DeviceManager dm;
     auto transport = std::make_shared<SocketCanController>();
@@ -309,7 +301,7 @@ TEST_F(RosTimeFixture, IsDeviceReadyDropsImmediatelyAfterRecentLinkDown)
     EXPECT_EQ(health.lastRxSteadyNs, 100);
 }
 
-TEST_F(RosTimeFixture, IsDeviceReadyRecoversAfterRxNewerThanLinkDown)
+TEST(DeviceManagerTest, IsDeviceReadyRecoversAfterRxNewerThanLinkDown)
 {
     DeviceManager dm;
     auto transport = std::make_shared<SocketCanController>();
@@ -331,7 +323,7 @@ TEST_F(RosTimeFixture, IsDeviceReadyRecoversAfterRxNewerThanLinkDown)
     EXPECT_EQ(health.lastRxSteadyNs, 200);
 }
 
-TEST_F(RosTimeFixture, DeviceRefreshOverrideDoesNotLeakAcrossDevices)
+TEST(DeviceManagerTest, DeviceRefreshOverrideDoesNotLeakAcrossDevices)
 {
     DeviceManager dm;
     auto fake0 = std::make_shared<SocketCanController>();

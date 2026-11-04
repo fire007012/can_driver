@@ -465,10 +465,7 @@ hardware_interface::return_type CanDriverSystem::write(const rclcpp::Time &, con
     }
     for (auto &axis : axes_) {
         if (grouped_ && !safety_->permits(axis.session.group, axis.session.epoch)) {
-            const auto state = safety_->group(axis.session.group).state;
-            if ((state != robot_safety::Domain::State::Armed && !axis.session.permission_lost) ||
-                (axis.session.prepared->load() && (safety_->globallyInhibited() ||
-                 (state != robot_safety::Domain::State::Armed && axis.session.prepared_epoch->load() != safety_->epoch(axis.session.group)))))
+            if (robot_safety::preparationRevoked(*safety_, axis.session))
                 stopGroup(axis.session.group);
             axis.positionCommand = axis.velocityCommand = std::numeric_limits<double>::quiet_NaN();
             continue;
