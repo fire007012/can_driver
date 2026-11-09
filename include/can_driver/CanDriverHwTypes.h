@@ -44,6 +44,7 @@ struct CanDriverJointConfig {
     std::string canDevice;
     std::string controlMode;
     std::uint32_t dmMasterId{0};
+    double dmMitKp{0}, dmMitKd{0};
 
     double positionScale{1.0};
     double velocityScale{1.0};

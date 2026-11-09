@@ -1,6 +1,7 @@
 #include <gtest/gtest.h>
 
 #include "can_driver/EyouCan.h"
+#include "can_driver/PpDefaultVelocity.h"
 
 #include <cstdint>
 #include <memory>
@@ -82,6 +83,36 @@ protected:
 };
 
 } // namespace
+
+TEST_F(EyouCanCSPTest, JointSiDefaultsReachPositionAndCspFramesIndependently)
+{
+    can_driver::CanDriverJointConfig config;
+    config.motorId = static_cast<MotorID>(5);
+    config.velocityScale = 2.0 * M_PI / 65536;
+    config.directionSign = -1;
+    config.hasPpPositionDefaultVelocity = config.hasPpCspDefaultVelocity = true;
+    config.ppPositionDefaultVelocity = 1.0;
+    config.ppCspDefaultVelocity = 0.5;
+    can_driver::applyPpDefaultVelocities(eyou, config);
+    ASSERT_TRUE(eyou.setPosition(config.motorId, 100));
+    ASSERT_GE(transport->sentFrames.size(), 2u);
+    auto rawVelocity = [](const CanTransport::Frame &frame) {
+        return (static_cast<std::uint32_t>(frame.data[2]) << 24) |
+               (static_cast<std::uint32_t>(frame.data[3]) << 16) |
+               (static_cast<std::uint32_t>(frame.data[4]) << 8) |
+               static_cast<std::uint32_t>(frame.data[5]);
+    };
+    EXPECT_EQ(transport->sentFrames[0].data[1], 0x09);
+    EXPECT_EQ(rawVelocity(transport->sentFrames[0]), 10430u);
+    transport->clearSent();
+    ASSERT_TRUE(eyou.quickSetPosition(config.motorId, 200));
+    ASSERT_GE(transport->sentFrames.size(), 2u);
+    EXPECT_EQ(rawVelocity(transport->sentFrames[0]), 5215u);
+    transport->clearSent();
+    ASSERT_TRUE(eyou.quickSetPosition(static_cast<MotorID>(6), 200));
+    ASSERT_GE(transport->sentFrames.size(), 2u);
+    EXPECT_EQ(rawVelocity(transport->sentFrames[0]), static_cast<unsigned>(EyouCan::kDefaultPositionVelocityRaw));
+}
 
 TEST_F(EyouCanCSPTest, QuickSetPositionFirstCallPreconfiguresVelocityThenWritesPosition)
 {

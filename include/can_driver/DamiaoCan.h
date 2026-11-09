@@ -30,6 +30,7 @@ public:
               std::string deviceName);
     ~DamiaoCan() override;
 
+    bool setMitGains(MotorID motorId, double kp, double kd);
     bool setMode(MotorID motorId, MotorMode mode) override;
     bool setVelocity(MotorID motorId, int32_t velocity) override;
     bool setAcceleration(MotorID motorId, int32_t acceleration) override;
@@ -74,12 +75,17 @@ private:
         bool enabledReceived{false};
         bool faultReceived{false};
         bool feedbackSeen{false};
-        bool velocityModeConfigured{false};
+        bool modeConfigured{false};
+        float mitKp{0}, mitKd{0};
+        CanTransport::Frame mitFrame{};
+        bool mitFrameValid{false};
         bool feedbackRangeConfigured{false};
+        float pMax{0}, vMax{0}, tMax{0};
         MotorMode mode{MotorMode::Velocity};
     };
 
     struct PendingRegisterAck {
+        std::uint8_t command{0x55};
         bool received{false};
         std::uint32_t value{0};
     };
@@ -101,10 +107,16 @@ private:
                                     std::uint8_t registerId,
                                     std::uint32_t value,
                                     std::chrono::milliseconds timeout);
+    bool readRegisterAndWait(std::uint8_t motorId, std::uint8_t registerId,
+                             std::uint32_t &value);
     bool waitForFeedbackState(std::uint8_t motorId,
                               std::uint8_t expectedState,
-                              std::chrono::milliseconds timeout) const;
-    bool ensureVelocityModeConfigured(std::uint8_t motorId);
+                              std::chrono::milliseconds timeout,
+                              std::int64_t requestedAt) const;
+    bool ensureModeConfigured(std::uint8_t motorId, MotorMode mode);
+    bool sendNeutral(std::uint8_t motorId, CanTxDispatcher::Category category);
+    bool sendMitTarget(std::uint8_t motorId, double position, bool active,
+                       CanTxDispatcher::Category category);
     bool ensureFeedbackMappingConfigured(std::uint8_t motorId);
     bool submitTx(const CanTransport::Frame &frame,
                   CanTxDispatcher::Category category,

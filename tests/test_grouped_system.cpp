@@ -1,5 +1,6 @@
 #include <gtest/gtest.h>
 #include "can_driver/can_driver_system.hpp"
+#include "can_driver/EyouCan.h"
 #include <filesystem>
 using can_driver::CanDriverSystem;
 using can_driver::SharedDriverState;
@@ -151,4 +152,112 @@ TEST_F(GroupedSystem, FreshUnrelatedReplyCannotRefreshAnOldPositionField){
   f->lastRxSteadyNs=SharedDriverSteadyNowNs();f->feedbackSteadyNs[0]=f->lastRxSteadyNs-500000000;
  });cycle();EXPECT_EQ(d->group("base").state,robot_safety::Domain::State::Fault);
  EXPECT_EQ(manager->protocol->writes[1],writes);
+}
+
+class DmConfiguration : public ::testing::Test {
+protected:
+ static void SetUpTestSuite(){rclcpp::init(0,nullptr);}
+ static void TearDownTestSuite(){rclcpp::shutdown();}
+ hardware_interface::HardwareInfo info() {
+  hardware_interface::HardwareInfo result;result.name="dm_config";result.type="system";
+  hardware_interface::ComponentInfo joint;joint.name="dm_motor";joint.type="joint";
+  joint.parameters={{"motor_id","7"},{"protocol","DM"},{"can_device","test"},{"control_mode","velocity"}};
+  hardware_interface::InterfaceInfo command;command.name="velocity";joint.command_interfaces.push_back(command);
+  command.name="position";joint.state_interfaces.push_back(command);
+  command.name="velocity";joint.state_interfaces.push_back(command);
+  result.joints.push_back(joint);return result;
+ }
+};
+TEST_F(DmConfiguration, DefaultScaleDecodesFixedPointSiFeedback) {
+ class DmFeedback : public FakeProtocol {
+ public:
+  explicit DmFeedback(std::shared_ptr<SharedDriverState> state):FakeProtocol(state){}
+  int64_t getPosition(MotorID) const override{return 20000;}
+  int32_t getVelocity(MotorID) const override{return 10000;}
+ };
+ auto manager=std::make_shared<FakeManager>();
+ manager->protocol=std::make_shared<DmFeedback>(manager->state);
+ CanDriverSystem system(manager);
+ ASSERT_EQ(system.on_init(info()),hardware_interface::CallbackReturn::SUCCESS);
+ ASSERT_EQ(system.on_configure(rclcpp_lifecycle::State()),hardware_interface::CallbackReturn::SUCCESS);
+ ASSERT_EQ(system.read(rclcpp::Time(0),rclcpp::Duration::from_seconds(.01)),R::OK);
+ const auto states=system.export_state_interfaces();
+ ASSERT_EQ(states.size(),3u);
+ EXPECT_DOUBLE_EQ(states[0].get_value(),2.0);
+ EXPECT_DOUBLE_EQ(states[1].get_value(),1.0);
+}
+TEST_F(DmConfiguration, RejectsEncoderCountsAndUnsupportedMode) {
+ for(const auto &field:{"position_scale","velocity_scale","control_mode"}) {
+  auto config=info();
+  config.joints[0].parameters[field]=std::string(field)=="control_mode"?"position":"16384";
+  CanDriverSystem system(std::make_shared<FakeManager>());
+  EXPECT_EQ(system.on_init(config),hardware_interface::CallbackReturn::ERROR);
+ }
+}
+
+TEST_F(DmConfiguration, MitPositionRequiresExplicitGainsAndValidFeedbackIds) {
+ auto config=info();
+ config.joints[0].parameters["control_mode"]="position";
+ config.joints[0].parameters["dm_mit_kp"]="5";
+ config.joints[0].parameters["dm_mit_kd"]="0.5";
+ {CanDriverSystem system(std::make_shared<FakeManager>());
+  EXPECT_EQ(system.on_init(config),hardware_interface::CallbackReturn::SUCCESS);}
+ for(const auto &entry:std::vector<std::pair<std::string,std::string>>{
+     {"motor_id","16"},{"master_id","2048"},{"dm_mit_kd","0"},{"dm_mit_kp","501"}}) {
+  auto invalid=config;invalid.joints[0].parameters[entry.first]=entry.second;
+  CanDriverSystem system(std::make_shared<FakeManager>());
+  EXPECT_EQ(system.on_init(invalid),hardware_interface::CallbackReturn::ERROR);
+ }
+}
+
+TEST_F(DmConfiguration, PpDefaultVelocityRejectsInvalidValuesBeforeConfigure) {
+ for (const auto &field : {"pp_position_default_velocity", "pp_csp_default_velocity"}) {
+  for (const auto &value : {"-1", "0", "nan", "inf", "1e300", "0.000001", "1garbage", ""}) {
+   auto config=info();auto &params=config.joints[0].parameters;
+   params["protocol"]="PP";params["velocity_scale"]="65536";params[field]=value;
+   CanDriverSystem system(std::make_shared<FakeManager>());
+   EXPECT_EQ(system.on_init(config),hardware_interface::CallbackReturn::ERROR) << field << "=" << value;
+  }
+ }
+ auto config=info();auto &params=config.joints[0].parameters;
+ params["protocol"]="PP";params["velocity_scale"]="65536";
+ params["pp_position_default_velocity"]="1.0";params["pp_csp_default_velocity"]="0.5";
+ CanDriverSystem system(std::make_shared<FakeManager>());
+ EXPECT_EQ(system.on_init(config),hardware_interface::CallbackReturn::SUCCESS);
+}
+
+TEST_F(DmConfiguration, PpSystemConfigurePassesSiDefaultsToBackend) {
+ class Transport : public CanTransport {
+ public:
+  std::vector<Frame> frames;
+  SendResult send(const Frame &frame) override {frames.push_back(frame);return SendResult::Ok;}
+  std::size_t addReceiveHandler(ReceiveHandler) override {return 1;}
+  void removeReceiveHandler(std::size_t) override {}
+ };
+ class Dispatcher : public CanTxDispatcher {
+ public:
+  std::shared_ptr<Transport> transport=std::make_shared<Transport>();
+  void submit(const Request &request) override {transport->send(request.frame);}
+ };
+ class Manager : public FakeManager {
+ public:
+  std::shared_ptr<Dispatcher> tx=std::make_shared<Dispatcher>();
+  std::shared_ptr<EyouCan> pp=std::make_shared<EyouCan>(tx->transport,tx);
+  std::shared_ptr<CanProtocol> getProtocol(const std::string&,CanType) const override {return pp;}
+ };
+ for(const auto &mode:{"position","csp"}) {
+  auto manager=std::make_shared<Manager>();auto config=info();auto &p=config.joints[0].parameters;
+  p["protocol"]="PP";p["control_mode"]=mode;p["velocity_scale"]="65536";
+  p["pp_position_default_velocity"]="1.0";p["pp_csp_default_velocity"]="0.5";
+  CanDriverSystem system(manager);
+  ASSERT_EQ(system.on_init(config),hardware_interface::CallbackReturn::SUCCESS);
+  ASSERT_EQ(system.on_configure(rclcpp_lifecycle::State()),hardware_interface::CallbackReturn::SUCCESS);
+  manager->tx->transport->frames.clear();
+  if(std::string(mode)=="position")ASSERT_TRUE(manager->pp->setPosition(static_cast<MotorID>(7),100));
+  else ASSERT_TRUE(manager->pp->quickSetPosition(static_cast<MotorID>(7),100));
+  ASSERT_GE(manager->tx->transport->frames.size(),2u);
+  const auto &f=manager->tx->transport->frames[0];EXPECT_EQ(f.data[1],0x09);
+  const auto raw=(uint32_t(f.data[2])<<24)|(uint32_t(f.data[3])<<16)|(uint32_t(f.data[4])<<8)|f.data[5];
+  EXPECT_EQ(raw,std::string(mode)=="position"?10430u:5215u);
+ }
 }

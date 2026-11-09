@@ -186,3 +186,11 @@ ros2 service call /can_driver_node/set_zero_limit can_driver/srv/SetZeroLimit "{
   - `docs/使用指南.md`
   - `docs/电机配置变更指南.md`
   - `docs/达妙履带接入说明.md`
+
+DM 速度模式的单位、初始化读回、反馈路由、命令超时及验收边界见 [DM速度控制说明](docs/DM速度控制说明.md)。
+
+PP 的每轴 `pp_position_default_velocity` 和 `pp_csp_default_velocity` 同时支持
+standalone YAML 与 ros2_control joint 参数。值为关节 SI 速度的正幅值（转动关节 rad/s、
+夹爪 m/s），使用该轴归一化后的 `velocity_scale` 换算；方向不影响此幅值。
+两入口共用校验，拒绝非有限数、非正数、原始单位舍入为零和 int32 溢出。
+省略参数沿用后端默认值；这些值用于 PP 位置指令的速度预配置，不替代轨迹限速。

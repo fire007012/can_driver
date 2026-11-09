@@ -5,6 +5,7 @@
 #include <array>
 #include <cmath>
 #include <cstring>
+#include <future>
 #include <limits>
 #include <thread>
 #include <utility>
@@ -22,17 +23,12 @@ constexpr std::uint32_t kDamiaoSpeedFrameBase = 0x200u;
 constexpr std::uint8_t kDamiaoWriteRegisterCommand = 0x55u;
 constexpr std::uint8_t kDamiaoControlModeRegister = 10u;
 constexpr std::uint8_t kDamiaoPMaxRegister = 21u;
-constexpr std::uint8_t kDamiaoVMaxRegister = 22u;
-constexpr std::uint8_t kDamiaoTMaxRegister = 23u;
 constexpr std::uint8_t kDamiaoEnableCommand = 0xFCu;
 constexpr std::uint8_t kDamiaoDisableCommand = 0xFDu;
 constexpr std::uint8_t kDamiaoClearFaultCommand = 0xFBu;
 constexpr std::uint8_t kDamiaoEnabledStateCode = 0x1u;
 constexpr std::uint8_t kDamiaoDisabledStateCode = 0x0u;
 constexpr std::uint32_t kDamiaoVelocityModeValue = 3u;
-constexpr float kDamiaoDefaultPMax = 12.5f;
-constexpr float kDamiaoDefaultVMax = 45.0f;
-constexpr float kDamiaoDefaultTMax = 18.0f;
 // Damiao 后端在线上发送/接收的是 SI 物理量：
 // - 速度命令帧 data[0..3] 为 float32(rad/s)
 // - 反馈帧中的位置/速度/力矩字段按协议范围映射为 rad / rad/s / Nm
@@ -44,7 +40,7 @@ constexpr float kDamiaoDefaultTMax = 18.0f;
 //
 // 这个缩放只存在于驱动内部，不等同于编码器脉冲，也不包含减速比语义。
 constexpr double kDamiaoProtocolScale = 1e-4;
-const auto kDamiaoRegisterAckTimeout = std::chrono::milliseconds(100);
+const auto kDamiaoRegisterAckTimeout = std::chrono::milliseconds(500);
 const auto kDamiaoFeedbackStateTimeout = std::chrono::milliseconds(100);
 const auto kDamiaoConfigStepDelay = std::chrono::milliseconds(50);
 
@@ -95,28 +91,36 @@ DamiaoCan::~DamiaoCan()
     txDispatcher_.reset();
 }
 
+bool DamiaoCan::setMitGains(MotorID motorId, double kp, double kd)
+{
+    if (!std::isfinite(kp) || !std::isfinite(kd) || kp < 500.0/4095 || kp > 500 ||
+        kd < 5.0/4095 || kd > 5) return false;
+    std::lock_guard<std::mutex> lock(stateMutex_);
+    auto &state = motorStates_[toProtocolNodeId(motorId)];
+    if (state.enabled) return false;
+    state.mitKp = kp; state.mitKd = kd;
+    return true;
+}
+
 bool DamiaoCan::setMode(MotorID motorId, MotorMode mode)
 {
-    if (mode != MotorMode::Velocity) {
-        ROS_ERROR_THROTTLE(1.0,
-                           "[DamiaoCan] Only velocity mode is supported in the first DM backend.");
-        return false;
-    }
-
+    if (mode != MotorMode::Velocity && mode != MotorMode::Position) return false;
     const auto nodeId = toProtocolNodeId(motorId);
+    if (nodeId > 15) return false;
     registerManagedMotorId(motorId);
-    if (!ensureVelocityModeConfigured(nodeId)) {
-        return false;
-    }
-    syncSharedModeSelection(nodeId, MotorMode::Velocity);
-    return true;
+    if (!ensureModeConfigured(nodeId, mode)) return false;
+    syncSharedModeSelection(nodeId, mode);
+    // A disabled DM may stay silent until a control frame is received. Seed only
+    // a neutral command so startup can validate real feedback before enabling.
+    syncSharedIntent(nodeId, can_driver::AxisIntent::Hold);
+    return sendNeutral(nodeId, CanTxDispatcher::Category::Control);
 }
 
 bool DamiaoCan::setVelocity(MotorID motorId, int32_t velocity)
 {
     const auto nodeId = toProtocolNodeId(motorId);
     registerManagedMotorId(motorId);
-    if (!ensureVelocityModeConfigured(nodeId)) {
+    if (!ensureModeConfigured(nodeId, MotorMode::Velocity)) {
         return false;
     }
 
@@ -132,10 +136,18 @@ bool DamiaoCan::setVelocity(MotorID motorId, int32_t velocity)
     syncSharedIntent(nodeId, can_driver::AxisIntent::Run);
     // 达妙速度帧在线上要求的是 float32 rad/s，
     // 因此这里要先把内部整数刻度还原成 SI 速度后再打包。
-    return sendSpeedFrame(nodeId,
+    const bool sent = sendSpeedFrame(nodeId,
                           rawToVelocityRadPerSec(velocity),
                           CanTxDispatcher::Category::Control,
                           "DamiaoCan::setVelocity");
+    if (!sent) {
+        {
+            std::lock_guard<std::mutex> lock(stateMutex_);
+            motorStates_[nodeId].commandedVelocity = 0;
+        }
+        syncSharedCommand(nodeId, 0, false);
+    }
+    return sent;
 }
 
 bool DamiaoCan::setAcceleration(MotorID motorId, int32_t acceleration)
@@ -156,11 +168,23 @@ bool DamiaoCan::setDeceleration(MotorID motorId, int32_t deceleration)
     return true;
 }
 
-bool DamiaoCan::setPosition(MotorID, int32_t)
+bool DamiaoCan::setPosition(MotorID motorId, int32_t position)
 {
-    ROS_ERROR_THROTTLE(1.0,
-                       "[DamiaoCan] Position command is not supported in the first DM backend.");
-    return false;
+    const auto nodeId = toProtocolNodeId(motorId);
+    registerManagedMotorId(motorId);
+    if (!ensureModeConfigured(nodeId, MotorMode::Position)) return false;
+    const bool sent = sendMitTarget(nodeId, position * kDamiaoProtocolScale, true,
+                                    CanTxDispatcher::Category::Control);
+    if (!sent) sendNeutral(nodeId, CanTxDispatcher::Category::Control);
+    if (sharedState_ && !deviceName_.empty()) {
+        sharedState_->mutateAxisCommand(makeAxisKey(nodeId), [&](auto command) {
+            command->targetPosition = position; command->targetVelocity = 0;
+            command->desiredMode = MotorMode::Position; command->desiredModeValid = true;
+            command->valid = sent; command->lastCommandSteadyNs = sent ? can_driver::SharedDriverSteadyNowNs() : 0;
+        });
+    }
+    syncSharedIntent(nodeId, can_driver::AxisIntent::Run);
+    return sent;
 }
 
 bool DamiaoCan::quickSetPosition(MotorID, int32_t)
@@ -174,12 +198,12 @@ bool DamiaoCan::Enable(MotorID motorId)
 {
     const auto nodeId = toProtocolNodeId(motorId);
     registerManagedMotorId(motorId);
-    if (!ensureVelocityModeConfigured(nodeId)) {
-        return false;
-    }
-
-    syncSharedModeSelection(nodeId, MotorMode::Velocity);
+    MotorMode mode;
+    { std::lock_guard<std::mutex> lock(stateMutex_); mode = motorStates_[nodeId].mode; }
+    if (!ensureModeConfigured(nodeId, mode)) return false;
+    syncSharedModeSelection(nodeId, mode);
     syncSharedIntent(nodeId, can_driver::AxisIntent::Enable);
+    const auto requestedAt = can_driver::SharedDriverSteadyNowNs();
     if (!sendMotorCommand(nodeId,
                           kDamiaoEnableCommand,
                           CanTxDispatcher::Category::Control,
@@ -187,15 +211,12 @@ bool DamiaoCan::Enable(MotorID motorId)
         return false;
     }
     std::this_thread::sleep_for(kDamiaoConfigStepDelay);
-    if (!sendSpeedFrame(nodeId,
-                        0.0f,
-                        CanTxDispatcher::Category::Control,
-                        "DamiaoCan::EnableNeutral")) {
+    if (!sendNeutral(nodeId, CanTxDispatcher::Category::Control)) {
         return false;
     }
     return waitForFeedbackState(nodeId,
                                 kDamiaoEnabledStateCode,
-                                kDamiaoFeedbackStateTimeout);
+                                kDamiaoFeedbackStateTimeout, requestedAt);
 }
 
 bool DamiaoCan::Disable(MotorID motorId)
@@ -208,11 +229,9 @@ bool DamiaoCan::Disable(MotorID motorId)
     }
     syncSharedCommand(nodeId, 0, true);
     syncSharedIntent(nodeId, can_driver::AxisIntent::Disable);
+    const auto requestedAt = can_driver::SharedDriverSteadyNowNs();
 
-    if (!sendSpeedFrame(nodeId,
-                        0.0f,
-                        CanTxDispatcher::Category::Control,
-                        "DamiaoCan::DisableNeutral")) {
+    if (!sendNeutral(nodeId, CanTxDispatcher::Category::Control)) {
         return false;
     }
     if (!sendMotorCommand(nodeId,
@@ -223,7 +242,7 @@ bool DamiaoCan::Disable(MotorID motorId)
     }
     return waitForFeedbackState(nodeId,
                                 kDamiaoDisabledStateCode,
-                                kDamiaoFeedbackStateTimeout);
+                                kDamiaoFeedbackStateTimeout, requestedAt);
 }
 
 bool DamiaoCan::Stop(MotorID motorId)
@@ -236,10 +255,7 @@ bool DamiaoCan::Stop(MotorID motorId)
     }
     syncSharedCommand(nodeId, 0, true);
     syncSharedIntent(nodeId, can_driver::AxisIntent::Hold);
-    return sendSpeedFrame(nodeId,
-                          0.0f,
-                          CanTxDispatcher::Category::Control,
-                          "DamiaoCan::Stop");
+    return sendNeutral(nodeId, CanTxDispatcher::Category::Control);
 }
 
 bool DamiaoCan::ResetFault(MotorID motorId)
@@ -348,13 +364,17 @@ bool DamiaoCan::issueRefreshQuery(MotorID motorId, RefreshQuery query)
     registerManagedMotorId(motorId);
 
     int32_t commandedVelocity = 0;
+    CanTransport::Frame mitFrame{};
+    bool mit = false, valid = false;
     {
         std::lock_guard<std::mutex> lock(stateMutex_);
-        const auto it = motorStates_.find(nodeId);
-        if (it != motorStates_.end()) {
-            commandedVelocity = it->second.commandedVelocity;
-        }
+        auto &state = motorStates_[nodeId];
+        commandedVelocity = state.commandedVelocity;
+        mit = state.mode == MotorMode::Position;
+        mitFrame = state.mitFrame; valid = state.mitFrameValid;
     }
+    if (mit) return valid && submitTx(mitFrame, CanTxDispatcher::Category::Query,
+                                      "DamiaoCan::MIT keepalive");
 
     return sendSpeedFrame(nodeId,
                           rawToVelocityRadPerSec(commandedVelocity),
@@ -364,7 +384,9 @@ bool DamiaoCan::issueRefreshQuery(MotorID motorId, RefreshQuery query)
 
 void DamiaoCan::handleResponse(const CanTransport::Frame &frame)
 {
-    if (frame.dlc >= 8 && frame.data[1] == 0 && frame.data[2] == kDamiaoWriteRegisterCommand) {
+    if (frame.isExtended || frame.isRemoteRequest) return;
+    if (frame.dlc >= 8 && frame.data[1] == 0 &&
+        (frame.data[2] == kDamiaoWriteRegisterCommand || frame.data[2] == 0x33)) {
         const auto motorId = static_cast<std::uint8_t>(frame.data[0]);
         if (frame.id != masterIdForMotor(motorId)) {
             return;
@@ -375,7 +397,7 @@ void DamiaoCan::handleResponse(const CanTransport::Frame &frame)
         {
             std::lock_guard<std::mutex> lock(pendingRegisterAckMutex_);
             const auto it = pendingRegisterAcks_.find(pendingRegisterAckKey(motorId, registerId));
-            if (it != pendingRegisterAcks_.end()) {
+            if (it != pendingRegisterAcks_.end() && it->second.command == frame.data[2]) {
                 it->second.received = true;
                 it->second.value = value;
                 matchedPendingAck = true;
@@ -408,10 +430,19 @@ void DamiaoCan::handleResponse(const CanTransport::Frame &frame)
     const auto torqueInt =
         static_cast<std::uint32_t>(((frame.data[4] & 0x0Fu) << 8) | frame.data[5]);
 
-    const auto positionRad = uintToFloat(posInt, -kDamiaoDefaultPMax, kDamiaoDefaultPMax, 16);
+    float pMax, vMax, tMax;
+    bool mapped, modeConfirmed;
+    {
+        std::lock_guard<std::mutex> lock(stateMutex_);
+        const auto &state = motorStates_[motorId];
+        pMax = state.pMax; vMax = state.vMax; tMax = state.tMax;
+        mapped = state.feedbackRangeConfigured;
+        modeConfirmed = state.modeConfigured;
+    }
+    const auto positionRad = uintToFloat(posInt, -pMax, pMax, 16);
     const auto velocityRadPerSec =
-        uintToFloat(velInt, -kDamiaoDefaultVMax, kDamiaoDefaultVMax, 12);
-    const auto torqueNm = uintToFloat(torqueInt, -kDamiaoDefaultTMax, kDamiaoDefaultTMax, 12);
+        uintToFloat(velInt, -vMax, vMax, 12);
+    const auto torqueNm = uintToFloat(torqueInt, -tMax, tMax, 12);
 
     MotorState snapshot;
     {
@@ -426,11 +457,10 @@ void DamiaoCan::handleResponse(const CanTransport::Frame &frame)
         state.enabled = (feedbackState == kDamiaoEnabledStateCode);
         state.fault = (feedbackState != kDamiaoDisabledStateCode &&
                        feedbackState != kDamiaoEnabledStateCode);
-        state.positionReceived = true; state.feedbackSteadyNs[0] = can_driver::SharedDriverSteadyNowNs();
-        state.velocityReceived = true; state.feedbackSteadyNs[1] = can_driver::SharedDriverSteadyNowNs();
-        state.currentReceived = true; state.feedbackSteadyNs[5] = can_driver::SharedDriverSteadyNowNs();
-        state.mode = MotorMode::Velocity;
-        state.modeReceived = true; state.feedbackSteadyNs[2] = can_driver::SharedDriverSteadyNowNs();
+        state.positionReceived = mapped; state.feedbackSteadyNs[0] = can_driver::SharedDriverSteadyNowNs();
+        state.velocityReceived = mapped; state.feedbackSteadyNs[1] = can_driver::SharedDriverSteadyNowNs();
+        state.currentReceived = mapped; state.feedbackSteadyNs[5] = can_driver::SharedDriverSteadyNowNs();
+        state.modeReceived = modeConfirmed; state.feedbackSteadyNs[2] = can_driver::SharedDriverSteadyNowNs();
         state.enabledReceived = true; state.feedbackSteadyNs[3] = can_driver::SharedDriverSteadyNowNs();
         state.faultReceived = true; state.feedbackSteadyNs[4] = can_driver::SharedDriverSteadyNowNs();
         state.feedbackSeen = true;
@@ -439,6 +469,45 @@ void DamiaoCan::handleResponse(const CanTransport::Frame &frame)
 
     syncSharedFeedback(motorId, snapshot);
     feedbackStateCv_.notify_all();
+}
+
+bool DamiaoCan::sendNeutral(std::uint8_t motorId, CanTxDispatcher::Category category)
+{
+    bool mit;
+    { std::lock_guard<std::mutex> lock(stateMutex_);
+      auto &state = motorStates_[motorId]; state.commandedVelocity = 0;
+      mit = state.mode == MotorMode::Position; }
+    // MIT neutral: zero stiffness/damping/feed-forward, never jump to zero position.
+    if (mit) return sendMitTarget(motorId, 0, false, category);
+    return sendSpeedFrame(motorId, 0, category, "DamiaoCan::neutral");
+}
+
+bool DamiaoCan::sendMitTarget(std::uint8_t motorId, double position, bool active,
+                             CanTxDispatcher::Category category)
+{
+    CanTransport::Frame frame{};
+    frame.id = motorId; frame.dlc = 8;
+    {
+        std::lock_guard<std::mutex> lock(stateMutex_);
+        auto &state = motorStates_[motorId];
+        if (!state.modeConfigured || !state.feedbackRangeConfigured ||
+            state.mode != MotorMode::Position || !std::isfinite(position) ||
+            std::abs(position) > state.pMax) return false;
+        auto encode = [](double value, double lo, double hi, int bits) {
+            return static_cast<std::uint32_t>((value - lo) * ((1u << bits) - 1u) / (hi - lo));
+        };
+        const auto p = encode(position, -state.pMax, state.pMax, 16);
+        const auto v = encode(0, -state.vMax, state.vMax, 12);
+        const auto kp = encode(active ? state.mitKp : 0, 0, 500, 12);
+        const auto kd = encode(active ? state.mitKd : 0, 0, 5, 12);
+        const auto t = encode(0, -state.tMax, state.tMax, 12);
+        frame.data = {{static_cast<std::uint8_t>(p >> 8), static_cast<std::uint8_t>(p),
+                       static_cast<std::uint8_t>(v >> 4), static_cast<std::uint8_t>((v << 4) | (kp >> 8)),
+                       static_cast<std::uint8_t>(kp), static_cast<std::uint8_t>(kd >> 4),
+                       static_cast<std::uint8_t>((kd << 4) | (t >> 8)), static_cast<std::uint8_t>(t)}};
+        state.mitFrame = frame; state.mitFrameValid = true;
+    }
+    return submitTx(frame, category, "DamiaoCan::MIT target");
 }
 
 bool DamiaoCan::sendSpeedFrame(std::uint8_t motorId,
@@ -466,7 +535,12 @@ bool DamiaoCan::sendMotorCommand(std::uint8_t motorId,
                                  const char *source) const
 {
     CanTransport::Frame frame;
-    frame.id = kDamiaoSpeedFrameBase + motorId;
+    {
+        std::lock_guard<std::mutex> lock(stateMutex_);
+        const auto it = motorStates_.find(motorId);
+        frame.id = (it != motorStates_.end() && it->second.mode == MotorMode::Position)
+                     ? motorId : kDamiaoSpeedFrameBase + motorId;
+    }
     frame.isExtended = false;
     frame.isRemoteRequest = false;
     frame.dlc = 8;
@@ -528,43 +602,89 @@ bool DamiaoCan::writeRegisterAndWaitForAck(std::uint8_t motorId,
     return received;
 }
 
+bool DamiaoCan::readRegisterAndWait(std::uint8_t motorId, std::uint8_t registerId,
+                                    std::uint32_t &value)
+{
+    const auto key = pendingRegisterAckKey(motorId, registerId);
+    {
+        std::lock_guard<std::mutex> lock(pendingRegisterAckMutex_);
+        pendingRegisterAcks_[key] = PendingRegisterAck{};
+        pendingRegisterAcks_[key].command = 0x33;
+    }
+    CanTransport::Frame frame{};
+    frame.id = kDamiaoRegisterFrameId;
+    frame.dlc = 8;
+    frame.data[0] = motorId; frame.data[2] = 0x33; frame.data[3] = registerId;
+    if (!submitTx(frame, CanTxDispatcher::Category::Config, "DamiaoCan::readRegister")) {
+        std::lock_guard<std::mutex> lock(pendingRegisterAckMutex_);
+        pendingRegisterAcks_.erase(key);
+        return false;
+    }
+    std::unique_lock<std::mutex> lock(pendingRegisterAckMutex_);
+    const bool received = pendingRegisterAckCv_.wait_for(lock, kDamiaoRegisterAckTimeout,
+        [this, key]() { return pendingRegisterAcks_.at(key).received; });
+    if (received) value = pendingRegisterAcks_.at(key).value;
+    pendingRegisterAcks_.erase(key);
+    return received;
+}
+
 bool DamiaoCan::waitForFeedbackState(std::uint8_t motorId,
                                      std::uint8_t expectedState,
-                                     std::chrono::milliseconds timeout) const
+                                     std::chrono::milliseconds timeout,
+                                     std::int64_t requestedAt) const
 {
     std::unique_lock<std::mutex> lock(stateMutex_);
     return feedbackStateCv_.wait_for(
-        lock, timeout, [this, motorId, expectedState]() {
+        lock, timeout, [this, motorId, expectedState, requestedAt]() {
             const auto it = motorStates_.find(motorId);
             return it != motorStates_.end() &&
                    it->second.feedbackSeen &&
+                   it->second.feedbackSteadyNs[3] >= requestedAt &&
                    it->second.feedbackState == expectedState;
         });
 }
 
-bool DamiaoCan::ensureVelocityModeConfigured(std::uint8_t motorId)
+bool DamiaoCan::ensureModeConfigured(std::uint8_t motorId, MotorMode mode)
 {
     {
         std::lock_guard<std::mutex> lock(stateMutex_);
         const auto it = motorStates_.find(motorId);
-        if (it != motorStates_.end() && it->second.velocityModeConfigured) {
-            return true;
-        }
+        if (it != motorStates_.end()) {
+            if (it->second.modeConfigured && it->second.mode == mode) return true;
+            if (it->second.enabled) return false;
+            if (mode == MotorMode::Position && (it->second.mitKp <= 0 || it->second.mitKd <= 0)) return false;
+        } else if (mode == MotorMode::Position) return false;
+        auto &state = motorStates_[motorId];
+        state.modeConfigured = false;
+        state.modeReceived = false;
+        state.mitFrameValid = false;
+        state.commandedVelocity = 0;
     }
 
+    float initialPosition = 0;
+    if (mode == MotorMode::Position) {
+        std::uint32_t bits = 0;
+        // V1.1 recommends precise position readback before entering MIT position control.
+        if (!readRegisterAndWait(motorId, 0x50, bits)) return false;
+        std::memcpy(&initialPosition, &bits, sizeof(initialPosition));
+        if (!std::isfinite(initialPosition)) return false;
+    }
+    const std::uint32_t wireMode = mode == MotorMode::Position ? 1u : kDamiaoVelocityModeValue;
     if (!writeRegisterAndWaitForAck(motorId,
                                     kDamiaoControlModeRegister,
-                                    kDamiaoVelocityModeValue,
+                                    wireMode,
                                     kDamiaoRegisterAckTimeout)) {
-        ROS_ERROR("[DamiaoCan] Timed out waiting for velocity mode ack on motor %u.",
+        ROS_ERROR("[DamiaoCan] Timed out waiting for control mode ack on motor %u.",
                   static_cast<unsigned>(motorId));
         return false;
     }
     std::this_thread::sleep_for(kDamiaoConfigStepDelay);
 
-    // 当前反馈解码固定按默认 P/V/T 量程解释。
-    // 先把电机端反馈量程配置到同一组值，避免不同电机保存的旧量程导致
-    // “同样目标、反馈幅值却不一致”的错解现象。
+    std::uint32_t actualMode = 0;
+    if (!readRegisterAndWait(motorId, kDamiaoControlModeRegister, actualMode) ||
+        actualMode != wireMode) return false;
+
+    // Read the motor's ranges; never overwrite model-specific parameters.
     if (!ensureFeedbackMappingConfigured(motorId)) {
         return false;
     }
@@ -572,10 +692,15 @@ bool DamiaoCan::ensureVelocityModeConfigured(std::uint8_t motorId)
     {
         std::lock_guard<std::mutex> lock(stateMutex_);
         auto &state = motorStates_[motorId];
-        state.velocityModeConfigured = true;
-        state.mode = MotorMode::Velocity;
+        if (mode == MotorMode::Position) {
+            if (std::abs(initialPosition) > state.pMax) return false;
+            state.position = rawPositionFromRadians(initialPosition);
+            state.positionReceived = false; // Require a new status frame after switching.
+        }
+        state.modeConfigured = true;
+        state.mode = mode;
     }
-    syncSharedModeSelection(motorId, MotorMode::Velocity);
+    syncSharedModeSelection(motorId, mode);
     return true;
 }
 
@@ -589,27 +714,20 @@ bool DamiaoCan::ensureFeedbackMappingConfigured(std::uint8_t motorId)
         }
     }
 
-    const std::array<std::pair<std::uint8_t, float>, 3> writes {{
-        {kDamiaoPMaxRegister, kDamiaoDefaultPMax},
-        {kDamiaoVMaxRegister, kDamiaoDefaultVMax},
-        {kDamiaoTMaxRegister, kDamiaoDefaultTMax},
-    }};
-    for (const auto &entry : writes) {
-        if (!writeRegisterAndWaitForAck(motorId,
-                                        entry.first,
-                                        floatToRawBits(entry.second),
-                                        kDamiaoRegisterAckTimeout)) {
-            ROS_ERROR("[DamiaoCan] Timed out waiting for feedback range ack on motor %u register %u.",
-                      static_cast<unsigned>(motorId),
-                      static_cast<unsigned>(entry.first));
-            return false;
-        }
-        std::this_thread::sleep_for(kDamiaoConfigStepDelay);
+    std::array<float, 3> ranges{};
+    for (std::size_t i = 0; i < ranges.size(); ++i) {
+        std::uint32_t bits = 0;
+        if (!readRegisterAndWait(motorId, kDamiaoPMaxRegister + i, bits)) return false;
+        std::memcpy(&ranges[i], &bits, sizeof(float));
+        // Bound conversions to the fixed-point storage used below.
+        const double limit = i == 0 ? 1e8 : (i == 1 ? 1e5 : 1e3);
+        if (!std::isfinite(ranges[i]) || ranges[i] <= 0 || ranges[i] > limit) return false;
     }
-
     {
         std::lock_guard<std::mutex> lock(stateMutex_);
-        motorStates_[motorId].feedbackRangeConfigured = true;
+        auto &state = motorStates_[motorId];
+        state.pMax = ranges[0]; state.vMax = ranges[1]; state.tMax = ranges[2];
+        state.feedbackRangeConfigured = true;
     }
     return true;
 }
@@ -629,6 +747,20 @@ bool DamiaoCan::submitTx(const CanTransport::Frame &frame,
     request.frame = frame;
     request.category = category;
     request.source = source;
+    // Configuration is confirmed by register replies; keepalive remains asynchronous.
+    // Motion/stop callers must not report queue admission as a successful send.
+    if (category == CanTxDispatcher::Category::Control ||
+        category == CanTxDispatcher::Category::Recover) {
+        auto completion = std::make_shared<std::promise<bool>>();
+        auto result = completion->get_future();
+        request.completion = [completion](bool attempted, CanTransport::SendResult sent,
+                                         std::chrono::steady_clock::time_point) {
+            completion->set_value(attempted && sent == CanTransport::SendResult::Ok);
+        };
+        txDispatcher_->submit(request);
+        return result.wait_for(kDamiaoFeedbackStateTimeout) == std::future_status::ready &&
+               result.get();
+    }
     txDispatcher_->submit(request);
     return true;
 }
@@ -709,12 +841,14 @@ void DamiaoCan::syncSharedCommand(std::uint8_t motorId,
     }
 
     const auto nowNs = can_driver::SharedDriverSteadyNowNs();
+    MotorMode mode;
+    { std::lock_guard<std::mutex> lock(stateMutex_); mode = motorStates_[motorId].mode; }
     sharedState_->mutateAxisCommand(
         makeAxisKey(motorId),
-        [targetVelocity, valid, nowNs](can_driver::SharedDriverState::AxisCommandState *command) {
+        [targetVelocity, valid, nowNs, mode](can_driver::SharedDriverState::AxisCommandState *command) {
             command->targetPosition = 0;
             command->targetVelocity = targetVelocity;
-            command->desiredMode = CanProtocol::MotorMode::Velocity;
+            command->desiredMode = mode;
             command->desiredModeValid = true;
             command->valid = valid;
             command->lastCommandSteadyNs = valid ? nowNs : 0;

@@ -1,6 +1,7 @@
 #include "can_driver/can_driver_system.hpp"
 
 #include "can_driver/AxisCommandSemantics.h"
+#include "can_driver/PpDefaultVelocity.h"
 #include "can_driver/SafeCommand.h"
 #include "can_driver/ros2_compat.hpp"
 
@@ -135,18 +136,47 @@ hardware_interface::CallbackReturn CanDriverSystem::on_init(
             ROS_ERROR("[CanDriverSystem] Invalid motor_id for joint '%s'.", joint.name.c_str());
             return hardware_interface::CallbackReturn::ERROR;
         }
-        axis.config.positionScale = std::stod(parameter(joint, "position_scale", "1.0"));
-        axis.config.velocityScale = std::stod(parameter(joint, "velocity_scale", "1.0"));
+        axis.config.positionScale = std::stod(parameter(joint, "position_scale", axis.config.protocol == CanType::DM ? "0.0001" : "1.0"));
+        axis.config.velocityScale = std::stod(parameter(joint, "velocity_scale", axis.config.protocol == CanType::DM ? "0.0001" : "1.0"));
         axis.config.directionSign = std::stod(parameter(joint, "direction_sign", "1.0"));
         axis.config.dmMasterId = static_cast<std::uint32_t>(
             std::stoul(parameter(joint, "master_id", "0"), nullptr, 0));
+        axis.config.dmMitKp = std::stod(parameter(joint, "dm_mit_kp", "0"));
+        axis.config.dmMitKd = std::stod(parameter(joint, "dm_mit_kd", "0"));
         if (axis.config.positionScale >= 2.0) {
             axis.config.positionScale = 2.0 * M_PI / axis.config.positionScale;
         }
         if (axis.config.velocityScale >= 2.0) {
             axis.config.velocityScale = 2.0 * M_PI / axis.config.velocityScale;
         }
-        if (!std::isfinite(axis.config.positionScale) || !std::isfinite(axis.config.velocityScale) ||
+        try {
+            const auto readVelocity = [&](const char *name, double &velocity, bool &present) {
+                const auto value = joint.parameters.find(name);
+                if (value == joint.parameters.end()) return;
+                std::size_t consumed = 0;
+                velocity = std::stod(value->second, &consumed);
+                if (consumed != value->second.size()) throw std::invalid_argument("trailing characters");
+                present = true;
+            };
+            readVelocity("pp_position_default_velocity", axis.config.ppPositionDefaultVelocity,
+                         axis.config.hasPpPositionDefaultVelocity);
+            readVelocity("pp_csp_default_velocity", axis.config.ppCspDefaultVelocity,
+                         axis.config.hasPpCspDefaultVelocity);
+            validatePpDefaultVelocities(axis.config);
+        } catch (const std::exception &error) {
+            ROS_ERROR("[CanDriverSystem] Invalid PP default velocity for '%s': %s",
+                      joint.name.c_str(), error.what());
+            return hardware_interface::CallbackReturn::ERROR;
+        }
+        if ((axis.config.protocol == CanType::DM &&
+             (axis.config.positionScale != 1e-4 || axis.config.velocityScale != 1e-4 ||
+              (axis.config.controlMode != "velocity" && axis.config.controlMode != "position") ||
+              toProtocolNodeId(axis.config.motorId) > 15 || axis.config.dmMasterId > 0x7ff ||
+              (axis.config.controlMode == "position" &&
+               (!std::isfinite(axis.config.dmMitKp) || !std::isfinite(axis.config.dmMitKd) ||
+                axis.config.dmMitKp < 500.0/4095 || axis.config.dmMitKp > 500 ||
+                axis.config.dmMitKd < 5.0/4095 || axis.config.dmMitKd > 5)))) ||
+            !std::isfinite(axis.config.positionScale) || !std::isfinite(axis.config.velocityScale) ||
             axis.config.positionScale <= 0.0 || axis.config.velocityScale <= 0.0 ||
             (axis.config.directionSign != 1.0 && axis.config.directionSign != -1.0)) {
             ROS_ERROR("[CanDriverSystem] Invalid scale or direction for joint '%s'.",
@@ -187,6 +217,13 @@ bool CanDriverSystem::initDevices()
         }
         const auto protocol = deviceManager_->getProtocol(axis.config.canDevice,
                                                            axis.config.protocol);
+        if (auto pp = std::dynamic_pointer_cast<EyouCan>(protocol)) {
+            applyPpDefaultVelocities(*pp, axis.config);
+        }
+        if (auto dm = std::dynamic_pointer_cast<DamiaoCan>(protocol)) {
+            if (axis.config.controlMode == "position" &&
+                !dm->setMitGains(axis.config.motorId, axis.config.dmMitKp, axis.config.dmMitKd)) return false;
+        }
         if (grouped_) { axis.configured = static_cast<bool>(protocol); continue; }
         if (!protocol) return false;
         const auto mode = axisControlModeFromString(axis.config.controlMode);

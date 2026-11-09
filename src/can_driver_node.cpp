@@ -1,5 +1,7 @@
 #include "can_driver/AxisCommandSemantics.h"
 #include "can_driver/DeviceManager.h"
+#include "can_driver/DirectCommandTimeout.h"
+#include "can_driver/PpDefaultVelocity.h"
 #include "can_driver/SafeCommand.h"
 
 #include <ament_index_cpp/get_package_share_directory.hpp>
@@ -24,9 +26,11 @@
 #include <filesystem>
 #include <map>
 #include <memory>
+#include <limits>
 #include <mutex>
 #include <set>
 #include <string>
+#include <utility>
 #include <vector>
 
 namespace {
@@ -95,6 +99,8 @@ public:
         motorQueryHz_ = declare_parameter<double>("motor_query_hz", 0.0);
         ppFastWrite_ = declare_parameter<bool>("pp_fast_write_enabled", false);
         if (!loadConfig(configFile_)) throw std::runtime_error("failed to load configuration");
+        if (!std::isfinite(directTimeoutSec_) || directTimeoutSec_ <= 0.0)
+            throw std::runtime_error("direct_cmd_timeout_sec must be finite and positive");
         createEndpoints();
         std_msgs::msg::String initialState;
         initialState.data = state_;
@@ -152,15 +158,41 @@ private:
             axis.config.protocol = parseProtocol(yamlString(entry, "protocol", "MT"));
             axis.config.canDevice = yamlString(entry, "can_device", "vcan0");
             axis.config.controlMode = yamlString(entry, "control_mode", "velocity");
-            axis.config.positionScale = entry["position_scale"] ? entry["position_scale"].as<double>() : 1.0;
-            axis.config.velocityScale = entry["velocity_scale"] ? entry["velocity_scale"].as<double>() : 1.0;
+            axis.config.positionScale = entry["position_scale"] ? entry["position_scale"].as<double>() : (axis.config.protocol == CanType::DM ? 1e-4 : 1.0);
+            axis.config.velocityScale = entry["velocity_scale"] ? entry["velocity_scale"].as<double>() : (axis.config.protocol == CanType::DM ? 1e-4 : 1.0);
             axis.config.directionSign = entry["direction_sign"] ? entry["direction_sign"].as<double>() : 1.0;
+            if (entry["pp_position_default_velocity"]) {
+                axis.config.ppPositionDefaultVelocity = entry["pp_position_default_velocity"].as<double>();
+                axis.config.hasPpPositionDefaultVelocity = true;
+            }
+            if (entry["pp_csp_default_velocity"]) {
+                axis.config.ppCspDefaultVelocity = entry["pp_csp_default_velocity"].as<double>();
+                axis.config.hasPpCspDefaultVelocity = true;
+            }
             axis.config.dmMasterId = entry["master_id"] ? entry["master_id"].as<std::uint32_t>() : 0;
+            axis.config.dmMitKp = entry["dm_mit_kp"] ? entry["dm_mit_kp"].as<double>() : 0;
+            axis.config.dmMitKd = entry["dm_mit_kd"] ? entry["dm_mit_kd"].as<double>() : 0;
             if (axis.config.positionScale >= 2.0) axis.config.positionScale = 2.0 * M_PI / axis.config.positionScale;
             if (axis.config.velocityScale >= 2.0) axis.config.velocityScale = 2.0 * M_PI / axis.config.velocityScale;
-            if (axis.config.positionScale <= 0.0 || axis.config.velocityScale <= 0.0 ||
+            if (!std::isfinite(axis.config.positionScale) || !std::isfinite(axis.config.velocityScale) ||
+                (axis.config.protocol == CanType::DM &&
+                 (axis.config.positionScale != 1e-4 || axis.config.velocityScale != 1e-4 ||
+                  (axis.config.controlMode != "velocity" && axis.config.controlMode != "position") ||
+                  can_driver::toProtocolNodeId(axis.config.motorId) > 15 || axis.config.dmMasterId > 0x7ff ||
+                  (axis.config.controlMode == "position" &&
+                   (!std::isfinite(axis.config.dmMitKp) || !std::isfinite(axis.config.dmMitKd) ||
+                    axis.config.dmMitKp < 500.0/4095 || axis.config.dmMitKp > 500 ||
+                    axis.config.dmMitKd < 5.0/4095 || axis.config.dmMitKd > 5)))) ||
+                axis.config.positionScale <= 0.0 || axis.config.velocityScale <= 0.0 ||
                 (axis.config.directionSign != 1.0 && axis.config.directionSign != -1.0)) {
                 RCLCPP_ERROR(get_logger(), "Invalid scale/direction for joint '%s'.", axis.config.name.c_str());
+                return false;
+            }
+            try {
+                can_driver::validatePpDefaultVelocities(axis.config);
+            } catch (const std::exception &error) {
+                RCLCPP_ERROR(get_logger(), "Invalid PP default velocity for joint '%s': %s",
+                             axis.config.name.c_str(), error.what());
                 return false;
             }
             axes_.push_back(std::move(axis));
@@ -235,6 +267,13 @@ private:
                                                          axis.config.dmMasterId);
             }
             if (auto protocol = protocolFor(axis)) {
+                if (auto dm = std::dynamic_pointer_cast<DamiaoCan>(protocol)) {
+                    if (axis.config.controlMode == "position" &&
+                        !dm->setMitGains(axis.config.motorId, axis.config.dmMitKp, axis.config.dmMitKd)) return false;
+                }
+                if (auto pp = std::dynamic_pointer_cast<EyouCan>(protocol)) {
+                    can_driver::applyPpDefaultVelocities(*pp, axis.config);
+                }
                 const auto mode = can_driver::axisControlModeFromString(axis.config.controlMode);
                 const auto target = mode == can_driver::AxisControlMode::Velocity
                                          ? CanProtocol::MotorMode::Velocity
@@ -285,7 +324,9 @@ private:
                 continue;
             }
             axis.stopIssuedOnFault = false;
-            if (!axis.hasDirect || (!debugBypass_ && std::chrono::duration<double>(std::chrono::steady_clock::now() - axis.lastCommand).count() > directTimeoutSec_)) continue;
+            if (!can_driver::directCommandReady(*protocol, axis.config.motorId,
+                    axis.hasDirect, axis.lastCommand, directTimeoutSec_,
+                    std::chrono::steady_clock::now())) continue;
             const auto mode = can_driver::axisControlModeFromString(axis.config.controlMode);
             if (mode == can_driver::AxisControlMode::Velocity) {
                 std::int32_t raw = 0;
@@ -321,12 +362,22 @@ private:
             message.current = protocol->getCurrent(axis.config.motorId);
             message.joint_position = axis.config.pos;
             message.joint_velocity = axis.config.vel;
-            message.mode_valid = true;
-            message.status_valid = true;
-            message.position_valid = true;
-            message.velocity_valid = true;
-            message.current_valid = true;
-            message.feedback_fresh = true;
+            can_driver::SharedDriverState::AxisFeedbackState feedback;
+            const auto shared = deviceManager_->getSharedDriverState();
+            const bool received = shared && shared->getAxisFeedback(
+                can_driver::MakeAxisKey(axis.config.canDevice, axis.config.protocol,
+                                       axis.config.motorId), &feedback);
+            message.mode_valid = received && feedback.modeValid;
+            message.status_valid = received && feedback.enabledValid && feedback.faultValid;
+            message.position_valid = received && feedback.positionValid;
+            message.velocity_valid = received && feedback.velocityValid;
+            message.current_valid = received && feedback.currentValid;
+            // Freshness is separate from whether a field has ever been received.
+            const auto nowNs = can_driver::SharedDriverSteadyNowNs();
+            message.feedback_fresh = received && feedback.feedbackSeen &&
+                feedback.lastRxSteadyNs > 0 && nowNs >= feedback.lastRxSteadyNs &&
+                nowNs - feedback.lastRxSteadyNs <= 500000000;
+            message.mode = message.mode_valid ? msgMode(feedback.mode) : MotorState::MODE_UNKNOWN;
             motorStatesPub_->publish(message);
         }
     }
