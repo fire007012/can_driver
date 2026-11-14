@@ -237,10 +237,11 @@ inline MtRefreshPlan BuildMtRefreshPlan(std::uint64_t cycle,
 
 inline bool NeedsDmKeepalive(const DmAxisRefreshSnapshot &snapshot)
 {
-    if (snapshot.intent == AxisIntent::None) {
-        return false;
-    }
-    return snapshot.intent != AxisIntent::Run;
+    // A DM drive may have a communication-loss timeout configured in its
+    // non-volatile parameters. Keep sending the last velocity command while
+    // the axis is running so a missed controller cycle cannot make the drive
+    // disable itself while the software session is still active.
+    return snapshot.intent != AxisIntent::None;
 }
 
 inline std::chrono::milliseconds DmRefreshPeriod(const DmAxisRefreshSnapshot &snapshot)
@@ -252,6 +253,11 @@ inline std::chrono::milliseconds DmRefreshPeriod(const DmAxisRefreshSnapshot &sn
         snapshot.intent == AxisIntent::Enable ||
         snapshot.intent == AxisIntent::Recover) {
         return std::chrono::milliseconds(50);
+    }
+    if (snapshot.intent == AxisIntent::Run) {
+        // Stay below the shortest field-configured communication timeout while
+        // remaining independent of the controller update rate.
+        return std::chrono::milliseconds(20);
     }
     return std::chrono::milliseconds(100);
 }

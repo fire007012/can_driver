@@ -187,6 +187,8 @@ ros2 service call /can_driver_node/set_zero_limit can_driver/srv/SetZeroLimit "{
   - `docs/电机配置变更指南.md`
   - `docs/达妙履带接入说明.md`
 
+单电机可调速度与自动ID识别脚本覆盖DM、MT、PP、ECB和CANopen，见[电机测试脚本使用说明](../tools/电机测试脚本使用说明.md)。支持只读扫描、指定目标及离线配置预览。
+
 DM 速度模式的单位、初始化读回、反馈路由、命令超时及验收边界见 [DM速度控制说明](docs/DM速度控制说明.md)。
 
 PP 的每轴 `pp_position_default_velocity` 和 `pp_csp_default_velocity` 同时支持

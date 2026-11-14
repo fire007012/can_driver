@@ -186,7 +186,7 @@ TEST(RefreshSchedulerTest, PpPressureSchedulingStateStaysIndependentPerAxis)
     EXPECT_FALSE(planContains(planB2, can_driver::PpRefreshQuery::Enable));
 }
 
-TEST(RefreshSchedulerTest, DmRunIntentDoesNotScheduleKeepalive)
+TEST(RefreshSchedulerTest, DmRunIntentSchedulesFastKeepalive)
 {
     can_driver::DmAxisRefreshSnapshot snapshot;
     snapshot.feedbackSeen = true;
@@ -197,8 +197,16 @@ TEST(RefreshSchedulerTest, DmRunIntentDoesNotScheduleKeepalive)
     const auto now = steady_tp {} + std::chrono::milliseconds(1);
     const auto plan = can_driver::BuildDmRefreshPlan(now, snapshot, &state);
 
-    EXPECT_EQ(plan.count, 0u);
-    EXPECT_FALSE(can_driver::NeedsDmKeepalive(snapshot));
+    ASSERT_EQ(plan.count, 1u);
+    EXPECT_EQ(plan.items[0], can_driver::DmRefreshQuery::Keepalive);
+    EXPECT_TRUE(can_driver::NeedsDmKeepalive(snapshot));
+    can_driver::NoteDmRefreshQueryIssued(now, &state, plan.items[0]);
+    EXPECT_EQ(can_driver::BuildDmRefreshPlan(
+                  now + std::chrono::milliseconds(19), snapshot, &state).count,
+              0u);
+    EXPECT_EQ(can_driver::BuildDmRefreshPlan(
+                  now + std::chrono::milliseconds(20), snapshot, &state).count,
+              1u);
 }
 
 TEST(RefreshSchedulerTest, DmEnableIntentSchedules50MsKeepaliveCadence)

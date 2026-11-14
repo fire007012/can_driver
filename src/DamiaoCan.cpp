@@ -40,6 +40,7 @@ constexpr std::uint32_t kDamiaoVelocityModeValue = 3u;
 //
 // 这个缩放只存在于驱动内部，不等同于编码器脉冲，也不包含减速比语义。
 constexpr double kDamiaoProtocolScale = 1e-4;
+constexpr auto kDamiaoKeepaliveMaxPeriod = std::chrono::milliseconds(20);
 const auto kDamiaoRegisterAckTimeout = std::chrono::milliseconds(500);
 const auto kDamiaoFeedbackStateTimeout = std::chrono::milliseconds(100);
 const auto kDamiaoConfigStepDelay = std::chrono::milliseconds(50);
@@ -930,9 +931,14 @@ std::chrono::milliseconds DamiaoCan::computeRefreshSleep(std::size_t motorCount)
     const auto hz = refreshRateHz_.load(std::memory_order_relaxed);
     if (std::isfinite(hz) && hz > 0.0) {
         const auto intervalMs = static_cast<int64_t>(std::llround(1000.0 / hz));
-        return std::chrono::milliseconds(std::max<int64_t>(1, intervalMs));
+        // The configured rate is also used for status polling, but it must not
+        // make a running DM axis miss its communication-loss deadline. The
+        // scheduler may only emit a keepalive when the worker wakes up.
+        return std::min(kDamiaoKeepaliveMaxPeriod,
+                        std::chrono::milliseconds(std::max<int64_t>(1, intervalMs)));
     }
 
     const auto intervalMs = static_cast<int64_t>(std::max<std::size_t>(10, motorCount * 10));
-    return std::chrono::milliseconds(intervalMs);
+    return std::min(kDamiaoKeepaliveMaxPeriod,
+                    std::chrono::milliseconds(intervalMs));
 }
