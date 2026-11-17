@@ -401,11 +401,14 @@ hardware_interface::return_type CanDriverSystem::read(const rclcpp::Time &, cons
             SharedDriverState::AxisFeedbackState feedback;
             const SharedDriverState::AxisKey key{axis.config.canDevice, axis.config.protocol,
                 NormalizeProtocolMotorId(axis.config.motorId)};
-            const auto now = SharedDriverSteadyNowNs();
             const bool sample = deviceManager_->getSharedDriverState()->getAxisFeedback(key, &feedback) &&
                 feedback.feedbackSeen && feedback.positionValid && feedback.velocityValid &&
                 std::isfinite(rawPositionToJointPosition(axis.config,feedback.position)) &&
                 std::isfinite(feedback.velocity * effectiveVelocityScale(axis.config));
+            // Timestamp the observation after copying the mutex-protected snapshot.
+            // Otherwise RX can publish between now() and getAxisFeedback(), making
+            // genuinely fresh feedback look future-dated and faulting the group.
+            const auto now = SharedDriverSteadyNowNs();
             const bool valid = sample && feedback.feedbackSteadyNs[0] > 0 && feedback.feedbackSteadyNs[1] > 0 &&
                 feedback.feedbackSteadyNs[0] <= now && feedback.feedbackSteadyNs[1] <= now &&
                 now-feedback.feedbackSteadyNs[0] < axis.fieldLimits[0].stop_ns &&
