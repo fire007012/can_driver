@@ -6,4 +6,4 @@
 
 ROS2 协议/分组单测与模拟双后端整链已通过；实际 CAN 的身份/方向/量纲、PP/CSP、DM/MT/ECB、限位/恢复、模式与真实停止行为待现场确认。当前软件工作树有配套未提交补丁，发布必须记录父仓库与两个驱动的匹配版本。
 
-完整架构与实机操作见 [项目文档](../../docs/README.md)、[硬件入口](../../robot_hardware/README.md) 和 [现场验收](../../docs/28_CANopen软件交付与实机验收.md)。
+完整架构与实机操作见 [项目文档](../../docs/README.md)、[硬件入口](../../robot_hardware/README.md) 和 [现场验收](../../docs/archive/28_CANopen软件交付与实机验收.md)。
