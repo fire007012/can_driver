@@ -12,7 +12,7 @@ export CAN_DRIVER_CONFIG="${CAN_DRIVER_CONFIG:-${SCRIPT_DIR}/../config/can_drive
 
 NS="${NS:-/can_driver_node}"
 MOTOR_ID="${MOTOR_ID:-22}"
-CAN_DEV="${CAN_DEV:-canable0}"
+CAN_DEV="${CAN_DEV:-can0}"
 JOINT_NAME="${JOINT_NAME:-rotary_table}"
 MOTOR_CAN_HEX="$(printf "%03X" "$MOTOR_ID")"
 

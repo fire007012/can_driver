@@ -11,7 +11,7 @@ source "${SCRIPT_DIR}/ros2_cli_helpers.sh"
 
 MOTOR_ID=22
 JOINT_NAME="rotary_table"
-CAN_DEV="canable0"
+CAN_DEV="can0"
 NS="/can_driver_node"
 MOTOR_CAN_HEX="$(printf '%03X' "$MOTOR_ID")"
 APPLY_LIMIT_PRESET="${APPLY_LIMIT_PRESET:-0}"

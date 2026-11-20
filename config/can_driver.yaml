@@ -93,7 +93,7 @@ can_driver_node:
     # - name: shoulder_pitch_joint  # 大臂俯仰（第 2 轴）
     #   motor_id: 0x05
     #   protocol: PP
-    #   can_device: canable0
+    #   can_device: can0
     #   control_mode: csp
     #   position_scale: 65536  # 16-bit 编码器，PPR → 驱动自动换算为 2π/65536 rad/count
     #   velocity_scale: 65536
@@ -105,7 +105,7 @@ can_driver_node:
     - name: elbow_pitch_joint   # 小臂俯仰（第 3 轴）
       motor_id: 0x13
       protocol: PP
-      can_device: canable1
+      can_device: can0
       control_mode: csp
       position_scale: 65536  # 16-bit 编码器，PPR → 驱动自动换算为 2π/65536 rad/count
       velocity_scale: 65536
@@ -119,7 +119,7 @@ can_driver_node:
     - name: wrist_pitch_joint    # 腕部俯仰（第 4 轴）
       motor_id: 0x14
       protocol: PP
-      can_device: canable1
+      can_device: can0
       control_mode: csp
       position_scale: 65536  # 16-bit 编码器，PPR → 驱动自动换算为 2π/65536 rad/count
       velocity_scale: 65536
@@ -131,7 +131,7 @@ can_driver_node:
     - name: wrist_roll_joint     # 腕部滚转（第 5 轴）
       motor_id: 0x16
       protocol: PP
-      can_device: canable1
+      can_device: can0
       control_mode: csp
       position_scale: 65536  # 16-bit 编码器，PPR → 驱动自动换算为 2π/65536 rad/count
       velocity_scale: 65536
@@ -139,7 +139,7 @@ can_driver_node:
     - name: wrist_yaw_joint      # 腕部偏航（第 6 轴）
       motor_id: 0x15
       protocol: PP
-      can_device: canable1
+      can_device: can0
       control_mode: csp
       position_scale: 65536  # 16-bit 编码器，PPR → 驱动自动换算为 2π/65536 rad/count
       velocity_scale: 65536
@@ -148,7 +148,7 @@ can_driver_node:
     - name: left_gripper_finger_joint  # 左夹爪（第 7 轴）
       motor_id: 0x17
       protocol: PP
-      can_device: canable1
+      can_device: can0
       control_mode: csp
       # 夹爪在 URDF/MoveIt 中是 prismatic，命令单位是 m。
       # 这里不能填 65536；应填写 raw * scale = m。
@@ -174,7 +174,7 @@ can_driver_node:
       motor_id: 0x07
       master_id: 0x08  # 可选：填写电机当前反馈使用的 Master ID；默认 0x000
       protocol: DM
-      can_device: canable1
+      can_device: can0
       control_mode: velocity
       direction_sign: 1.0
 
@@ -182,7 +182,7 @@ can_driver_node:
       motor_id: 0x05
       master_id: 0x06  # 驱动只按此 ID 接收反馈，不会改写电机寄存器
       protocol: DM
-      can_device: canable1
+      can_device: can0
       control_mode: velocity
       direction_sign: -1.0
 

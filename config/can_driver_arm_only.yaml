@@ -22,7 +22,7 @@ can_driver_node:
     - name: elbow_pitch_joint
       motor_id: 0x13
       protocol: PP
-      can_device: canable1
+      can_device: can0
       control_mode: csp
       position_scale: 65536
       velocity_scale: 65536
@@ -35,7 +35,7 @@ can_driver_node:
     - name: wrist_pitch_joint
       motor_id: 0x14
       protocol: PP
-      can_device: canable1
+      can_device: can0
       control_mode: csp
       position_scale: 65536
       velocity_scale: 65536
@@ -47,7 +47,7 @@ can_driver_node:
     - name: wrist_roll_joint
       motor_id: 0x16
       protocol: PP
-      can_device: canable1
+      can_device: can0
       control_mode: csp
       position_scale: 65536
       velocity_scale: 65536
@@ -55,7 +55,7 @@ can_driver_node:
     - name: wrist_yaw_joint
       motor_id: 0x15
       protocol: PP
-      can_device: canable1
+      can_device: can0
       control_mode: csp
       position_scale: 65536
       velocity_scale: 65536
@@ -64,7 +64,7 @@ can_driver_node:
     - name: left_gripper_finger_joint
       motor_id: 0x17
       protocol: PP
-      can_device: canable1
+      can_device: can0
       control_mode: csp
       # 夹爪是 prismatic 关节，上层单位是 m；这里不能填 65536
       # （65536 会被解析为 2π/65536 rad/count）。

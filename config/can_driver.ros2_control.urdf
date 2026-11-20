@@ -12,7 +12,7 @@
       <state_interface name="effort"/>
       <param name="motor_id">0x13</param>
       <param name="protocol">PP</param>
-      <param name="can_device">canable1</param>
+      <param name="can_device">can0</param>
       <param name="control_mode">csp</param>
       <param name="position_scale">65536</param>
       <param name="velocity_scale">65536</param>
@@ -25,7 +25,7 @@
       <state_interface name="effort"/>
       <param name="motor_id">0x14</param>
       <param name="protocol">PP</param>
-      <param name="can_device">canable1</param>
+      <param name="can_device">can0</param>
       <param name="control_mode">csp</param>
       <param name="position_scale">65536</param>
       <param name="velocity_scale">65536</param>
@@ -37,7 +37,7 @@
       <state_interface name="effort"/>
       <param name="motor_id">0x16</param>
       <param name="protocol">PP</param>
-      <param name="can_device">canable1</param>
+      <param name="can_device">can0</param>
       <param name="control_mode">csp</param>
       <param name="position_scale">65536</param>
       <param name="velocity_scale">65536</param>
@@ -49,7 +49,7 @@
       <state_interface name="effort"/>
       <param name="motor_id">0x15</param>
       <param name="protocol">PP</param>
-      <param name="can_device">canable1</param>
+      <param name="can_device">can0</param>
       <param name="control_mode">csp</param>
       <param name="position_scale">65536</param>
       <param name="velocity_scale">65536</param>
@@ -62,7 +62,7 @@
       <state_interface name="effort"/>
       <param name="motor_id">0x17</param>
       <param name="protocol">PP</param>
-      <param name="can_device">canable1</param>
+      <param name="can_device">can0</param>
       <param name="control_mode">csp</param>
       <param name="position_scale">0.0000017807297172304439</param>
       <param name="velocity_scale">0.0000017807297172304439</param>
@@ -75,7 +75,7 @@
       <param name="motor_id">0x07</param>
       <param name="master_id">0x08</param>
       <param name="protocol">DM</param>
-      <param name="can_device">canable1</param>
+      <param name="can_device">can0</param>
       <param name="control_mode">velocity</param>
     </joint>
     <joint name="right_front_wheel_joint">
@@ -86,7 +86,7 @@
       <param name="motor_id">0x05</param>
       <param name="master_id">0x06</param>
       <param name="protocol">DM</param>
-      <param name="can_device">canable1</param>
+      <param name="can_device">can0</param>
       <param name="control_mode">velocity</param>
       <param name="direction_sign">-1.0</param>
     </joint>
