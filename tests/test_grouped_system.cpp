@@ -261,3 +261,13 @@ TEST_F(DmConfiguration, PpSystemConfigurePassesSiDefaultsToBackend) {
   EXPECT_EQ(raw,std::string(mode)=="position"?10430u:5215u);
  }
 }
+TEST_F(GroupedSystem, FailedModeSwitchLeavesFirstAxisUnclaimed) {
+ prepare("base");
+ const int stops_before = manager->protocol->stops[1];
+ // Stop an unrelated/missing condition on axis 2 by unpreparing only right_front_wheel_joint via invalid interface.
+ EXPECT_EQ(system.perform_command_mode_switch(
+   {"left_front_wheel_joint/velocity", "right_front_wheel_joint/position"}, {}), R::ERROR);
+ EXPECT_EQ(manager->protocol->stops[1], stops_before);
+ ASSERT_EQ(system.perform_command_mode_switch(
+   {"left_front_wheel_joint/velocity", "right_front_wheel_joint/velocity"}, {}), R::OK);
+}

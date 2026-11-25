@@ -584,25 +584,44 @@ bool CanDriverSystem::fail(const std::string &reason)
 hardware_interface::return_type CanDriverSystem::perform_command_mode_switch(
     const std::vector<std::string> &start, const std::vector<std::string> &stop)
 {
-    for (auto &axis : axes_) {
-        const auto interface = axis.config.name + "/" +
+    const std::size_t n = axes_.size();
+    std::vector<bool> will_start(n, false), will_stop(n, false);
+    // Phase 1: pre-validate every axis before mutating any claim or session.
+    for (std::size_t i = 0; i < n; ++i) {
+        const auto & axis = axes_[i];
+        const auto expected = axis.config.name + "/" +
           (axisControlModeFromString(axis.config.controlMode) == AxisControlMode::Velocity ? "velocity" : "position");
-        if (std::find(stop.begin(), stop.end(), interface) != stop.end()) {
+        std::size_t start_matches = 0;
+        for (const auto & item : start) {
+            if (item == expected) { ++start_matches; will_start[i] = true; }
+            else if (item.rfind(axis.config.name + "/", 0) == 0) return hardware_interface::return_type::ERROR;
+        }
+        if (start_matches > 1) return hardware_interface::return_type::ERROR;
+        for (const auto & item : stop) {
+            if (item == expected) will_stop[i] = true;
+            else if (item.rfind(axis.config.name + "/", 0) == 0) return hardware_interface::return_type::ERROR;
+        }
+        if (will_start[i] && axis.claimed && !will_stop[i]) return hardware_interface::return_type::ERROR;
+        if (grouped_ && will_start[i]) {
+            if (!axis.session.prepared->load() ||
+                safety_->group(axis.session.group).state != robot_safety::Domain::State::Armed)
+                return hardware_interface::return_type::ERROR;
+        }
+    }
+    // Phase 2: apply validated stop/start transitions uniformly.
+    for (std::size_t i = 0; i < n; ++i) {
+        auto & axis = axes_[i];
+        if (will_stop[i]) {
             axis.claimed = false; axis.commandReceived = false;
-            if (grouped_) { axis.session.permission_lost=true;axis.session.prepared->store(false); }
+            if (grouped_) { axis.session.permission_lost = true; axis.session.prepared->store(false); }
             auto protocol = deviceManager_->getProtocol(axis.config.canDevice, axis.config.protocol);
             if (protocol) protocol->Stop(axis.config.motorId);
         }
-        if (std::find(start.begin(), start.end(), interface) != start.end()) {
-            if (grouped_) {
-                if (!axis.session.prepared->load() || safety_->group(axis.session.group).state != robot_safety::Domain::State::Armed)
-                    return hardware_interface::return_type::ERROR;
-                axis.session.epoch = safety_->epoch(axis.session.group);
-            }
+        if (will_start[i]) {
+            if (grouped_) axis.session.epoch = safety_->epoch(axis.session.group);
             axis.claimed = true; axis.commandReceived = false; axis.session.permission_lost = false;
         }
-        if (std::find(stop.begin(), stop.end(), interface) != stop.end() ||
-            std::find(start.begin(), start.end(), interface) != start.end())
+        if (will_stop[i] || will_start[i])
             axis.positionCommand = axis.velocityCommand = std::numeric_limits<double>::quiet_NaN();
     }
     if (safety_) safetyEpoch_ = safety_->epoch();
