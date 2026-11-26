@@ -11,11 +11,19 @@
 #include <algorithm>
 #include <array>
 #include <cctype>
+#include <chrono>
 #include <cstring>
 #include <string>
 #include <vector>
 
 namespace {
+
+std::int64_t steadyNowNs()
+{
+    return std::chrono::duration_cast<std::chrono::nanoseconds>(
+               std::chrono::steady_clock::now().time_since_epoch())
+        .count();
+}
 
 bool isAllDigits(const std::string &s)
 {
@@ -115,6 +123,7 @@ bool UdpCanTransport::parseDeviceSpec(const std::string &deviceSpec,
 bool UdpCanTransport::initialize(const std::string &deviceSpec)
 {
     shutdown();
+    resetStats();
 
     EndpointConfig cfg;
     std::string errMsg;
@@ -189,6 +198,7 @@ void UdpCanTransport::shutdown()
 
     deviceSpec_.clear();
     std::memset(&remoteAddr_, 0, sizeof(remoteAddr_));
+    resetStats();
 }
 
 CanTransport::SendResult UdpCanTransport::send(const CanTransport::Frame &frame)
@@ -212,23 +222,35 @@ CanTransport::SendResult UdpCanTransport::send(const CanTransport::Frame &frame)
     const auto sent = ::sendto(socketFd_,
                                packet.data(),
                                packet.size(),
-                               0,
+                               MSG_DONTWAIT,
                                reinterpret_cast<const sockaddr *>(&remoteAddr_),
                                sizeof(remoteAddr_));
     if (sent == static_cast<ssize_t>(packet.size())) {
+        txOkCount_.fetch_add(1, std::memory_order_relaxed);
         return CanTransport::SendResult::Ok;
     }
 
-    if (errno == EAGAIN || errno == EWOULDBLOCK || errno == ENOBUFS) {
-        return CanTransport::SendResult::Backpressure;
-    }
-    if (errno == ENETDOWN || errno == ENODEV || errno == ENETUNREACH) {
-        return CanTransport::SendResult::LinkDown;
+    if (sent < 0) {
+        const int errorCode = errno;
+        if (errorCode == EAGAIN || errorCode == EWOULDBLOCK || errorCode == ENOBUFS) {
+            txBackpressureCount_.fetch_add(1, std::memory_order_relaxed);
+            return CanTransport::SendResult::Backpressure;
+        }
+        if (errorCode == ENETDOWN || errorCode == ENODEV ||
+            errorCode == ENETUNREACH || errorCode == ENXIO) {
+            txLinkUnavailableCount_.fetch_add(1, std::memory_order_relaxed);
+            lastTxLinkUnavailableSteadyNs_.store(steadyNowNs(), std::memory_order_relaxed);
+            return CanTransport::SendResult::LinkDown;
+        }
+        txErrorCount_.fetch_add(1, std::memory_order_relaxed);
+        ROS_WARN_STREAM_THROTTLE(1.0, "[UdpCanTransport] sendto failed on '" << deviceSpec_
+                                 << "', errno=" << errorCode);
+        return CanTransport::SendResult::Error;
     }
 
-    if (sent != static_cast<ssize_t>(packet.size())) {
-        ROS_WARN_STREAM("[UdpCanTransport] sendto failed on '" << deviceSpec_ << "', errno=" << errno);
-    }
+    txErrorCount_.fetch_add(1, std::memory_order_relaxed);
+    ROS_WARN_STREAM_THROTTLE(1.0, "[UdpCanTransport] partial sendto on '" << deviceSpec_
+                             << "': " << sent << " bytes");
     return CanTransport::SendResult::Error;
 }
 
@@ -262,6 +284,33 @@ bool UdpCanTransport::isReady() const
 std::string UdpCanTransport::device() const
 {
     return deviceSpec_;
+}
+
+UdpCanTransport::Stats UdpCanTransport::snapshotStats() const
+{
+    Stats stats;
+    stats.txOk = txOkCount_.load(std::memory_order_relaxed);
+    stats.txBackpressure = txBackpressureCount_.load(std::memory_order_relaxed);
+    stats.txLinkUnavailable = txLinkUnavailableCount_.load(std::memory_order_relaxed);
+    stats.txError = txErrorCount_.load(std::memory_order_relaxed);
+    stats.rxOk = rxOkCount_.load(std::memory_order_relaxed);
+    stats.rxError = rxErrorCount_.load(std::memory_order_relaxed);
+    stats.lastTxLinkUnavailableSteadyNs =
+        lastTxLinkUnavailableSteadyNs_.load(std::memory_order_relaxed);
+    stats.lastRxSteadyNs = lastRxSteadyNs_.load(std::memory_order_relaxed);
+    return stats;
+}
+
+void UdpCanTransport::resetStats()
+{
+    txOkCount_.store(0, std::memory_order_relaxed);
+    txBackpressureCount_.store(0, std::memory_order_relaxed);
+    txLinkUnavailableCount_.store(0, std::memory_order_relaxed);
+    txErrorCount_.store(0, std::memory_order_relaxed);
+    rxOkCount_.store(0, std::memory_order_relaxed);
+    rxErrorCount_.store(0, std::memory_order_relaxed);
+    lastTxLinkUnavailableSteadyNs_.store(0, std::memory_order_relaxed);
+    lastRxSteadyNs_.store(0, std::memory_order_relaxed);
 }
 
 void UdpCanTransport::receiveLoop()
@@ -300,7 +349,10 @@ void UdpCanTransport::receiveLoop()
                                   0,
                                   reinterpret_cast<sockaddr *>(&senderAddr),
                                   &senderLen);
-        if (n < 5) {
+        if (n < 0) {
+            if (errno != EAGAIN && errno != EWOULDBLOCK && errno != EINTR) {
+                rxErrorCount_.fetch_add(1, std::memory_order_relaxed);
+            }
             continue;
         }
         if (senderLen != sizeof(senderAddr) || senderAddr.sin_family != AF_INET ||
@@ -308,9 +360,14 @@ void UdpCanTransport::receiveLoop()
             senderAddr.sin_addr.s_addr != remoteAddr_.sin_addr.s_addr) {
             continue;
         }
+        if (n < 5) {
+            rxErrorCount_.fetch_add(1, std::memory_order_relaxed);
+            continue;
+        }
 
         const std::uint8_t dlc = rx[0];
         if (dlc > 8 || n < static_cast<ssize_t>(5 + dlc)) {
+            rxErrorCount_.fetch_add(1, std::memory_order_relaxed);
             continue;
         }
 
@@ -324,6 +381,8 @@ void UdpCanTransport::receiveLoop()
             frame.data[i] = rx[5 + i];
         }
 
+        rxOkCount_.fetch_add(1, std::memory_order_relaxed);
+        lastRxSteadyNs_.store(steadyNowNs(), std::memory_order_relaxed);
         dispatchReceive(frame);
     }
 }

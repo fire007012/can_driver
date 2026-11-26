@@ -7,6 +7,7 @@
 
 #include <atomic>
 #include <cstdint>
+#include <functional>
 #include <memory>
 #include <mutex>
 #include <string>
@@ -50,8 +51,11 @@ public:
 
     SendResult send(const CanTransport::Frame &frame) override;
 
+    using ErrorFrameHandler = std::function<void(const struct can_frame &)>;
+
     std::size_t addReceiveHandler(ReceiveHandler handler) override;
     void removeReceiveHandler(std::size_t handlerId) override;
+    void setErrorFrameHandler(ErrorFrameHandler handler);
 
     bool isReady() const;
     std::string device() const;
@@ -59,6 +63,7 @@ public:
 
 private:
     void receiveLoop();
+    void handleReceivedFrame(const struct can_frame &rxFrame);
     void dispatchReceive(const CanTransport::Frame &frame);
     struct can_frame toLinuxCanFrame(const CanTransport::Frame &frame) const;
     CanTransport::Frame fromLinuxCanFrame(const struct can_frame &frame) const;
@@ -82,6 +87,7 @@ private:
     std::atomic<std::int64_t> lastTxLinkUnavailableSteadyNs_{0};
     std::atomic<std::int64_t> lastRxSteadyNs_{0};
     std::unordered_map<std::size_t, ReceiveHandler> handlers_;
+    ErrorFrameHandler errorFrameHandler_;
     mutable std::mutex handlerMutex_;
     std::thread receiveThread_;
     int socketFd_{-1};

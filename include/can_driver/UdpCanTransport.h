@@ -22,6 +22,17 @@
  */
 class UdpCanTransport : public CanTransport {
 public:
+    struct Stats {
+        std::uint64_t txOk{0};
+        std::uint64_t txBackpressure{0};
+        std::uint64_t txLinkUnavailable{0};
+        std::uint64_t txError{0};
+        std::uint64_t rxOk{0};
+        std::uint64_t rxError{0};
+        std::int64_t lastTxLinkUnavailableSteadyNs{0};
+        std::int64_t lastRxSteadyNs{0};
+    };
+
     UdpCanTransport();
     ~UdpCanTransport() override;
 
@@ -35,6 +46,7 @@ public:
 
     bool isReady() const;
     std::string device() const;
+    Stats snapshotStats() const;
 
 private:
     struct EndpointConfig {
@@ -47,10 +59,19 @@ private:
     bool parseDeviceSpec(const std::string &deviceSpec, EndpointConfig &cfg, std::string &errMsg) const;
     void receiveLoop();
     void dispatchReceive(const CanTransport::Frame &frame);
+    void resetStats();
 
     std::atomic<bool> initialized_{false};
     std::atomic<bool> stopRequested_{false};
     std::atomic<std::size_t> nextHandlerId_{1};
+    std::atomic<std::uint64_t> txOkCount_{0};
+    std::atomic<std::uint64_t> txBackpressureCount_{0};
+    std::atomic<std::uint64_t> txLinkUnavailableCount_{0};
+    std::atomic<std::uint64_t> txErrorCount_{0};
+    std::atomic<std::uint64_t> rxOkCount_{0};
+    std::atomic<std::uint64_t> rxErrorCount_{0};
+    std::atomic<std::int64_t> lastTxLinkUnavailableSteadyNs_{0};
+    std::atomic<std::int64_t> lastRxSteadyNs_{0};
     std::unordered_map<std::size_t, ReceiveHandler> handlers_;
     mutable std::mutex handlerMutex_;
 

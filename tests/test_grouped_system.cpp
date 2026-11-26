@@ -271,3 +271,27 @@ TEST_F(GroupedSystem, FailedModeSwitchLeavesFirstAxisUnclaimed) {
  ASSERT_EQ(system.perform_command_mode_switch(
    {"left_front_wheel_joint/velocity", "right_front_wheel_joint/velocity"}, {}), R::OK);
 }
+TEST_F(GroupedSystem, SharedTransportRxErrorAndLinkDownFaultSharedGroups) {
+ start(); auto writes = manager->protocol->writes[3];
+ manager->state->mutateDeviceHealth("test", [](auto h){ ++h->rxError; }); cycle();
+ EXPECT_EQ(d->group("base").state, robot_safety::Domain::State::Fault);
+ EXPECT_EQ(d->group("gripper").state, robot_safety::Domain::State::Fault);
+ EXPECT_EQ(manager->protocol->writes[3], writes);
+}
+TEST_F(GroupedSystem, SharedTransportLinkDownFaultsSharedGroups) {
+ start(); auto flippers = d->epoch("flippers");
+ manager->state->mutateDeviceHealth("test", [](auto h){ ++h->txLinkUnavailable; }); cycle();
+ EXPECT_EQ(d->group("base").state, robot_safety::Domain::State::Fault);
+ EXPECT_EQ(d->group("gripper").state, robot_safety::Domain::State::Fault);
+ EXPECT_EQ(d->epoch("flippers"), flippers);
+}
+TEST_F(GroupedSystem, SharedTransportBackpressureToleratesTransientAndFaultsWhenSustained) {
+ start(); auto epoch = d->epoch("base");
+ manager->state->mutateDeviceHealth("test", [](auto h){ ++h->txBackpressure; }); cycle();
+ EXPECT_TRUE(d->permits("base", epoch));
+ for (int i = 0; i < 4; ++i) {
+  manager->state->mutateDeviceHealth("test", [](auto h){ ++h->txBackpressure; });
+  cycle();
+ }
+ EXPECT_EQ(d->group("base").state, robot_safety::Domain::State::Fault);
+}

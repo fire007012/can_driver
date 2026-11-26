@@ -95,8 +95,16 @@ private:
     std::vector<Axis> axes_;
     std::vector<std::string> stateInterfaceNames_;
     std::vector<std::string> commandInterfaceNames_;
+    struct ChannelErrorBaseline {
+        std::uint64_t txError{0};
+        std::uint64_t txLinkUnavailable{0};
+        std::uint64_t rxError{0};
+        std::uint64_t txBackpressure{0};
+        std::uint32_t consecutiveBackpressureCycles{0};
+    };
+
     bool devicesInitialized_{false};
-    std::map<std::string,uint64_t> transportErrors_;
+    std::map<std::string, ChannelErrorBaseline> transportErrors_;
 };
 
 } // namespace can_driver

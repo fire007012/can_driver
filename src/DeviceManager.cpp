@@ -5,6 +5,7 @@
 #include <algorithm>
 #include <chrono>
 #include <cmath>
+#include <linux/can/error.h>
 
 #include "can_driver/ros2_compat.hpp"
 
@@ -169,6 +170,7 @@ bool DeviceManager::initializeTransportLocked(const std::string &device, bool lo
         return false;
     }
 
+    attachTransportHealthCallbacksLocked(device);
     return true;
 }
 
@@ -497,28 +499,89 @@ void DeviceManager::resetDeviceRuntimeLocked(const std::string &device)
     txDispatchers_.erase(device);
 }
 
-void DeviceManager::shutdownDeviceLocked(const std::string &device)
+void DeviceManager::attachTransportHealthCallbacksLocked(const std::string &device)
 {
     const auto socketIt = transports_.find(device);
-    const auto socketTransport =
-        (socketIt != transports_.end()) ? socketIt->second : std::shared_ptr<SocketCanController>();
-    const auto transport = getTransportBaseLocked(device);
-
-    if (sharedState_) {
-        const auto stats = socketTransport ? socketTransport->snapshotStats()
-                                           : SocketCanController::Stats {};
-        sharedState_->mutateDeviceHealth(
-            device,
-            [&stats](can_driver::SharedDriverState::DeviceHealthState *health) {
-                health->transportReady = false;
-                health->txBackpressure = stats.txBackpressure;
-                health->txLinkUnavailable = stats.txLinkUnavailable;
-                health->txError = stats.txError;
-                health->rxError = stats.rxError;
-                health->lastTxLinkUnavailableSteadyNs = stats.lastTxLinkUnavailableSteadyNs;
-                health->lastRxSteadyNs = stats.lastRxSteadyNs;
-            });
+    if (socketIt == transports_.end() || !socketIt->second) {
+        return;
     }
+    std::weak_ptr<can_driver::SharedDriverState> weakState = sharedState_;
+    socketIt->second->setErrorFrameHandler(
+        [weakState, device](const struct can_frame &frame) {
+            const auto state = weakState.lock();
+            if (!state) {
+                return;
+            }
+            const bool busOff = (frame.can_id & CAN_ERR_BUSOFF) != 0U;
+            state->mutateDeviceHealth(
+                device,
+                [busOff](can_driver::SharedDriverState::DeviceHealthState *health) {
+                    ++health->rxError;
+                    if (busOff) {
+                        health->transportReady = false;
+                    }
+                });
+        });
+}
+
+void DeviceManager::syncDeviceHealthLocked(const std::string &device, bool transportReady)
+{
+    if (!sharedState_) {
+        return;
+    }
+
+    std::uint64_t txBackpressure = 0;
+    std::uint64_t txLinkUnavailable = 0;
+    std::uint64_t txError = 0;
+    std::uint64_t rxError = 0;
+    std::int64_t lastTxLinkUnavailableSteadyNs = 0;
+    std::int64_t lastRxSteadyNs = 0;
+
+    const auto socketIt = transports_.find(device);
+    if (socketIt != transports_.end() && socketIt->second) {
+        const auto stats = socketIt->second->snapshotStats();
+        txBackpressure = stats.txBackpressure;
+        txLinkUnavailable = stats.txLinkUnavailable;
+        txError = stats.txError;
+        rxError = stats.rxError;
+        lastTxLinkUnavailableSteadyNs = stats.lastTxLinkUnavailableSteadyNs;
+        lastRxSteadyNs = stats.lastRxSteadyNs;
+    } else {
+        const auto udpIt = udpTransports_.find(device);
+        if (udpIt != udpTransports_.end() && udpIt->second) {
+            const auto stats = udpIt->second->snapshotStats();
+            txBackpressure = stats.txBackpressure;
+            txLinkUnavailable = stats.txLinkUnavailable;
+            txError = stats.txError;
+            rxError = stats.rxError;
+            lastTxLinkUnavailableSteadyNs = stats.lastTxLinkUnavailableSteadyNs;
+            lastRxSteadyNs = stats.lastRxSteadyNs;
+        }
+    }
+
+    sharedState_->mutateDeviceHealth(
+        device,
+        [transportReady,
+         txBackpressure,
+         txLinkUnavailable,
+         txError,
+         rxError,
+         lastTxLinkUnavailableSteadyNs,
+         lastRxSteadyNs](can_driver::SharedDriverState::DeviceHealthState *health) {
+            health->transportReady = transportReady;
+            health->txBackpressure = txBackpressure;
+            health->txLinkUnavailable = txLinkUnavailable;
+            health->txError = txError;
+            health->rxError = rxError;
+            health->lastTxLinkUnavailableSteadyNs = lastTxLinkUnavailableSteadyNs;
+            health->lastRxSteadyNs = lastRxSteadyNs;
+        });
+}
+
+void DeviceManager::shutdownDeviceLocked(const std::string &device)
+{
+    const auto transport = getTransportBaseLocked(device);
+    syncDeviceHealthLocked(device, false);
 
     stopDeviceRefreshWorkerLocked(device);
     if (transport) {
@@ -554,23 +617,7 @@ bool DeviceManager::ensureTransport(const std::string &device, bool loopback)
     auto transport = getTransportBaseLocked(device);
     txDispatchers_[device] = std::make_shared<DeviceRuntime>(transport, device);
     std::static_pointer_cast<DeviceRuntime>(txDispatchers_[device])->setSharedDriverState(sharedState_);
-    if (sharedState_) {
-        const auto socketIt = transports_.find(device);
-        const auto stats = (socketIt != transports_.end() && socketIt->second)
-                               ? socketIt->second->snapshotStats()
-                               : SocketCanController::Stats {};
-        sharedState_->mutateDeviceHealth(
-            device,
-            [&stats](can_driver::SharedDriverState::DeviceHealthState *health) {
-                health->transportReady = true;
-                health->txBackpressure = stats.txBackpressure;
-                health->txLinkUnavailable = stats.txLinkUnavailable;
-                health->txError = stats.txError;
-                health->rxError = stats.rxError;
-                health->lastTxLinkUnavailableSteadyNs = stats.lastTxLinkUnavailableSteadyNs;
-                health->lastRxSteadyNs = stats.lastRxSteadyNs;
-            });
-    }
+    syncDeviceHealthLocked(device, true);
     // 同步创建该设备的命令互斥锁，供上层 write() 串行下发命令使用。
     deviceCmdMutexes_[device] = std::make_shared<std::mutex>();
     ROS_INFO("[CanDriverHW] Opened device '%s'.", device.c_str());
@@ -599,7 +646,9 @@ bool DeviceManager::ensureProtocol(const std::string &device, CanType type)
 
     auto txDispatcherIt = txDispatchers_.find(device);
     if (txDispatcherIt == txDispatchers_.end()) {
-        txDispatchers_[device] = std::make_shared<DeviceRuntime>(transport, device);
+        auto runtime = std::make_shared<DeviceRuntime>(transport, device);
+        runtime->setSharedDriverState(sharedState_);
+        txDispatchers_[device] = std::move(runtime);
         txDispatcherIt = txDispatchers_.find(device);
     }
     auto txDispatcher = txDispatcherIt->second;
@@ -700,21 +749,7 @@ bool DeviceManager::initDevice(const std::string &device,
         for (const auto &entry : motors) {
             sharedState_->registerAxis(device, entry.first, entry.second);
         }
-        const auto socketIt = transports_.find(device);
-        const auto stats = (socketIt != transports_.end() && socketIt->second)
-                               ? socketIt->second->snapshotStats()
-                               : SocketCanController::Stats {};
-        sharedState_->mutateDeviceHealth(
-            device,
-            [&stats](can_driver::SharedDriverState::DeviceHealthState *health) {
-                health->transportReady = true;
-                health->txBackpressure = stats.txBackpressure;
-                health->txLinkUnavailable = stats.txLinkUnavailable;
-                health->txError = stats.txError;
-                health->rxError = stats.rxError;
-                health->lastTxLinkUnavailableSteadyNs = stats.lastTxLinkUnavailableSteadyNs;
-                health->lastRxSteadyNs = stats.lastRxSteadyNs;
-            });
+        syncDeviceHealthLocked(device, true);
     }
 
     // 按协议拆分电机列表，避免不必要地创建协议实例。

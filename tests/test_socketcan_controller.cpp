@@ -2,6 +2,7 @@
 #include <cerrno>
 #include <can_driver/SocketCanController.h>
 #include <linux/can.h>
+#include <linux/can/error.h>
 
 // 通过友元访问私有转换函数，直接验证协议层与 socketcan 帧的互转。
 class SocketCanControllerTestAccessor {
@@ -14,6 +15,7 @@ public:
   static bool isBackpressure(int errorCode){ return SocketCanController::isBackpressureSendError(errorCode); }
   static bool isLinkUnavailable(int errorCode){ return SocketCanController::isLinkUnavailableSendError(errorCode); }
   static SocketCanController::Stats stats(SocketCanController& c){ return c.snapshotStats(); }
+  static void handleFrame(SocketCanController& c, const can_frame& f){ c.handleReceivedFrame(f); }
   static void seedStats(SocketCanController& c){
     c.txOkCount_.store(3);
     c.txBackpressureCount_.store(2);
@@ -106,4 +108,43 @@ TEST(SocketCanController, SendErrorClassificationMatchesNonBlockingPolicy){
   EXPECT_TRUE(SocketCanControllerTestAccessor::isLinkUnavailable(ENODEV));
   EXPECT_TRUE(SocketCanControllerTestAccessor::isLinkUnavailable(ENXIO));
   EXPECT_FALSE(SocketCanControllerTestAccessor::isLinkUnavailable(EBUSY));
+}
+
+TEST(SocketCanController, ErrorFrameIncrementsRxErrorWithoutDataDispatch) {
+  SocketCanController ctrl;
+  std::size_t dataFrames = 0;
+  std::size_t errorFrames = 0;
+  canid_t lastErrId = 0;
+  ctrl.addReceiveHandler([&](const CanTransport::Frame &) { ++dataFrames; });
+  ctrl.setErrorFrameHandler([&](const struct can_frame &frame) {
+    ++errorFrames;
+    lastErrId = frame.can_id;
+  });
+
+  struct can_frame errFrame {};
+  errFrame.can_id = CAN_ERR_FLAG | CAN_ERR_BUSOFF;
+  errFrame.can_dlc = CAN_ERR_DLC;
+  SocketCanControllerTestAccessor::handleFrame(ctrl, errFrame);
+
+  auto stats = SocketCanControllerTestAccessor::stats(ctrl);
+  EXPECT_EQ(stats.rxError, 1u);
+  EXPECT_EQ(stats.rxOk, 0u);
+  EXPECT_EQ(stats.lastRxSteadyNs, 0);
+  EXPECT_EQ(errorFrames, 1u);
+  EXPECT_EQ(lastErrId, errFrame.can_id);
+  EXPECT_EQ(dataFrames, 0u);
+
+  struct can_frame dataFrame {};
+  dataFrame.can_id = 0x141u;
+  dataFrame.can_dlc = 2;
+  dataFrame.data[0] = 0xAA;
+  dataFrame.data[1] = 0x55;
+  SocketCanControllerTestAccessor::handleFrame(ctrl, dataFrame);
+
+  stats = SocketCanControllerTestAccessor::stats(ctrl);
+  EXPECT_EQ(stats.rxError, 1u);
+  EXPECT_EQ(stats.rxOk, 1u);
+  EXPECT_GT(stats.lastRxSteadyNs, 0);
+  EXPECT_EQ(errorFrames, 1u);
+  EXPECT_EQ(dataFrames, 1u);
 }

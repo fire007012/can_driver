@@ -2,6 +2,7 @@
 #include <fcntl.h>
 #include "can_driver/ros2_compat.hpp"
 #include <errno.h>
+#include <linux/can/error.h>
 #include <linux/can/raw.h>
 #include <net/if.h>
 #include <sys/select.h>
@@ -73,6 +74,16 @@ bool SocketCanController::initialize(const std::string &device, bool loopback) {
     ROS_WARN_STREAM("[SocketCanController] Failed to set RECV_OWN_MSGS on " << device << ", errno=" << errno);
   }
 
+  const can_err_mask_t errMask = CAN_ERR_MASK;
+  if (::setsockopt(fd, SOL_CAN_RAW, CAN_RAW_ERR_FILTER, &errMask, sizeof(errMask)) < 0) {
+    ROS_WARN_STREAM("[SocketCanController] Failed to set CAN_RAW_ERR_FILTER on " << device << ", errno=" << errno);
+  }
+
+  const int rcvBufBytes = 256 * 1024;
+  if (::setsockopt(fd, SOL_SOCKET, SO_RCVBUF, &rcvBufBytes, sizeof(rcvBufBytes)) < 0) {
+    ROS_WARN_STREAM("[SocketCanController] Failed to set SO_RCVBUF on " << device << ", errno=" << errno);
+  }
+
   struct sockaddr_can addr {};
   addr.can_family = AF_CAN;
   addr.can_ifindex = static_cast<int>(::if_nametoindex(device.c_str()));
@@ -110,6 +121,7 @@ void SocketCanController::shutdown() {
   {
     std::lock_guard<std::mutex> lock(handlerMutex_);
     handlers_.clear();
+    errorFrameHandler_ = nullptr;
     nextHandlerId_.store(1);
   }
   resetStats();
@@ -261,9 +273,7 @@ void SocketCanController::receiveLoop() {
     struct can_frame rxFrame {};
     const auto n = ::read(socketFd_, &rxFrame, sizeof(rxFrame));
     if (n == static_cast<ssize_t>(sizeof(rxFrame))) {
-      rxOkCount_.fetch_add(1, std::memory_order_relaxed);
-      lastRxSteadyNs_.store(steadyNowNs(), std::memory_order_relaxed);
-      dispatchReceive(fromLinuxCanFrame(rxFrame));
+      handleReceivedFrame(rxFrame);
       continue;
     }
 
@@ -287,6 +297,28 @@ void SocketCanController::receiveLoop() {
   }
 }
 
+void SocketCanController::handleReceivedFrame(const struct can_frame &rxFrame) {
+  if ((rxFrame.can_id & CAN_ERR_FLAG) != 0U) {
+    rxErrorCount_.fetch_add(1, std::memory_order_relaxed);
+    const canid_t errClass = rxFrame.can_id & CAN_ERR_MASK;
+    ROS_WARN_STREAM_THROTTLE(1.0,
+                             "[SocketCanController] CAN error frame on " << deviceName_
+                             << " (err_class=0x" << std::hex << errClass << std::dec << ")");
+    ErrorFrameHandler errHandler;
+    {
+      std::lock_guard<std::mutex> lock(handlerMutex_);
+      errHandler = errorFrameHandler_;
+    }
+    if (errHandler) {
+      errHandler(rxFrame);
+    }
+    return;
+  }
+  rxOkCount_.fetch_add(1, std::memory_order_relaxed);
+  lastRxSteadyNs_.store(steadyNowNs(), std::memory_order_relaxed);
+  dispatchReceive(fromLinuxCanFrame(rxFrame));
+}
+
 std::size_t SocketCanController::addReceiveHandler(ReceiveHandler handler) {
   if (!handler) {
     return 0;
@@ -303,6 +335,11 @@ void SocketCanController::removeReceiveHandler(std::size_t handlerId) {
   }
   std::lock_guard<std::mutex> lock(handlerMutex_);
   handlers_.erase(handlerId);
+}
+
+void SocketCanController::setErrorFrameHandler(ErrorFrameHandler handler) {
+  std::lock_guard<std::mutex> lock(handlerMutex_);
+  errorFrameHandler_ = std::move(handler);
 }
 
 void SocketCanController::dispatchReceive(const CanTransport::Frame &frame) {

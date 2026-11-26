@@ -196,6 +196,21 @@ TEST(UdpCanTransportTest, ReceiveUsesPacketDlcAndIgnoresUnexpectedSender)
     EXPECT_EQ(captured.data[2], 0x33);
     EXPECT_EQ(captured.data[3], 0x00);
 
+    const auto stats = transport.snapshotStats();
+    EXPECT_EQ(stats.rxOk, 1u);
+    EXPECT_EQ(stats.rxError, 0u);
+    EXPECT_GT(stats.lastRxSteadyNs, 0);
+
+    CanTransport::Frame txFrame;
+    txFrame.id = 0x141u;
+    txFrame.dlc = 2;
+    txFrame.data[0] = 0xA1;
+    txFrame.data[1] = 0xB2;
+    EXPECT_EQ(transport.send(txFrame), CanTransport::SendResult::Ok);
+    const auto afterTx = transport.snapshotStats();
+    EXPECT_EQ(afterTx.txOk, 1u);
+    EXPECT_EQ(afterTx.txError, 0u);
+
     transport.shutdown();
     ::close(wrongSenderFd);
     ::close(expectedSenderFd);

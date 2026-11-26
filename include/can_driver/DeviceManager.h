@@ -118,6 +118,8 @@ private:
     void stopDeviceRefreshWorkerLocked(const std::string &device);
     void stopAllDeviceRefreshWorkersLocked();
     void resetDeviceRuntimeLocked(const std::string &device);
+    void attachTransportHealthCallbacksLocked(const std::string &device);
+    void syncDeviceHealthLocked(const std::string &device, bool transportReady);
     void shutdownDeviceLocked(const std::string &device);
     double effectiveRefreshRateHzLocked(const std::string &device) const;
     void applyRefreshRateLocked(const std::string &device, double hz);

@@ -271,6 +271,7 @@ void CanDriverSystem::shutdownDevices()
         deviceManager_->shutdownAll();
     }
     for (auto & axis : axes_) axis.position=axis.velocity=axis.effort=std::numeric_limits<double>::quiet_NaN();
+    transportErrors_.clear();
     devicesInitialized_ = false;
 }
 
@@ -386,12 +387,34 @@ hardware_interface::return_type CanDriverSystem::read(const rclcpp::Time &, cons
             SharedDriverState::DeviceHealthState health;
             const bool ready = deviceManager_->isDeviceReady(channel);
             const bool known = deviceManager_->getSharedDriverState()->getDeviceHealth(channel,&health);
-            const bool newError = known && health.txError > transportErrors_[channel];
-            if (known) transportErrors_[channel] = health.txError;
+            auto & baseline = transportErrors_[channel];
+            const bool newTxError = known && health.txError > baseline.txError;
+            const bool newLinkDown = known && health.txLinkUnavailable > baseline.txLinkUnavailable;
+            const bool newRxError = known && health.rxError > baseline.rxError;
+            bool sustainedBackpressure = false;
+            if (known) {
+                if (health.txBackpressure > baseline.txBackpressure) {
+                    ++baseline.consecutiveBackpressureCycles;
+                } else {
+                    baseline.consecutiveBackpressureCycles = 0;
+                }
+                sustainedBackpressure = baseline.consecutiveBackpressureCycles >= 5 ||
+                    (health.txBackpressure - baseline.txBackpressure) >= 10;
+                baseline.txError = health.txError;
+                baseline.txLinkUnavailable = health.txLinkUnavailable;
+                baseline.rxError = health.rxError;
+                baseline.txBackpressure = health.txBackpressure;
+            }
+            const bool newError = newTxError || newLinkDown || newRxError || sustainedBackpressure;
             if (!ready || !known || !health.transportReady || newError) {
                 failedChannels.insert(channel);
+                const std::string reason = newLinkDown
+                    ? "private CAN link unavailable"
+                    : (newRxError ? "private CAN receive/bus error"
+                                  : (sustainedBackpressure ? "private CAN sustained tx backpressure"
+                                                           : "private CAN shared transport unavailable/error"));
                 for (const auto & axis : axes_) if (axis.config.canDevice == channel)
-                    safety_->reportAxis(axis.config.name,false,"private CAN shared transport unavailable/error");
+                    safety_->reportAxis(axis.config.name, false, reason);
             }
         }
         for (auto & axis : axes_) {
